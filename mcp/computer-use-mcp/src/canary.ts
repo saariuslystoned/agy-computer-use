@@ -4,6 +4,18 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprot
 import { PeekabooImageClient, PeekabooImageClientImpl } from "./peekaboo-client.js";
 import { Logger } from "./logger.js";
 
+const KNOWN_ERROR_CODES = [
+  "CANARY_PEEKABOO_ERROR",
+  "CANARY_CONTENT_INVALID_COUNT",
+  "CANARY_CONTENT_NOT_IMAGE",
+  "CANARY_UNSUPPORTED_MIME",
+  "CANARY_EMPTY_BASE64",
+  "CANARY_MALFORMED_BASE64",
+  "CANARY_SIZE_EXCEEDED",
+  "CANARY_MAGIC_MISMATCH",
+  "CANARY_TIMEOUT"
+];
+
 export function createCanaryServer(imageClient?: PeekabooImageClient): Server {
   const client = imageClient ?? new PeekabooImageClientImpl();
 
@@ -70,17 +82,7 @@ export function createCanaryServer(imageClient?: PeekabooImageClient): Server {
       // Bounded stable error message only; never log raw base64 or child output
       Logger.error(`Canary capture failed: ${errMsg}`);
 
-      const stableCode = [
-        "CANARY_PEEKABOO_ERROR",
-        "CANARY_CONTENT_INVALID_COUNT",
-        "CANARY_CONTENT_NOT_IMAGE",
-        "CANARY_UNSUPPORTED_MIME",
-        "CANARY_EMPTY_BASE64",
-        "CANARY_MALFORMED_BASE64",
-        "CANARY_SIZE_EXCEEDED",
-        "CANARY_MAGIC_MISMATCH",
-        "CANARY_TIMEOUT"
-      ].includes(errMsg) ? errMsg : "CANARY_CAPTURE_FAILED";
+      const stableCode = KNOWN_ERROR_CODES.find((code) => errMsg.includes(code)) ?? "CANARY_CAPTURE_FAILED";
 
       return {
         isError: true,

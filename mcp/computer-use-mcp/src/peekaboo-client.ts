@@ -65,7 +65,7 @@ export function parseAndValidateRawImageResponse(raw: unknown): PeekabooCanaryRe
     throw new Error("CANARY_EMPTY_BASE64");
   }
 
-  const cleanData = data.trim();
+  const cleanData = data.replace(/[\r\n\s]/g, "");
   const base64Regex = /^[A-Za-z0-9+/=]+$/;
   if (!base64Regex.test(cleanData)) {
     throw new Error("CANARY_MALFORMED_BASE64");
@@ -131,9 +131,14 @@ export class StdioPeekabooMcpRawClient implements PeekabooMcpRawClient {
   }
 
   public async callImageTool(): Promise<unknown> {
+    const envObj = Object.fromEntries(
+      Object.entries(process.env).filter(([_, v]) => v !== undefined)
+    ) as Record<string, string>;
+
     const transport = new StdioClientTransport({
       command: this.peekabooBin,
       args: ["mcp", "serve"],
+      env: envObj,
       stderr: "ignore" // Prevent stdio pipe deadlocks
     });
 
