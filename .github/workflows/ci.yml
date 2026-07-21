@@ -19,7 +19,7 @@ jobs:
       - name: Build and Run Swift Host Unit & Integration Tests
         run: |
           cd apps/computer-use-host
-          swift run ComputerUseHostTests
+          swift test
 
   node-tests:
     name: TypeScript MCP Server Tests
@@ -33,7 +33,7 @@ jobs:
           version: 10.33.0
 
       - name: Set up Node.js 22
-        uses: settings/setup-node@v4
+        uses: actions/setup-node@v4
         with:
           node-version: "22.23.1"
           cache: "pnpm"

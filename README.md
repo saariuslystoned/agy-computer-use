@@ -57,7 +57,7 @@ flowchart TD
 
 2. **Precision Control Suite & Preconditions**:
    - **Supported Actions**: Click, double-click, move, drag, type, keyboard shortcuts, scroll.
-   - **Mutation Safety**: Actions require prior capture/topology freshness validation, serialize input events, and enforce held-input release.
+   - **Mutation Safety**: Actions require prior capture/topology freshness validation (`capture_id`, `topology_version`, non-whitespace `intent` max 200 chars), serialize input events, and enforce held-input release.
 
 3. **Multi-Monitor & Coordinate Authority**:
    - The native Swift host is the single source of truth for display topology and coordinate transformation across primary/secondary displays with negative origins.
@@ -96,17 +96,17 @@ agy-computer-use/
 
 The MCP server exposes the following tools to Gemini 3.6 Flash / Antigravity:
 
-| Tool Name | Parameters | Description |
+| Tool Name | Required Parameters | Description |
 |---|---|---|
 | `computer_use_status` | None | Returns host connectivity, active display topology, and TCC permission state. |
 | `computer_use_observe` | `display_id?` | Captures current desktop display screenshot and metadata. |
 | `computer_use_ax_tree` | `max_depth?`, `app_id?` | Returns bounded macOS Accessibility element graph with redacted sensitive inputs. |
-| `computer_use_click` | `x`, `y`, `button?`, `click_count?`, `capture_id` | Moves cursor and performs click at specified 0...999 coordinates. |
-| `computer_use_move` | `x`, `y`, `capture_id` | Moves mouse cursor to 0...999 coordinates. |
-| `computer_use_drag` | `start_x`, `start_y`, `end_x`, `end_y`, `capture_id` | Performs drag and drop action. |
-| `computer_use_type` | `text`, `capture_id` | Types text string into active focused element. |
-| `computer_use_shortcut` | `keys` (e.g. `["command", "c"]`), `capture_id` | Triggers keyboard shortcut combination. |
-| `computer_use_scroll` | `x`, `y`, `delta_x`, `delta_y`, `capture_id` | Scrolls container at target 0...999 location. |
+| `computer_use_click` | `x`, `y`, `capture_id`, `topology_version`, `intent` | Moves cursor and performs click at specified 0...999 coordinates. |
+| `computer_use_move` | `x`, `y`, `capture_id`, `topology_version`, `intent` | Moves mouse cursor to 0...999 coordinates. |
+| `computer_use_drag` | `start_x`, `start_y`, `end_x`, `end_y`, `capture_id`, `topology_version`, `intent` | Performs drag and drop action. |
+| `computer_use_type` | `text`, `capture_id`, `topology_version`, `intent` | Types text string into active focused element (`press_enter?` option supported). |
+| `computer_use_shortcut` | `keys`, `capture_id`, `topology_version`, `intent` | Triggers keyboard shortcut combination. |
+| `computer_use_scroll` | `x`, `y`, `capture_id`, `topology_version`, `intent` | Scrolls container at target 0...999 location (`direction?` helper option supported). |
 
 ---
 
@@ -126,5 +126,5 @@ The MCP server exposes the following tools to Gemini 3.6 Flash / Antigravity:
   ```
 - **TypeScript MCP Tests**:
   ```bash
-  cd mcp/computer-use-mcp && pnpm install && pnpm test
+  cd mcp/computer-use-mcp && pnpm check && pnpm test
   ```

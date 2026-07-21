@@ -11,10 +11,6 @@ let package = Package(
             name: "ComputerUseHost",
             targets: ["ComputerUseHost"]
         ),
-        .executable(
-            name: "ComputerUseHostTests",
-            targets: ["ComputerUseHostTests"]
-        ),
         .library(
             name: "ComputerUseHostLib",
             targets: ["ComputerUseHostLib"]
@@ -29,10 +25,9 @@ let package = Package(
             name: "ComputerUseHost",
             dependencies: ["ComputerUseHostLib"]
         ),
-        .executableTarget(
+        .testTarget(
             name: "ComputerUseHostTests",
-            dependencies: ["ComputerUseHostLib"],
-            path: "Tests/ComputerUseHostTests"
+            dependencies: ["ComputerUseHostLib"]
         )
     ]
 )

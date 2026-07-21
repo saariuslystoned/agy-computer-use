@@ -181,14 +181,18 @@ public class SocketListener {
             throw ComputerUseError.permissionDenied(permission: "Peer UID \(peuid) does not match host UID \(getuid())")
         }
 
-        // Read length-prefixed request
+        // Read length-prefixed request header with EINTR retry handling
         var headerBuf = [UInt8](repeating: 0, count: 4)
         var headerRead = 0
         while headerRead < 4 {
             let n = headerBuf.withUnsafeMutableBufferPointer { bPtr in
                 read(clientFd, bPtr.baseAddress! + headerRead, 4 - headerRead)
             }
-            if n <= 0 { break }
+            if n < 0 {
+                if errno == EINTR { continue }
+                throw ComputerUseError.ipcError(reason: "Socket header read error: \(String(cString: strerror(errno)))")
+            }
+            if n == 0 { break }
             headerRead += n
         }
 
@@ -201,13 +205,18 @@ public class SocketListener {
             throw ComputerUseError.ipcError(reason: "Invalid payload length \(payloadLen)")
         }
 
+        // Read payload bytes with EINTR retry handling
         var payloadBuf = [UInt8](repeating: 0, count: payloadLen)
         var totalRead = 0
         while totalRead < payloadLen {
             let bytesRead = payloadBuf.withUnsafeMutableBufferPointer { bPtr in
                 read(clientFd, bPtr.baseAddress! + totalRead, payloadLen - totalRead)
             }
-            if bytesRead <= 0 { break }
+            if bytesRead < 0 {
+                if errno == EINTR { continue }
+                throw ComputerUseError.ipcError(reason: "Socket payload read error: \(String(cString: strerror(errno)))")
+            }
+            if bytesRead == 0 { break }
             totalRead += bytesRead
         }
 

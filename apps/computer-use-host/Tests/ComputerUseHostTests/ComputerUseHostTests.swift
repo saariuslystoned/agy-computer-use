@@ -1,8 +1,17 @@
 import Foundation
 @testable import ComputerUseHostLib
 
-@main
-struct ComputerUseHostTestsMain {
+#if canImport(XCTest)
+import XCTest
+
+final class ComputerUseHostTests: XCTestCase {
+    func testHostSuite() async throws {
+        try await ComputerUseHostTestRunner.runAll()
+    }
+}
+#endif
+
+public struct ComputerUseHostTestRunner {
     private static func assertTrue(_ condition: Bool, _ message: String = "", file: String = #file, line: Int = #line) {
         if !condition {
             fputs("[FAIL] \(message) at \(file):\(line)\n", stderr)
@@ -17,7 +26,7 @@ struct ComputerUseHostTestsMain {
         }
     }
 
-    static func main() async throws {
+    public static func runAll() async throws {
         fputs("[TEST] Running Swift Host Unit & Integration Tests...\n", stderr)
 
         // 1. Framing tests
@@ -40,7 +49,7 @@ struct ComputerUseHostTestsMain {
         let decComplete = try LengthPrefixedFramer.decode(from: &partialBuffer)
         assertTrue(decComplete != nil, "Complete reassembled buffer must decode successfully")
 
-        // 3. Oversized header test
+        // 3. Oversized header test (>16MB)
         var oversized = Data([0x01, 0x00, 0x00, 0x01]) // 16MB + 1 byte
         oversized.append(Data([0x00]))
         var threwOversized = false

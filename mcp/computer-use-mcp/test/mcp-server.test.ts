@@ -6,7 +6,7 @@ import * as net from "net";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createComputerUseServer } from "../src/index.js";
-import { MockHostClient, UnixSocketHostClient } from "../src/host-client.js";
+import { MockHostClient, UnixSocketHostClient, IPCResponseSchema } from "../src/host-client.js";
 
 function getRecursiveFiles(dir: string): string[] {
   let results: string[] = [];
@@ -44,6 +44,16 @@ describe("Computer Use MCP Server & HostClient Test Suite", () => {
     const toolsResult = await client.listTools();
     assert.ok(toolsResult.tools);
     assert.equal(toolsResult.tools.length, 9);
+
+    // Verify all 6 action tools publish maxLength: 200 on intent in inputSchema
+    const actionTools = ["computer_use_click", "computer_use_move", "computer_use_drag", "computer_use_type", "computer_use_shortcut", "computer_use_scroll"];
+    for (const toolName of actionTools) {
+      const tool = toolsResult.tools.find(t => t.name === toolName);
+      assert.ok(tool, `Tool ${toolName} must be listed`);
+      const intentProp = (tool.inputSchema.properties as any).intent;
+      assert.ok(intentProp, `Tool ${toolName} must have intent property`);
+      assert.equal(intentProp.maxLength, 200, `Tool ${toolName} intent property must declare maxLength: 200`);
+    }
 
     // 2. Call observe
     const obsCall = await client.callTool({ name: "computer_use_observe", arguments: {} });
@@ -91,7 +101,7 @@ describe("Computer Use MCP Server & HostClient Test Suite", () => {
     const cap3 = typeMeta.post_action_observation.capture_id;
     assert.ok(cap3);
 
-    // 5. Call scroll action with direction adapter (omitting delta_x / delta_y)
+    // 5. Call scroll action with direction adapter
     const scrollCall = await client.callTool({
       name: "computer_use_scroll",
       arguments: {
@@ -109,6 +119,56 @@ describe("Computer Use MCP Server & HostClient Test Suite", () => {
 
     await client.close();
     await server.close();
+  });
+
+  test("Integration path: Official MCP Client -> createComputerUseServer -> UnixSocketHostClient -> UDS Socket", async () => {
+    const sockPath = `/tmp/test-mcp-uds-${Date.now()}.sock`;
+    const socketServer = net.createServer((socket) => {
+      socket.on("data", (data) => {
+        if (data.length >= 4) {
+          const bodyLen = data.readUInt32BE(0);
+          if (data.length >= 4 + bodyLen) {
+            const reqBuf = data.subarray(4, 4 + bodyLen);
+            const reqObj = JSON.parse(reqBuf.toString("utf-8"));
+            const respObj = {
+              id: reqObj.id,
+              success: true,
+              data: { connected: true, topology_version: "top-v1" }
+            };
+            const respJson = JSON.stringify(respObj);
+            const respBuf = Buffer.from(respJson, "utf-8");
+            const headerBuf = Buffer.alloc(4);
+            headerBuf.writeUInt32BE(respBuf.length, 0);
+            socket.write(headerBuf);
+            socket.write(respBuf);
+          }
+        }
+      });
+    });
+
+    await new Promise<void>((res) => socketServer.listen(sockPath, res));
+
+    const realHostClient = new UnixSocketHostClient(sockPath, 5000);
+    const mcpServer = createComputerUseServer(realHostClient);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+
+    const mcpClient = new Client({ name: "integration-client", version: "1.0.0" }, { capabilities: {} });
+
+    await Promise.all([
+      mcpServer.connect(serverTransport),
+      mcpClient.connect(clientTransport)
+    ]);
+
+    const statusCall = await mcpClient.callTool({ name: "computer_use_status", arguments: {} });
+    assert.ok(statusCall.content);
+    const textRes = JSON.parse((statusCall.content as any[])[0].text);
+    assert.equal(textRes.connected, true);
+    assert.equal(textRes.topology_version, "top-v1");
+
+    await mcpClient.close();
+    await mcpServer.close();
+    socketServer.close();
+    if (fs.existsSync(sockPath)) fs.unlinkSync(sockPath);
   });
 
   test("Verifies 100% recursive skill package sync drift between .agents/skills and skills/", () => {
@@ -134,10 +194,19 @@ describe("Computer Use MCP Server & HostClient Test Suite", () => {
     }
   });
 
-  test("Validates all golden JSON fixtures in docs/fixtures/", () => {
+  test("Validates all golden JSON fixtures in docs/fixtures/ against protocol schema & Zod schemas", () => {
     const rootDir = path.resolve(process.cwd(), "../../");
     const fixturesDir = path.join(rootDir, "docs/fixtures");
+    const schemaPath = path.join(rootDir, "docs/protocol_schema.json");
+
     assert.ok(fs.existsSync(fixturesDir), "docs/fixtures directory must exist");
+    assert.ok(fs.existsSync(schemaPath), "docs/protocol_schema.json must exist");
+
+    const schemaContent = fs.readFileSync(schemaPath, "utf-8");
+    assert.doesNotThrow(() => JSON.parse(schemaContent), "protocol_schema.json must be valid JSON");
+    const protocolSchema = JSON.parse(schemaContent);
+
+    assert.ok(protocolSchema.oneOf, "protocol_schema.json must define top-level oneOf validation array");
 
     const fixtureFiles = fs.readdirSync(fixturesDir).filter(f => f.endsWith(".json"));
     assert.ok(fixtureFiles.length >= 3, "Must contain at least 3 golden fixtures");
@@ -147,6 +216,11 @@ describe("Computer Use MCP Server & HostClient Test Suite", () => {
       assert.doesNotThrow(() => JSON.parse(content), `Fixture '${file}' must be valid JSON`);
       const parsed = JSON.parse(content);
       assert.ok(parsed.id, `Fixture '${file}' must contain id`);
+
+      if (typeof parsed.success === "boolean") {
+        const zodParse = IPCResponseSchema.safeParse(parsed);
+        assert.ok(zodParse.success, `Response fixture '${file}' must validate against IPCResponseSchema: ${zodParse.error?.message}`);
+      }
     }
   });
 
@@ -154,7 +228,6 @@ describe("Computer Use MCP Server & HostClient Test Suite", () => {
     const sockPath = `/tmp/test-oversized-${Date.now()}.sock`;
     const server = net.createServer((socket) => {
       socket.on("data", () => {
-        // Send header with bodyLen = 17MB (17,825,792 bytes)
         const header = Buffer.alloc(4);
         header.writeUInt32BE(17 * 1024 * 1024, 0);
         socket.write(header);
@@ -177,7 +250,7 @@ describe("Computer Use MCP Server & HostClient Test Suite", () => {
     const sockPath = `/tmp/test-eof-${Date.now()}.sock`;
     const server = net.createServer((socket) => {
       socket.on("data", () => {
-        socket.end(); // Close socket mid-frame
+        socket.end();
       });
     });
 
@@ -201,7 +274,7 @@ describe("Computer Use MCP Server & HostClient Test Suite", () => {
 
     await new Promise<void>((res) => server.listen(sockPath, res));
 
-    const client = new UnixSocketHostClient(sockPath, 100); // 100ms timeout
+    const client = new UnixSocketHostClient(sockPath, 100);
     const resp = await client.request("status");
 
     assert.equal(resp.success, false);

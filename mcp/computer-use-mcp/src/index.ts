@@ -125,7 +125,7 @@ export function createComputerUseServer(hostClient?: HostClient): Server {
               click_count: { type: "integer", minimum: 1, maximum: 3, default: 1 },
               capture_id: { type: "string" },
               topology_version: { type: "string" },
-              intent: { type: "string", minLength: 1 }
+              intent: { type: "string", minLength: 1, maxLength: 200 }
             },
             additionalProperties: false
           }
@@ -141,7 +141,7 @@ export function createComputerUseServer(hostClient?: HostClient): Server {
               y: { type: "integer", minimum: 0, maximum: 999 },
               capture_id: { type: "string" },
               topology_version: { type: "string" },
-              intent: { type: "string", minLength: 1 }
+              intent: { type: "string", minLength: 1, maxLength: 200 }
             },
             additionalProperties: false
           }
@@ -159,7 +159,7 @@ export function createComputerUseServer(hostClient?: HostClient): Server {
               end_y: { type: "integer", minimum: 0, maximum: 999 },
               capture_id: { type: "string" },
               topology_version: { type: "string" },
-              intent: { type: "string", minLength: 1 }
+              intent: { type: "string", minLength: 1, maxLength: 200 }
             },
             additionalProperties: false
           }
@@ -175,7 +175,7 @@ export function createComputerUseServer(hostClient?: HostClient): Server {
               press_enter: { type: "boolean", default: false },
               capture_id: { type: "string" },
               topology_version: { type: "string" },
-              intent: { type: "string", minLength: 1 }
+              intent: { type: "string", minLength: 1, maxLength: 200 }
             },
             additionalProperties: false
           }
@@ -190,7 +190,7 @@ export function createComputerUseServer(hostClient?: HostClient): Server {
               keys: { type: "array", items: { type: "string" }, minItems: 1 },
               capture_id: { type: "string" },
               topology_version: { type: "string" },
-              intent: { type: "string", minLength: 1 }
+              intent: { type: "string", minLength: 1, maxLength: 200 }
             },
             additionalProperties: false
           }
@@ -209,7 +209,7 @@ export function createComputerUseServer(hostClient?: HostClient): Server {
               direction: { type: "string", enum: ["up", "down", "left", "right"] },
               capture_id: { type: "string" },
               topology_version: { type: "string" },
-              intent: { type: "string", minLength: 1 }
+              intent: { type: "string", minLength: 1, maxLength: 200 }
             },
             additionalProperties: false
           }

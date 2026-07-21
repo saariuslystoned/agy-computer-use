@@ -19,6 +19,9 @@
         "params": {
           "type": "object",
           "properties": {
+            "display_id": { "type": "integer" },
+            "max_depth": { "type": "integer", "minimum": 1, "maximum": 10, "default": 10 },
+            "app_id": { "type": "string" },
             "x": { "type": "integer", "minimum": 0, "maximum": 999 },
             "y": { "type": "integer", "minimum": 0, "maximum": 999 },
             "start_x": { "type": "integer", "minimum": 0, "maximum": 999 },
@@ -38,7 +41,53 @@
             "intent": { "type": "string", "minLength": 1, "maxLength": 200 }
           }
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "method": { "enum": ["click", "move", "scroll"] } } },
+          "then": {
+            "required": ["params"],
+            "properties": {
+              "params": {
+                "required": ["x", "y", "capture_id", "topology_version", "intent"]
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "method": { "const": "drag" } } },
+          "then": {
+            "required": ["params"],
+            "properties": {
+              "params": {
+                "required": ["start_x", "start_y", "end_x", "end_y", "capture_id", "topology_version", "intent"]
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "method": { "const": "type" } } },
+          "then": {
+            "required": ["params"],
+            "properties": {
+              "params": {
+                "required": ["text", "capture_id", "topology_version", "intent"]
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "method": { "const": "shortcut" } } },
+          "then": {
+            "required": ["params"],
+            "properties": {
+              "params": {
+                "required": ["keys", "capture_id", "topology_version", "intent"]
+              }
+            }
+          }
+        }
+      ]
     },
     "IPCResponse": {
       "type": "object",
