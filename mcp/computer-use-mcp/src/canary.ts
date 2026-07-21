@@ -1,13 +1,11 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { PeekabooImageClient, StdioPeekabooImageClient } from "./peekaboo-client.js";
+import { PeekabooImageClient, PeekabooImageClientImpl } from "./peekaboo-client.js";
 import { Logger } from "./logger.js";
 
-const MAX_BASE64_LENGTH = 22 * 1024 * 1024; // Approx 16MB raw binary
-
 export function createCanaryServer(imageClient?: PeekabooImageClient): Server {
-  const client = imageClient ?? new StdioPeekabooImageClient();
+  const client = imageClient ?? new PeekabooImageClientImpl();
 
   const server = new Server(
     {
@@ -43,41 +41,19 @@ export function createCanaryServer(imageClient?: PeekabooImageClient): Server {
     if (name !== "computer_use_canary_screenshot") {
       return {
         isError: true,
-        content: [{ type: "text", text: `Unknown tool name '${name}'. Canary server exposes only 'computer_use_canary_screenshot'.` }]
+        content: [{ type: "text", text: "CANARY_UNKNOWN_TOOL" }]
       };
     }
 
     if (args && Object.keys(args).length > 0) {
       return {
         isError: true,
-        content: [{ type: "text", text: "Tool 'computer_use_canary_screenshot' accepts no arguments." }]
+        content: [{ type: "text", text: "CANARY_ARGUMENTS_REJECTED" }]
       };
     }
 
     try {
       const res = await client.captureCalculator();
-
-      if (!res || !res.imageBase64 || typeof res.imageBase64 !== "string") {
-        return {
-          isError: true,
-          content: [{ type: "text", text: "Canary capture failed: Missing or invalid base64 image data." }]
-        };
-      }
-
-      if (res.mimeType !== "image/png" && res.mimeType !== "image/jpeg") {
-        return {
-          isError: true,
-          content: [{ type: "text", text: `Canary capture failed: Unsupported mimeType '${res.mimeType}'. Expected image/png or image/jpeg.` }]
-        };
-      }
-
-      if (res.imageBase64.length > MAX_BASE64_LENGTH) {
-        return {
-          isError: true,
-          content: [{ type: "text", text: `Canary capture failed: Base64 payload size exceeds 16MB limit.` }]
-        };
-      }
-
       Logger.info(`Successfully captured canary screenshot (${res.mimeType})`);
 
       return {
@@ -90,11 +66,25 @@ export function createCanaryServer(imageClient?: PeekabooImageClient): Server {
         ]
       };
     } catch (err: unknown) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      Logger.error(`Canary capture error: ${errMsg}`);
+      const errMsg = err instanceof Error ? err.message : "CANARY_CAPTURE_FAILED";
+      // Bounded stable error message only; never log raw base64 or child output
+      Logger.error(`Canary capture failed: ${errMsg}`);
+
+      const stableCode = [
+        "CANARY_PEEKABOO_ERROR",
+        "CANARY_CONTENT_INVALID_COUNT",
+        "CANARY_CONTENT_NOT_IMAGE",
+        "CANARY_UNSUPPORTED_MIME",
+        "CANARY_EMPTY_BASE64",
+        "CANARY_MALFORMED_BASE64",
+        "CANARY_SIZE_EXCEEDED",
+        "CANARY_MAGIC_MISMATCH",
+        "CANARY_TIMEOUT"
+      ].includes(errMsg) ? errMsg : "CANARY_CAPTURE_FAILED";
+
       return {
         isError: true,
-        content: [{ type: "text", text: `Canary capture error: ${errMsg}` }]
+        content: [{ type: "text", text: stableCode }]
       };
     }
   });

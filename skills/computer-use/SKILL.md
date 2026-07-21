@@ -8,7 +8,7 @@ description: Provides dual-perception (Accessibility AXUIElement + Screen percep
 This skill teaches Google Antigravity agents (and Gemini models) how to reliably and safely interact with macOS graphical user interfaces using the `computer-use-mcp` tool suite.
 
 > [!NOTE]
-> **Dogfood Harness Canary**: The `computer_use_canary_screenshot` tool is an observation-only test harness proof for dogfood verification, not the native host product backend. Full production acceptance requires native host dual-perception via `computer_use_observe` and `computer_use_ax_tree`.
+> **Dogfood Harness Canary (D1 Procedure)**: The `computer_use_canary_screenshot` tool is an observation-only test harness proof for dogfood verification, explicitly non-production. When only the canary is available, invoke `computer_use_canary_screenshot` once, do not call production action tools, and report a concrete visible feature only after `ImageContent` is actually received. Full production acceptance requires native host dual-perception via `computer_use_observe` and `computer_use_ax_tree`.
 
 ---
 

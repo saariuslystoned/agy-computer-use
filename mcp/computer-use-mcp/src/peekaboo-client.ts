@@ -1,7 +1,6 @@
 import * as fs from "fs";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { Logger } from "./logger.js";
 
 export interface PeekabooCanaryResult {
   imageBase64: string;
@@ -12,34 +11,130 @@ export interface PeekabooImageClient {
   captureCalculator(): Promise<PeekabooCanaryResult>;
 }
 
+export interface PeekabooMcpRawClient {
+  callImageTool(): Promise<unknown>;
+}
+
+export const VALID_DUMMY_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 export const VALID_DUMMY_JPEG_BASE64 = "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=";
 
-export class MockPeekabooImageClient implements PeekabooImageClient {
-  private fakeResult: PeekabooCanaryResult;
+const MAX_DECODED_BYTES = 16 * 1024 * 1024; // 16 MiB cap
 
-  constructor(fakeResult?: PeekabooCanaryResult) {
-    this.fakeResult = fakeResult ?? {
-      imageBase64: VALID_DUMMY_JPEG_BASE64,
-      mimeType: "image/jpeg"
+export function validateImageMagicBytes(buffer: Buffer, mimeType: string): boolean {
+  if (buffer.length < 4) return false;
+
+  if (mimeType === "image/png") {
+    return buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47;
+  }
+
+  if (mimeType === "image/jpeg") {
+    return buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+  }
+
+  return false;
+}
+
+export function parseAndValidateRawImageResponse(raw: unknown): PeekabooCanaryResult {
+  if (!raw || typeof raw !== "object") {
+    throw new Error("CANARY_RESPONSE_INVALID");
+  }
+
+  const obj = raw as Record<string, unknown>;
+
+  if (obj.isError === true) {
+    throw new Error("CANARY_PEEKABOO_ERROR");
+  }
+
+  const content = obj.content;
+  if (!Array.isArray(content) || content.length !== 1) {
+    throw new Error("CANARY_CONTENT_INVALID_COUNT");
+  }
+
+  const item = content[0] as Record<string, unknown>;
+  if (!item || typeof item !== "object" || item.type !== "image") {
+    throw new Error("CANARY_CONTENT_NOT_IMAGE");
+  }
+
+  const mimeType = item.mimeType;
+  if (mimeType !== "image/png" && mimeType !== "image/jpeg") {
+    throw new Error("CANARY_UNSUPPORTED_MIME");
+  }
+
+  const data = item.data;
+  if (!data || typeof data !== "string") {
+    throw new Error("CANARY_EMPTY_BASE64");
+  }
+
+  const cleanData = data.trim();
+  const base64Regex = /^[A-Za-z0-9+/=]+$/;
+  if (!base64Regex.test(cleanData)) {
+    throw new Error("CANARY_MALFORMED_BASE64");
+  }
+
+  const decodedBuf = Buffer.from(cleanData, "base64");
+  if (decodedBuf.length === 0) {
+    throw new Error("CANARY_EMPTY_DECODED_BUFFER");
+  }
+
+  if (decodedBuf.length > MAX_DECODED_BYTES) {
+    throw new Error("CANARY_SIZE_EXCEEDED");
+  }
+
+  if (!validateImageMagicBytes(decodedBuf, mimeType)) {
+    throw new Error("CANARY_MAGIC_MISMATCH");
+  }
+
+  return {
+    imageBase64: cleanData,
+    mimeType: mimeType as "image/png" | "image/jpeg"
+  };
+}
+
+export class MockPeekabooMcpRawClient implements PeekabooMcpRawClient {
+  private rawResponse: unknown;
+
+  constructor(rawResponse?: unknown) {
+    this.rawResponse = rawResponse ?? {
+      content: [
+        {
+          type: "image",
+          data: VALID_DUMMY_PNG_BASE64,
+          mimeType: "image/png"
+        }
+      ]
     };
   }
 
-  public async captureCalculator(): Promise<PeekabooCanaryResult> {
-    return this.fakeResult;
+  public async callImageTool(): Promise<unknown> {
+    return this.rawResponse;
   }
 }
 
-export class StdioPeekabooImageClient implements PeekabooImageClient {
+export class MockPeekabooImageClient implements PeekabooImageClient {
+  private rawClient: PeekabooMcpRawClient;
+
+  constructor(rawResponse?: unknown) {
+    this.rawClient = new MockPeekabooMcpRawClient(rawResponse);
+  }
+
+  public async captureCalculator(): Promise<PeekabooCanaryResult> {
+    const raw = await this.rawClient.callImageTool();
+    return parseAndValidateRawImageResponse(raw);
+  }
+}
+
+export class StdioPeekabooMcpRawClient implements PeekabooMcpRawClient {
   private peekabooBin: string;
 
   constructor(peekabooBin = "/opt/homebrew/bin/peekaboo") {
     this.peekabooBin = fs.existsSync(peekabooBin) ? peekabooBin : "peekaboo";
   }
 
-  public async captureCalculator(): Promise<PeekabooCanaryResult> {
+  public async callImageTool(): Promise<unknown> {
     const transport = new StdioClientTransport({
       command: this.peekabooBin,
-      args: ["mcp"]
+      args: ["mcp", "serve"],
+      stderr: "ignore" // Prevent stdio pipe deadlocks
     });
 
     const client = new Client(
@@ -47,49 +142,47 @@ export class StdioPeekabooImageClient implements PeekabooImageClient {
       { capabilities: {} }
     );
 
-    try {
-      await client.connect(transport);
+    let timeoutId: NodeJS.Timeout | undefined;
 
-      const result = await client.callTool({
-        name: "image",
-        arguments: {
-          app_target: "Calculator",
-          format: "data",
-          max_dimension: 640,
-          capture_focus: "background"
-        }
+    try {
+      const connectAndCall = async () => {
+        await client.connect(transport);
+        return await client.callTool({
+          name: "image",
+          arguments: {
+            app_target: "Calculator",
+            format: "data",
+            max_dimension: 640,
+            capture_focus: "background"
+          }
+        });
+      };
+
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(() => {
+          reject(new Error("CANARY_TIMEOUT"));
+        }, 5000);
       });
 
-      await client.close();
-
-      if (!result.content || !Array.isArray(result.content)) {
-        throw new Error("Peekaboo MCP image tool returned invalid response shape");
-      }
-
-      // Filter non-text/non-image content
-      const imageItems = result.content.filter((c: any) => c.type === "image");
-      if (imageItems.length !== 1) {
-        throw new Error(`Peekaboo MCP image tool must return exactly 1 image item, got ${imageItems.length}`);
-      }
-
-      const img = imageItems[0] as any;
-      if (!img.data || typeof img.data !== "string") {
-        throw new Error("Peekaboo MCP image tool returned empty or non-string base64 data");
-      }
-
-      const mimeType = img.mimeType === "image/png" ? "image/png" : img.mimeType === "image/jpeg" ? "image/jpeg" : null;
-      if (!mimeType) {
-        throw new Error(`Peekaboo MCP image tool returned unsupported mimeType '${img.mimeType}'`);
-      }
-
-      return {
-        imageBase64: img.data,
-        mimeType
-      };
-    } catch (err: unknown) {
+      const res = await Promise.race([connectAndCall(), timeoutPromise]);
+      return res;
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
       try { await client.close(); } catch {}
-      const errMsg = err instanceof Error ? err.message : String(err);
-      throw new Error(`Stdio Peekaboo 3.9.1 MCP call failed: ${errMsg}`);
+      try { await transport.close(); } catch {}
     }
+  }
+}
+
+export class PeekabooImageClientImpl implements PeekabooImageClient {
+  private rawClient: PeekabooMcpRawClient;
+
+  constructor(rawClient?: PeekabooMcpRawClient) {
+    this.rawClient = rawClient ?? new StdioPeekabooMcpRawClient();
+  }
+
+  public async captureCalculator(): Promise<PeekabooCanaryResult> {
+    const raw = await this.rawClient.callImageTool();
+    return parseAndValidateRawImageResponse(raw);
   }
 }
