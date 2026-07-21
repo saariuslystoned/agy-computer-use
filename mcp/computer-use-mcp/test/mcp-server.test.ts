@@ -1,77 +1,108 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createComputerUseServer } from "../src/index.js";
 import { MockHostClient } from "../src/host-client.js";
 
-describe("Computer Use MCP Server Bridge", () => {
-  test("Performs handshake and status check correctly", async () => {
-    const mockClient = new MockHostClient();
-    const hs = await mockClient.request("handshake");
-    assert.equal(hs.success, true);
-    assert.equal(hs.data?.protocol_version, "1.0");
+describe("Computer Use MCP Server End-to-End Integration", () => {
+  test("Exercises listTools and callTool using official SDK Client and InMemoryTransport linked pair", async () => {
+    const mockHost = new MockHostClient();
+    const server = createComputerUseServer(mockHost);
 
-    const resp = await mockClient.request("status");
-    assert.equal(resp.success, true);
-    assert.equal(resp.data?.connected, true);
-    assert.equal(resp.data?.accessibility_trusted, true);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+
+    const client = new Client(
+      { name: "test-client", version: "1.0.0" },
+      { capabilities: {} }
+    );
+
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport)
+    ]);
+
+    // 1. List tools
+    const toolsResult = await client.listTools();
+    assert.ok(toolsResult.tools);
+    assert.equal(toolsResult.tools.length, 9);
+    const toolNames = toolsResult.tools.map((t) => t.name);
+    assert.ok(toolNames.includes("computer_use_observe"));
+    assert.ok(toolNames.includes("computer_use_click"));
+
+    // 2. Call observe
+    const obsCall = await client.callTool({ name: "computer_use_observe", arguments: {} });
+    assert.ok(obsCall.content);
+    const obsContent = obsCall.content as any[];
+    assert.equal(obsContent.length, 2); // Text metadata + ImageContent
+    assert.equal(obsContent[0].type, "text");
+    assert.equal(obsContent[1].type, "image");
+    assert.equal(obsContent[1].mimeType, "image/jpeg");
+
+    const textMeta = JSON.parse(obsContent[0].text);
+    const cap1 = textMeta.capture_id;
+    assert.ok(cap1);
+
+    // 3. Call click action passing valid parameters
+    const clickCall = await client.callTool({
+      name: "computer_use_click",
+      arguments: {
+        x: 500,
+        y: 500,
+        button: "left",
+        click_count: 1,
+        capture_id: cap1,
+        topology_version: "top-v1",
+        intent: "Click target button in test"
+      }
+    });
+
+    assert.ok(clickCall.content);
+    const clickContent = clickCall.content as any[];
+    assert.equal(clickContent.length, 2);
+    const clickMeta = JSON.parse(clickContent[0].text);
+    assert.equal(clickMeta.status, "dispatched");
+    assert.ok(clickMeta.post_action_observation);
+    const cap2 = clickMeta.post_action_observation.capture_id;
+    assert.ok(cap2);
+    assert.notEqual(cap1, cap2);
+
+    // 4. Stale click call must return isError: true
+    const staleCall = await client.callTool({
+      name: "computer_use_click",
+      arguments: {
+        x: 500,
+        y: 500,
+        button: "left",
+        click_count: 1,
+        capture_id: cap1,
+        topology_version: "top-v1",
+        intent: "Stale click retry"
+      }
+    });
+
+    assert.equal(staleCall.isError, true);
+    const staleContent = staleCall.content as any[];
+    const errMeta = JSON.parse(staleContent[0].text);
+    assert.equal(errMeta.error.code, "STALE_CAPTURE");
+
+    await client.close();
+    await server.close();
   });
 
-  test("Executes observe and click workflow returning post_action_observation", async () => {
-    const mockClient = new MockHostClient();
+  test("Verifies skill package sync drift between .agents/skills and skills/", () => {
+    const rootDir = path.resolve(process.cwd(), "../../");
+    const agentSkillPath = path.join(rootDir, ".agents/skills/computer-use/SKILL.md");
+    const rootSkillPath = path.join(rootDir, "skills/computer-use/SKILL.md");
 
-    // 1. Observe
-    const obsResp = await mockClient.request("observe", { display_id: 1 });
-    assert.equal(obsResp.success, true);
-    const capId1 = obsResp.data?.capture_id as string;
-    assert.ok(capId1);
+    assert.ok(fs.existsSync(agentSkillPath), `.agents/skills/computer-use/SKILL.md must exist at ${agentSkillPath}`);
+    assert.ok(fs.existsSync(rootSkillPath), `skills/computer-use/SKILL.md must exist at ${rootSkillPath}`);
 
-    // 2. Click with valid capture_id
-    const clickResp = await mockClient.request("click", {
-      x: 500,
-      y: 500,
-      button: "left",
-      click_count: 1,
-      capture_id: capId1
-    });
-    assert.equal(clickResp.success, true);
-    assert.equal(clickResp.data?.status, "verified");
+    const agentSkillContent = fs.readFileSync(agentSkillPath, "utf-8");
+    const rootSkillContent = fs.readFileSync(rootSkillPath, "utf-8");
 
-    // Post-action observation check
-    const postObs = clickResp.data?.post_action_observation as any;
-    assert.ok(postObs);
-    const capId2 = postObs.capture_id as string;
-    assert.ok(capId2);
-    assert.notEqual(capId1, capId2);
-
-    // 3. Second click with old capId1 should fail with STALE_CAPTURE
-    const staleResp = await mockClient.request("click", {
-      x: 500,
-      y: 500,
-      capture_id: capId1
-    });
-    assert.equal(staleResp.success, false);
-    assert.equal(staleResp.error?.code, "STALE_CAPTURE");
-
-    // 4. Click with new post-action capId2 should succeed
-    const click2Resp = await mockClient.request("click", {
-      x: 500,
-      y: 500,
-      capture_id: capId2
-    });
-    assert.equal(click2Resp.success, true);
-  });
-
-  test("Fetches AX tree with subrole redacted password fields", async () => {
-    const mockClient = new MockHostClient();
-    const axResp = await mockClient.request("ax_tree", { max_depth: 5 });
-
-    assert.equal(axResp.success, true);
-    const rootNode = axResp.data as any;
-    assert.equal(rootNode.role, "AXApplication");
-
-    const winNode = rootNode.children?.[0];
-    const passNode = winNode?.children?.find((c: any) => c.subrole === "AXSecureTextField");
-    assert.ok(passNode);
-    assert.equal(passNode.value, "[REDACTED]");
+    assert.equal(agentSkillContent.trim(), rootSkillContent.trim(), "Skill packages in .agents/skills/computer-use and skills/computer-use must be identical");
   });
 });

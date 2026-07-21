@@ -1,25 +1,13 @@
 import Foundation
 
-public final class HostServer: @unchecked Sendable {
-    private let lock = NSLock()
+public actor HostServer {
     public let topology: DisplayTopology
     public let captureEngine: DisplayCaptureEngine
     public let axEngine: AXInspectionEngine
     public let inputEngine: InputSynthesisEngine
 
-    private var _latestCapture: CaptureFrameDTO?
-    public var latestCapture: CaptureFrameDTO? {
-        get {
-            lock.lock()
-            defer { lock.unlock() }
-            return _latestCapture
-        }
-        set {
-            lock.lock()
-            defer { lock.unlock() }
-            _latestCapture = newValue
-        }
-    }
+    private var latestCapture: CaptureFrameDTO?
+    private var inputHistory: [String] = []
 
     public init(
         topology: DisplayTopology? = nil,
@@ -32,6 +20,10 @@ public final class HostServer: @unchecked Sendable {
         self.captureEngine = captureEngine ?? FakeCaptureEngine()
         self.axEngine = axEngine ?? FakeAXInspector()
         self.inputEngine = inputEngine ?? FakeInputInjector()
+    }
+
+    public func getInputHistory() -> [String] {
+        return inputHistory
     }
 
     private func createPostActionObservation(displayId: Int) throws -> (CaptureFrameDTO, [String: AnyCodable]) {
@@ -49,6 +41,24 @@ public final class HostServer: @unchecked Sendable {
             "image_data_base64": .string(frame.imageDataBase64)
         ]
         return (frame, obsData)
+    }
+
+    private func validatePreconditions(params: [String: AnyCodable]?) throws -> (String, String, String) {
+        guard let capId = params?["capture_id"]?.rawValue as? String, !capId.isEmpty else {
+            throw ComputerUseError.ipcError(reason: "Missing required 'capture_id' precondition")
+        }
+        guard let topVer = params?["topology_version"]?.rawValue as? String, topVer == topology.version else {
+            let receivedVer = (params?["topology_version"]?.rawValue as? String) ?? "none"
+            throw ComputerUseError.staleTopology(current: topology.version, received: receivedVer)
+        }
+        guard let intent = params?["intent"]?.rawValue as? String, !intent.trimmingCharacters(in: .whitespaces).isEmpty else {
+            throw ComputerUseError.ipcError(reason: "Missing required non-empty 'intent' description for mutation")
+        }
+        guard let currentCap = latestCapture, currentCap.captureId == capId else {
+            let currentCapId = latestCapture?.captureId ?? "none"
+            throw ComputerUseError.staleCapture(current: currentCapId, received: capId)
+        }
+        return (capId, topVer, intent)
     }
 
     public func handleRequest(_ request: IPCRequest) -> IPCResponse {
@@ -92,26 +102,25 @@ public final class HostServer: @unchecked Sendable {
 
             case "click":
                 guard let x = request.params?["x"]?.rawValue as? Int,
-                      let y = request.params?["y"]?.rawValue as? Int,
-                      let capId = request.params?["capture_id"]?.rawValue as? String else {
-                    throw ComputerUseError.ipcError(reason: "Missing required click parameters (x, y, capture_id)")
+                      let y = request.params?["y"]?.rawValue as? Int else {
+                    throw ComputerUseError.ipcError(reason: "Missing required click parameters (x, y)")
                 }
+                let (capId, _, intent) = try validatePreconditions(params: request.params)
+
                 let btnRaw = (request.params?["button"]?.rawValue as? String) ?? "left"
                 let btn = MouseButton(rawValue: btnRaw) ?? .left
                 let clickCount = (request.params?["click_count"]?.rawValue as? Int) ?? 1
 
-                guard let currentCap = latestCapture else {
-                    throw ComputerUseError.staleCapture(current: "none", received: capId)
-                }
+                let targetDisplay = topology.displays.first(where: { $0.id == (latestCapture?.displayId ?? topology.primaryDisplayId) }) ?? topology.displays[0]
+                let result = try inputEngine.performClick(gridX: x, gridY: y, button: btn, clickCount: clickCount, captureId: capId, currentCaptureId: capId, display: targetDisplay)
 
-                let targetDisplay = topology.displays.first(where: { $0.id == currentCap.displayId }) ?? topology.displays[0]
-                let result = try inputEngine.performClick(gridX: x, gridY: y, button: btn, clickCount: clickCount, captureId: capId, currentCaptureId: currentCap.captureId, display: targetDisplay)
+                inputHistory.append("[CLICK] intent=\(intent) (x:\(x), y:\(y))")
 
                 let (_, postObs) = try createPostActionObservation(displayId: targetDisplay.id)
 
                 let resultData: [String: AnyCodable] = [
                     "action_id": .string(result.actionId),
-                    "status": .string(result.status),
+                    "status": .string("dispatched"),
                     "capture_id": .string(result.captureId),
                     "duration_ms": .double(result.durationMs),
                     "post_action_observation": .dictionary(postObs)
@@ -120,21 +129,21 @@ public final class HostServer: @unchecked Sendable {
 
             case "move":
                 guard let x = request.params?["x"]?.rawValue as? Int,
-                      let y = request.params?["y"]?.rawValue as? Int,
-                      let capId = request.params?["capture_id"]?.rawValue as? String else {
-                    throw ComputerUseError.ipcError(reason: "Missing required move parameters (x, y, capture_id)")
+                      let y = request.params?["y"]?.rawValue as? Int else {
+                    throw ComputerUseError.ipcError(reason: "Missing required move parameters (x, y)")
                 }
-                guard let currentCap = latestCapture else {
-                    throw ComputerUseError.staleCapture(current: "none", received: capId)
-                }
-                let targetDisplay = topology.displays.first(where: { $0.id == currentCap.displayId }) ?? topology.displays[0]
-                let result = try inputEngine.performMove(gridX: x, gridY: y, captureId: capId, currentCaptureId: currentCap.captureId, display: targetDisplay)
+                let (capId, _, intent) = try validatePreconditions(params: request.params)
+
+                let targetDisplay = topology.displays.first(where: { $0.id == (latestCapture?.displayId ?? topology.primaryDisplayId) }) ?? topology.displays[0]
+                let result = try inputEngine.performMove(gridX: x, gridY: y, captureId: capId, currentCaptureId: capId, display: targetDisplay)
+
+                inputHistory.append("[MOVE] intent=\(intent) (x:\(x), y:\(y))")
 
                 let (_, postObs) = try createPostActionObservation(displayId: targetDisplay.id)
 
                 let resultData: [String: AnyCodable] = [
                     "action_id": .string(result.actionId),
-                    "status": .string(result.status),
+                    "status": .string("dispatched"),
                     "capture_id": .string(result.captureId),
                     "duration_ms": .double(result.durationMs),
                     "post_action_observation": .dictionary(postObs)
@@ -145,21 +154,21 @@ public final class HostServer: @unchecked Sendable {
                 guard let startX = request.params?["start_x"]?.rawValue as? Int,
                       let startY = request.params?["start_y"]?.rawValue as? Int,
                       let endX = request.params?["end_x"]?.rawValue as? Int,
-                      let endY = request.params?["end_y"]?.rawValue as? Int,
-                      let capId = request.params?["capture_id"]?.rawValue as? String else {
+                      let endY = request.params?["end_y"]?.rawValue as? Int else {
                     throw ComputerUseError.ipcError(reason: "Missing required drag parameters")
                 }
-                guard let currentCap = latestCapture else {
-                    throw ComputerUseError.staleCapture(current: "none", received: capId)
-                }
-                let targetDisplay = topology.displays.first(where: { $0.id == currentCap.displayId }) ?? topology.displays[0]
-                let result = try inputEngine.performDrag(startX: startX, startY: startY, endX: endX, endY: endY, captureId: capId, currentCaptureId: currentCap.captureId, display: targetDisplay)
+                let (capId, _, intent) = try validatePreconditions(params: request.params)
+
+                let targetDisplay = topology.displays.first(where: { $0.id == (latestCapture?.displayId ?? topology.primaryDisplayId) }) ?? topology.displays[0]
+                let result = try inputEngine.performDrag(startX: startX, startY: startY, endX: endX, endY: endY, captureId: capId, currentCaptureId: capId, display: targetDisplay)
+
+                inputHistory.append("[DRAG] intent=\(intent) (\(startX),\(startY))->(\(endX),\(endY))")
 
                 let (_, postObs) = try createPostActionObservation(displayId: targetDisplay.id)
 
                 let resultData: [String: AnyCodable] = [
                     "action_id": .string(result.actionId),
-                    "status": .string(result.status),
+                    "status": .string("dispatched"),
                     "capture_id": .string(result.captureId),
                     "duration_ms": .double(result.durationMs),
                     "post_action_observation": .dictionary(postObs)
@@ -167,21 +176,22 @@ public final class HostServer: @unchecked Sendable {
                 return IPCResponse(id: request.id, success: true, data: resultData)
 
             case "type":
-                guard let text = request.params?["text"]?.rawValue as? String,
-                      let capId = request.params?["capture_id"]?.rawValue as? String else {
-                    throw ComputerUseError.ipcError(reason: "Missing required type parameters (text, capture_id)")
+                guard let text = request.params?["text"]?.rawValue as? String else {
+                    throw ComputerUseError.ipcError(reason: "Missing required type parameters (text)")
                 }
-                guard let currentCap = latestCapture else {
-                    throw ComputerUseError.staleCapture(current: "none", received: capId)
-                }
-                let targetDisplay = topology.displays.first(where: { $0.id == currentCap.displayId }) ?? topology.displays[0]
-                let result = try inputEngine.performType(text: text, captureId: capId, currentCaptureId: currentCap.captureId)
+                let (capId, _, intent) = try validatePreconditions(params: request.params)
 
-                let (_, postObs) = try createPostActionObservation(displayId: targetDisplay.id)
+                let result = try inputEngine.performType(text: text, captureId: capId, currentCaptureId: capId)
+
+                // Privacy: sanitize raw typed text from history logs
+                inputHistory.append("[TYPE] intent=\(intent) text_length=\(text.count) [REDACTED_TEXT]")
+
+                let targetDisplayId = latestCapture?.displayId ?? topology.primaryDisplayId
+                let (_, postObs) = try createPostActionObservation(displayId: targetDisplayId)
 
                 let resultData: [String: AnyCodable] = [
                     "action_id": .string(result.actionId),
-                    "status": .string(result.status),
+                    "status": .string("dispatched"),
                     "capture_id": .string(result.captureId),
                     "duration_ms": .double(result.durationMs),
                     "post_action_observation": .dictionary(postObs)
@@ -189,22 +199,22 @@ public final class HostServer: @unchecked Sendable {
                 return IPCResponse(id: request.id, success: true, data: resultData)
 
             case "shortcut":
-                guard let keysAny = request.params?["keys"]?.rawValue as? [Any],
-                      let capId = request.params?["capture_id"]?.rawValue as? String else {
-                    throw ComputerUseError.ipcError(reason: "Missing required shortcut parameters (keys, capture_id)")
+                guard let keysAny = request.params?["keys"]?.rawValue as? [Any] else {
+                    throw ComputerUseError.ipcError(reason: "Missing required shortcut parameters (keys)")
                 }
+                let (capId, _, intent) = try validatePreconditions(params: request.params)
                 let keys = keysAny.compactMap { $0 as? String }
-                guard let currentCap = latestCapture else {
-                    throw ComputerUseError.staleCapture(current: "none", received: capId)
-                }
-                let targetDisplay = topology.displays.first(where: { $0.id == currentCap.displayId }) ?? topology.displays[0]
-                let result = try inputEngine.performShortcut(keys: keys, captureId: capId, currentCaptureId: currentCap.captureId)
 
-                let (_, postObs) = try createPostActionObservation(displayId: targetDisplay.id)
+                let result = try inputEngine.performShortcut(keys: keys, captureId: capId, currentCaptureId: capId)
+
+                inputHistory.append("[SHORTCUT] intent=\(intent) keys=\(keys.joined(separator: "+"))")
+
+                let targetDisplayId = latestCapture?.displayId ?? topology.primaryDisplayId
+                let (_, postObs) = try createPostActionObservation(displayId: targetDisplayId)
 
                 let resultData: [String: AnyCodable] = [
                     "action_id": .string(result.actionId),
-                    "status": .string(result.status),
+                    "status": .string("dispatched"),
                     "capture_id": .string(result.captureId),
                     "duration_ms": .double(result.durationMs),
                     "post_action_observation": .dictionary(postObs)
@@ -215,21 +225,21 @@ public final class HostServer: @unchecked Sendable {
                 guard let x = request.params?["x"]?.rawValue as? Int,
                       let y = request.params?["y"]?.rawValue as? Int,
                       let deltaX = request.params?["delta_x"]?.rawValue as? Int,
-                      let deltaY = request.params?["delta_y"]?.rawValue as? Int,
-                      let capId = request.params?["capture_id"]?.rawValue as? String else {
+                      let deltaY = request.params?["delta_y"]?.rawValue as? Int else {
                     throw ComputerUseError.ipcError(reason: "Missing required scroll parameters")
                 }
-                guard let currentCap = latestCapture else {
-                    throw ComputerUseError.staleCapture(current: "none", received: capId)
-                }
-                let targetDisplay = topology.displays.first(where: { $0.id == currentCap.displayId }) ?? topology.displays[0]
-                let result = try inputEngine.performScroll(gridX: x, gridY: y, deltaX: deltaX, deltaY: deltaY, captureId: capId, currentCaptureId: currentCap.captureId, display: targetDisplay)
+                let (capId, _, intent) = try validatePreconditions(params: request.params)
+
+                let targetDisplay = topology.displays.first(where: { $0.id == (latestCapture?.displayId ?? topology.primaryDisplayId) }) ?? topology.displays[0]
+                let result = try inputEngine.performScroll(gridX: x, gridY: y, deltaX: deltaX, deltaY: deltaY, captureId: capId, currentCaptureId: capId, display: targetDisplay)
+
+                inputHistory.append("[SCROLL] intent=\(intent) (x:\(x), y:\(y)) dx:\(deltaX) dy:\(deltaY)")
 
                 let (_, postObs) = try createPostActionObservation(displayId: targetDisplay.id)
 
                 let resultData: [String: AnyCodable] = [
                     "action_id": .string(result.actionId),
-                    "status": .string(result.status),
+                    "status": .string("dispatched"),
                     "capture_id": .string(result.captureId),
                     "duration_ms": .double(result.durationMs),
                     "post_action_observation": .dictionary(postObs)

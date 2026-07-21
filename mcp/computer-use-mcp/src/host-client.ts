@@ -19,8 +19,11 @@ export interface IPCResponsePayload {
 }
 
 export interface HostClient {
-  request(method: string, params?: Record<string, unknown>): Promise<IPCResponsePayload>;
+  request(method: string, params?: Record<string, unknown>, signal?: AbortSignal): Promise<IPCResponsePayload>;
 }
+
+// Deterministic valid 1x1 JPEG Base64 payload matching MCP SDK Base64 schema
+const VALID_DUMMY_JPEG_BASE64 = "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=";
 
 /**
  * MockHostClient provides a deterministic test host implementation
@@ -30,7 +33,15 @@ export class MockHostClient implements HostClient {
   private latestCaptureId: string | null = null;
   private reqCounter = 1;
 
-  public async request(method: string, params?: Record<string, unknown>): Promise<IPCResponsePayload> {
+  public async request(method: string, params?: Record<string, unknown>, signal?: AbortSignal): Promise<IPCResponsePayload> {
+    if (signal?.aborted) {
+      return {
+        id: `req-${this.reqCounter++}`,
+        success: false,
+        error: { code: "CANCELLED", message: "Request aborted before host dispatch" }
+      };
+    }
+
     const id = `req-${this.reqCounter++}`;
 
     switch (method) {
@@ -74,7 +85,7 @@ export class MockHostClient implements HostClient {
             height_points: 1080,
             scale_factor: 2.0,
             image_format: "jpeg",
-            image_data_base64: "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP...",
+            image_data_base64: VALID_DUMMY_JPEG_BASE64,
             normalized_bounds: { min_x: 0, min_y: 0, max_x: 999, max_y: 999 }
           }
         };
@@ -135,7 +146,7 @@ export class MockHostClient implements HostClient {
           success: true,
           data: {
             action_id: `act-${method}-${this.reqCounter}`,
-            status: "verified",
+            status: "dispatched",
             capture_id: capId,
             duration_ms: 15.0,
             post_action_observation: {
@@ -144,7 +155,7 @@ export class MockHostClient implements HostClient {
               topology_version: "top-v1",
               display_id: 1,
               image_format: "jpeg",
-              image_data_base64: "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP..."
+              image_data_base64: VALID_DUMMY_JPEG_BASE64
             }
           }
         };
@@ -165,7 +176,6 @@ export class MockHostClient implements HostClient {
 
 /**
  * UnixSocketHostClient connects to the native ComputerUseHost Unix domain socket.
- * Enforces owner-only directory permissions and peer UID validation on macOS using getpeereid / SOL_LOCAL.
  */
 export class UnixSocketHostClient implements HostClient {
   private socketPath: string;
@@ -176,9 +186,18 @@ export class UnixSocketHostClient implements HostClient {
     this.socketPath = socketPath ?? `/tmp/agy-computer-use-${uid}/agy-computer-use.sock`;
   }
 
-  public async request(method: string, params?: Record<string, unknown>): Promise<IPCResponsePayload> {
-    return new Promise((resolve, reject) => {
+  public async request(method: string, params?: Record<string, unknown>, signal?: AbortSignal): Promise<IPCResponsePayload> {
+    return new Promise((resolve) => {
       const id = `req-${this.reqCounter++}`;
+
+      if (signal?.aborted) {
+        return resolve({
+          id,
+          success: false,
+          error: { code: "CANCELLED", message: "Request cancelled by client signal before connect" }
+        });
+      }
+
       const payload: IPCRequestPayload = { id, method, params };
       const jsonStr = JSON.stringify(payload);
       const jsonBuf = Buffer.from(jsonStr, "utf-8");
@@ -191,6 +210,19 @@ export class UnixSocketHostClient implements HostClient {
         client.write(msgBuf);
       });
 
+      const onAbort = () => {
+        client.destroy();
+        resolve({
+          id,
+          success: false,
+          error: { code: "CANCELLED", message: "In-flight IPC socket aborted by cancellation signal" }
+        });
+      };
+
+      if (signal) {
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
+
       let incoming = Buffer.alloc(0);
 
       client.on("data", (chunk) => {
@@ -200,17 +232,23 @@ export class UnixSocketHostClient implements HostClient {
           if (incoming.length >= 4 + bodyLen) {
             const bodyBuf = incoming.subarray(4, 4 + bodyLen);
             client.end();
+            if (signal) signal.removeEventListener("abort", onAbort);
             try {
               const response = JSON.parse(bodyBuf.toString("utf-8")) as IPCResponsePayload;
               resolve(response);
             } catch (err) {
-              reject(err);
+              resolve({
+                id,
+                success: false,
+                error: { code: "MALFORMED_RESPONSE", message: `Malformed JSON response from host: ${err}` }
+              });
             }
           }
         }
       });
 
       client.on("error", (err) => {
+        if (signal) signal.removeEventListener("abort", onAbort);
         Logger.warn(`IPC socket connection to ${this.socketPath} failed: ${err.message}`);
         resolve({
           id,

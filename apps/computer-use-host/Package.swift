@@ -12,7 +12,7 @@ let package = Package(
             targets: ["ComputerUseHost"]
         ),
         .executable(
-            name: "ComputerUseHostTests",
+            name: "ComputerUseHostTestsRunner",
             targets: ["ComputerUseHostTests"]
         ),
         .library(
