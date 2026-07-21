@@ -2,8 +2,9 @@
 
 - **Date**: 2026-07-21
 - **Branch**: `codex/bobby-computer-use-v0-20260721t174022z-a9ab71173113`
-- **Parent Source Commit**: `a9d8957c562539883446c28afaf3d3bcbd4f0384`
-- **Scope**: Milestone D2 Production-Bounded Native Observation Slice (Exact-Head 9a1 Architecture, Darwin UDS & Topology Addendum Closure)
+- **Parent Source Commit**: `e325d80a13693373548a385226e11606b3251edb`
+- **Reviewed Terminal Repair Head**: `a9d8957c562539883446c28afaf3d3bcbd4f0384` / `701fcf91dcf6b990f308648cd1ad575cc3acd45a`
+- **Scope**: Milestone D2 Terminal Repair & Production-Bounded Native Observation (Exact-Head 9a1 & Terminal Repair A9D Closure)
 
 ---
 
@@ -53,11 +54,14 @@ Executed via `./bin/agy-computer-use test-native` (Swift 5.10 strict concurrency
    - `! git grep -n "CGRequestScreenCaptureAccess" -- 'apps/computer-use-host/Sources/'`: **0 matches** (Passed)
    - `! git grep -n "CGEvent" -- 'apps/computer-use-host/Sources/'`: **0 matches** (Passed)
    - `! git grep -n "Fake" -- 'apps/computer-use-host/Sources/'`: **0 matches** (Passed)
-2. **Release Binary Symbol Guard & Negative Probe**:
+2. **Release Binary Symbol Guard & Fail-Closed Inspection**:
+   - `swift build -c release -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors`
    - `BIN_PATH=$(swift build -c release --show-bin-path)/ComputerUseHost`
    - `test -f "$BIN_PATH"`: Binary exists (Passed)
-   - `! nm "$BIN_PATH" | swift demangle | grep -iE "Fake|Spy|Scripted|Mock|TestDouble|TestRunner|TestHelper"`: **0 matches** (`ZERO_TEST_DOUBLE_SYMBOLS` in shipped binary, `UnsafeContinuation` allowed).
-   - `! nm /nonexistent/path/ComputerUseHost`: Negative missing binary probe fails closed (Passed).
+   - `NM_OUT=$(nm "$BIN_PATH") && test -n "$NM_OUT"` (Passed)
+   - `DEMANGLED_OUT=$(echo "$NM_OUT" | swift demangle) && test -n "$DEMANGLED_OUT"` (Passed)
+   - `! echo "$DEMANGLED_OUT" | grep -iE "Fake|Spy|Scripted|Mock|TestDouble|TestRunner|TestHelper"`: **0 matches** (Passed)
+   - Missing binary & demangler failure probes fail closed (Passed).
 
 ---
 
@@ -66,10 +70,10 @@ Executed via `./bin/agy-computer-use test-native` (Swift 5.10 strict concurrency
 1. **Protocol Schema Definition**:
    - `docs/protocol_schema.json` defines method-specific strict status, observe, and error request/response subschemas with `additionalProperties: false`.
 2. **Golden JSON Fixture Suite**:
-   - Explicit fixture-to-schema mapping (`FIXTURE_MAPPINGS`) validates active D2 request, response, and error fixtures against Ajv and Zod.
-   - `status_request.json` & `status_response.json`: Validated against Ajv protocol schema and Zod `StatusDataSchema`.
-   - `observe_request.json` & `observe_response.json`: Validated against Ajv protocol schema, Zod `ObserveDataSchema`, and `validateAndDecodeBase64JPEG` asserting embedded JPEG SOF0 markers match `100x100` declared pixel dimensions.
-   - `permission_denied_response.json`, `stale_topology_response.json`, `timeout_response.json`: Validated as error response fixtures.
+   - Explicit fixture-to-schema mapping (`FIXTURE_MAPPINGS`) validates active D2 request, response, and error fixtures against Ajv subschemas and Zod data schemas.
+   - `status_request.json` & `status_response.json`: Validated against Ajv `StatusRequest`/`StatusResponse` subschemas and Zod `StatusDataSchema`.
+   - `observe_request.json` & `observe_response.json`: Validated against Ajv `ObserveRequest`/`ObserveResponse` subschemas, Zod `ObserveDataSchema`, and `validateAndDecodeBase64JPEG` asserting embedded JPEG SOF0 markers match `100x100` declared pixel dimensions.
+   - `permission_denied_response.json`, `stale_topology_response.json`, `timeout_response.json`, `ax_tree_unreachable_response.json`: Validated as `ErrorResponse` fixtures.
 
 ---
 
@@ -78,9 +82,9 @@ Executed via `./bin/agy-computer-use test-native` (Swift 5.10 strict concurrency
 Executed via `cd mcp/computer-use-mcp && pnpm check && pnpm test`:
 
 ```text
-# tests 31
+# tests 34
 # suites 2
-# pass 31
+# pass 34
 # fail 0
 # cancelled 0
 # skipped 0
@@ -89,14 +93,14 @@ Executed via `cd mcp/computer-use-mcp && pnpm check && pnpm test`:
 
 - **Tool Inventory**: `computer_use_status` and `computer_use_observe` (Exactly 2 tools).
 - **Adversarial & Hardening Tests**:
-  - `parseJPEGDimensions` structural validation (SOF0/SOF2, SOS, entropy stuffing/restarts, terminal EOI, no trailing garbage).
-  - Decoder-invocation injection seam proving **zero allocation** on rejected Base64/JPEG payloads ($N+1$, $N+2$, $N+3$).
+  - Full JPEG state machine validation (`parseJPEGDimensions`) enforcing marker ordering, length checks (`SOF == 8 + 3*Nf`, `SOS == 6 + 2*Ns`), SOF0/SOF2 DCT variants, entropy stuffed/restart markers, and terminal EOI with no trailing non-zero garbage.
+  - Allocation-free Base64 precheck validating $N = 10,485,760$ byte exact boundary acceptance and $N+1, N+2, N+3$ rejections before decoder invocation.
   - Single canonical Base64 decoding path (`validateAndDecodeBase64JPEG`).
   - Host client response ID matching (`parsedResp.id === reqId`).
   - Post-dispatch mutation error mapping to `ACTION_OUTCOME_UNKNOWN`.
-  - Signal propagation and `display_id` argument normalization and runtime Zod checks.
+  - Signal propagation, `display_id` argument normalization, and runtime Zod checks.
   - Strict Zod schemas (`.strict()`) and finite numbers (`.finite()`).
-- **Skill Sync**: 100% byte-for-byte identity verified between `.agents/skills/computer-use/` and `skills/computer-use/`.
+  - Skill package 100% recursive byte-for-byte identity between `.agents/skills/computer-use/` and `skills/computer-use/`.
 
 ---
 
@@ -116,7 +120,7 @@ Executed via `./bin/agy-computer-use canary-ready`:
 
 ## Honesty & Boundary Declarations
 
-- **Darwin Race Boundary**: macOS kernel lacks inode-conditional `unlinkat` or `bindat`. Pre-unlink stat checks, nonblocking `connect`/`poll`/`SO_ERROR` probes, and post-bind inode revalidation reduce but cannot eliminate a hostile same-UID final-check race window.
+- **Darwin Race Boundary**: macOS kernel lacks inode-conditional `unlinkat` or `bindat`. Pre-unlink `lstat` checks, nonblocking `connect`/`poll`/`SO_ERROR` probes, and post-bind inode revalidation reduce but cannot eliminate a hostile same-UID final-check race window.
 - **Topology Observation Stability**: Topology resolution uses a 3-pass list enumeration and 2-set descriptor fingerprint check (`bitPattern` comparison). This proves bounded observational stability across fetches rather than an atomic kernel snapshot, bounding residual ABA risk.
 - **Process Isolation & Hung Captures**: Physical capture execution is bounded by an in-process `CaptureBudget` (default max 2 concurrent captures). If a framework call hangs indefinitely inside ScreenCaptureKit, the in-process budget returns `CAPTURE_BUSY` to new requests. Terminating a permanently hung framework capture requires a separate host process boundary or external `SIGKILL`.
 - **Screen Recording Access**: Tested deterministically using `FakeScreenRecordingAuthorizer` and `SCScreenshotCaptureEngine` test double in `Tests/ComputerUseHostTestRunner`. No prompting `CGRequestScreenCaptureAccess` call or live screen capture was triggered.
