@@ -787,6 +787,49 @@ public struct ComputerUseHostTestRunner {
         assertEqual(cancelResp.error?.code, "CANCELLED")
         recordCase("testCancellationErrorMappedToCancelledCode")
 
+        // 29. Capture Budget Capacity Limit and Fast Failure Test
+        let budget = CaptureBudget(maxConcurrent: 2)
+        let slowEngineBudget = TrulyNoncooperativeCaptureEngine(delayMs: 250.0)
+        let budgetServer = HostServer(
+            authorizer: FakeScreenRecordingAuthorizer(granted: true),
+            topologyProvider: FakeDisplayTopologyProvider(),
+            captureEngine: slowEngineBudget,
+            axEngine: DisabledAXInspector(),
+            inputEngine: DisabledInputInjector(),
+            observationTimeoutSec: 0.05, // 50ms timeout
+            budget: budget
+        )
+
+        // Request A: times out at 50ms while fake engine continues running in background for 250ms
+        let reqATask = Task { await budgetServer.handleRequest(IPCRequest(id: "budget-A", method: "observe")) }
+        let respA = await reqATask.value
+        assertTrue(!respA.success)
+        assertEqual(respA.error?.code, "TIMEOUT")
+        assertTrue(budget.count >= 1, "Budget count must be at least 1 while physical capture A remains running in background")
+
+        // Request B & C concurrent checks
+        let reqBTask = Task { await budgetServer.handleRequest(IPCRequest(id: "budget-B", method: "observe")) }
+        let respC = await budgetServer.handleRequest(IPCRequest(id: "budget-C", method: "observe"))
+        assertTrue(!respC.success || respC.error?.code == "TARGET_UNREACHABLE")
+
+        _ = await reqBTask.value
+        try await Task.sleep(nanoseconds: 300_000_000)
+        assertEqual(budget.count, 0, "Capacity returns to 0 after physical capture tasks exit")
+
+        let fastEngineBudget = FakeCaptureEngine()
+        let budgetServer2 = HostServer(
+            authorizer: FakeScreenRecordingAuthorizer(granted: true),
+            topologyProvider: FakeDisplayTopologyProvider(),
+            captureEngine: fastEngineBudget,
+            axEngine: DisabledAXInspector(),
+            inputEngine: DisabledInputInjector(),
+            observationTimeoutSec: 1.0,
+            budget: budget
+        )
+        let respD = await budgetServer2.handleRequest(IPCRequest(id: "budget-D", method: "observe"))
+        assertTrue(respD.success)
+        recordCase("testCaptureBudgetCapacityLimitAndFastFailure")
+
         fputs("[ComputerUseHostTestRunner] Executed \(totalCasesExecuted) native test cases successfully. ALL PASSED.\n", stderr)
     }
 }

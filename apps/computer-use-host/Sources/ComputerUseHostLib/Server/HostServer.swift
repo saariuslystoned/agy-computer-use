@@ -1,29 +1,94 @@
 import Foundation
 
-private final class OneShotResolver<T: Sendable>: @unchecked Sendable {
+public final class CaptureBudget: @unchecked Sendable {
+    public let maxConcurrent: Int
+    private var activeCount: Int = 0
     private let lock = NSLock()
-    private var resumed = false
-    private let continuation: CheckedContinuation<T, Error>
 
-    init(continuation: CheckedContinuation<T, Error>) {
-        self.continuation = continuation
+    public init(maxConcurrent: Int = 2) {
+        self.maxConcurrent = maxConcurrent
     }
 
-    func resolveSuccess(_ value: T) {
+    public var count: Int {
         lock.lock()
         defer { lock.unlock() }
-        if !resumed {
-            resumed = true
-            continuation.resume(returning: value)
+        return activeCount
+    }
+
+    public func acquire() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if activeCount < maxConcurrent {
+            activeCount += 1
+            return true
+        }
+        return false
+    }
+
+    public func release() {
+        lock.lock()
+        defer { lock.unlock() }
+        if activeCount > 0 {
+            activeCount -= 1
+        }
+    }
+}
+
+private final class OneShotArbiter<T: Sendable>: @unchecked Sendable {
+    private enum State {
+        case pending(CheckedContinuation<T, Error>?, Task<Void, Never>?)
+        case resolved(Result<T, Error>)
+    }
+
+    private let lock = NSLock()
+    private var state: State = .pending(nil, nil)
+
+    func installTaskHandle(_ task: Task<Void, Never>) {
+        lock.lock()
+        switch state {
+        case .pending(let cont, _):
+            state = .pending(cont, task)
+            lock.unlock()
+        case .resolved:
+            lock.unlock()
+            task.cancel()
         }
     }
 
-    func resolveFailure(_ error: Error) {
+    func installContinuation(_ continuation: CheckedContinuation<T, Error>) {
         lock.lock()
-        defer { lock.unlock() }
-        if !resumed {
-            resumed = true
-            continuation.resume(throwing: error)
+        switch state {
+        case .pending(_, let task):
+            state = .pending(continuation, task)
+            lock.unlock()
+        case .resolved(let result):
+            lock.unlock()
+            continuation.resume(with: result)
+        }
+    }
+
+    func resolve(with result: Result<T, Error>) {
+        var contToResume: CheckedContinuation<T, Error>? = nil
+        var taskToCancel: Task<Void, Never>? = nil
+
+        lock.lock()
+        switch state {
+        case .pending(let cont, let task):
+            contToResume = cont
+            taskToCancel = task
+            state = .resolved(result)
+            lock.unlock()
+        case .resolved:
+            lock.unlock()
+            return
+        }
+
+        // Resume continuation outside lock
+        if let cont = contToResume {
+            cont.resume(with: result)
+        }
+        if let task = taskToCancel {
+            task.cancel()
         }
     }
 }
@@ -36,6 +101,7 @@ public actor HostServer {
     private let axEngine: AXInspectionEngine
     private let inputEngine: InputSynthesisEngine
     private let observationTimeoutSec: Double
+    private let budget: CaptureBudget
 
     private var latestCapture: CaptureFrameDTO?
     private var activeTopology: DisplayTopology?
@@ -47,7 +113,8 @@ public actor HostServer {
         captureEngine: DisplayCaptureEngine? = nil,
         axEngine: AXInspectionEngine = DisabledAXInspector(),
         inputEngine: InputSynthesisEngine = DisabledInputInjector(),
-        observationTimeoutSec: Double = 5.0
+        observationTimeoutSec: Double = 5.0,
+        budget: CaptureBudget = CaptureBudget(maxConcurrent: 2)
     ) {
         self.authorizer = authorizer
         self.topologyProvider = topologyProvider
@@ -55,6 +122,7 @@ public actor HostServer {
         self.axEngine = axEngine
         self.inputEngine = inputEngine
         self.observationTimeoutSec = observationTimeoutSec
+        self.budget = budget
     }
 
     public func handleRequest(_ request: IPCRequest) async -> IPCResponse {
@@ -102,7 +170,6 @@ public actor HostServer {
 
             case "observe":
                 let initialTopology = try topologyProvider.getTopology()
-                self.activeTopology = initialTopology
 
                 let targetDisplayId: Int
                 if let rawDisplayParam = request.params?["display_id"] {
@@ -120,18 +187,29 @@ public actor HostServer {
                     throw ComputerUseError.targetUnreachable(reason: "Display ID \(targetDisplayId) not found in initial topology")
                 }
 
-                // Increment generation counter and immediately invalidate old lease before await
+                // Acquire physical capture capacity BEFORE incrementing generation or clearing lease
+                guard budget.acquire() else {
+                    throw ComputerUseError.targetUnreachable(reason: "Physical capture capacity limit (\(budget.maxConcurrent)) reached; fast failing observe request")
+                }
+
+                self.activeTopology = initialTopology
                 latestIssuedGeneration += 1
                 let generation = latestIssuedGeneration
                 self.latestCapture = nil
 
-                // Nonisolated actor-safe deadline execution with immediate prompt return
-                let frame = try await HostServer.executeObservationWithDeadline(
-                    captureEngine: captureEngine,
-                    targetDisplayId: targetDisplayId,
-                    initialTopology: initialTopology,
-                    timeoutSec: self.observationTimeoutSec
-                )
+                // Nonisolated actor-safe deadline execution with budget release on physical exit
+                let frame: CaptureFrameDTO
+                do {
+                    frame = try await HostServer.executeObservationWithDeadline(
+                        captureEngine: captureEngine,
+                        targetDisplayId: targetDisplayId,
+                        initialTopology: initialTopology,
+                        timeoutSec: self.observationTimeoutSec,
+                        budget: budget
+                    )
+                } catch {
+                    throw error
+                }
 
                 if Task.isCancelled {
                     throw ComputerUseError.cancelled(reason: "Observation request cancelled")
@@ -216,27 +294,44 @@ public actor HostServer {
         captureEngine: DisplayCaptureEngine,
         targetDisplayId: Int,
         initialTopology: DisplayTopology,
-        timeoutSec: Double
+        timeoutSec: Double,
+        budget: CaptureBudget
     ) async throws -> CaptureFrameDTO {
-        return try await withCheckedThrowingContinuation { continuation in
-            let resolver = OneShotResolver(continuation: continuation)
-
-            let captureTask = Task {
-                do {
-                    let frame = try await captureEngine.captureDisplay(displayId: targetDisplayId, topology: initialTopology)
-                    resolver.resolveSuccess(frame)
-                } catch {
-                    resolver.resolveFailure(error)
-                }
-            }
-
-            let timeoutNano = UInt64(timeoutSec * 1_000_000_000)
-            Task {
-                try? await Task.sleep(nanoseconds: timeoutNano)
-                resolver.resolveFailure(ComputerUseError.timeout(operation: "observe", seconds: timeoutSec))
-                captureTask.cancel()
-            }
+        guard timeoutSec.isFinite && timeoutSec > 0 else {
+            budget.release()
+            throw ComputerUseError.ipcError(reason: "Invalid observation timeout value: \(timeoutSec)")
         }
+
+        let arbiter = OneShotArbiter<CaptureFrameDTO>()
+
+        return try await withTaskCancellationHandler(
+            operation: {
+                try await withCheckedThrowingContinuation { continuation in
+                    arbiter.installContinuation(continuation)
+
+                    let captureTask = Task.detached {
+                        defer { budget.release() }
+                        do {
+                            let frame = try await captureEngine.captureDisplay(displayId: targetDisplayId, topology: initialTopology)
+                            arbiter.resolve(with: .success(frame))
+                        } catch {
+                            arbiter.resolve(with: .failure(error))
+                        }
+                    }
+                    arbiter.installTaskHandle(captureTask)
+
+                    let timeoutNano = UInt64(timeoutSec * 1_000_000_000)
+                    let timerTask = Task.detached {
+                        try? await Task.sleep(nanoseconds: timeoutNano)
+                        arbiter.resolve(with: .failure(ComputerUseError.timeout(operation: "observe", seconds: timeoutSec)))
+                    }
+                    arbiter.installTaskHandle(timerTask)
+                }
+            },
+            onCancel: {
+                arbiter.resolve(with: .failure(ComputerUseError.cancelled(reason: "Observation request explicitly cancelled")))
+            }
+        )
     }
 
     private func validateAndPromoteFrame(

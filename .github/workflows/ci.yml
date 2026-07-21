@@ -40,7 +40,7 @@ jobs:
         run: |
           set -euo pipefail
           TEST_OUT=$(./bin/agy-computer-use test-native 2>&1 | tee /dev/stderr)
-          echo "$TEST_OUT" | grep -E "Executed 28 native test cases successfully"
+          echo "$TEST_OUT" | grep -E "Executed 29 native test cases successfully"
           echo "$TEST_OUT" | grep -F "testLengthPrefixedFraming"
           echo "$TEST_OUT" | grep -F "testOversizedFramingHeaderRejection"
           echo "$TEST_OUT" | grep -F "testDirectoryPreparation"
@@ -69,6 +69,7 @@ jobs:
           echo "$TEST_OUT" | grep -F "testNoncooperativeObservationDeadlineElapsedTime"
           echo "$TEST_OUT" | grep -F "test64MegapixelSafetyPreCheckRejection"
           echo "$TEST_OUT" | grep -F "testCancellationErrorMappedToCancelledCode"
+          echo "$TEST_OUT" | grep -F "testCaptureBudgetCapacityLimitAndFastFailure"
 
       - name: Build Release Executable & Guard Binary Symbols
         run: |
