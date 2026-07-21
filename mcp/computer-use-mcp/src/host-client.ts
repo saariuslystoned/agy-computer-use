@@ -34,6 +34,17 @@ export class MockHostClient implements HostClient {
     const id = `req-${this.reqCounter++}`;
 
     switch (method) {
+      case "handshake":
+        return {
+          id,
+          success: true,
+          data: {
+            protocol_version: "1.0",
+            host_version: "0.1.0",
+            topology_version: "top-v1"
+          }
+        };
+
       case "status":
         return {
           id,
@@ -43,7 +54,8 @@ export class MockHostClient implements HostClient {
             topology_version: "top-v1",
             primary_display_id: 1,
             display_count: 1,
-            tcc_permission_state: "fake_granted"
+            tcc_permission_state: "fake_granted",
+            accessibility_trusted: true
           }
         };
 
@@ -115,6 +127,9 @@ export class MockHostClient implements HostClient {
             }
           };
         }
+        const newCapId = `cap-${String(this.reqCounter).padStart(4, "0")}`;
+        this.latestCaptureId = newCapId;
+
         return {
           id,
           success: true,
@@ -122,7 +137,15 @@ export class MockHostClient implements HostClient {
             action_id: `act-${method}-${this.reqCounter}`,
             status: "verified",
             capture_id: capId,
-            duration_ms: 15.0
+            duration_ms: 15.0,
+            post_action_observation: {
+              capture_id: newCapId,
+              timestamp: Date.now(),
+              topology_version: "top-v1",
+              display_id: 1,
+              image_format: "jpeg",
+              image_data_base64: "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP..."
+            }
           }
         };
       }
@@ -142,6 +165,7 @@ export class MockHostClient implements HostClient {
 
 /**
  * UnixSocketHostClient connects to the native ComputerUseHost Unix domain socket.
+ * Enforces owner-only directory permissions and peer UID validation on macOS using getpeereid / SOL_LOCAL.
  */
 export class UnixSocketHostClient implements HostClient {
   private socketPath: string;

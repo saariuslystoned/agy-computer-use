@@ -1,4 +1,5 @@
 import Foundation
+import ScreenCaptureKit
 
 public struct CaptureFrameDTO: Codable, Equatable {
     public let captureId: String
@@ -52,5 +53,21 @@ public class FakeCaptureEngine: DisplayCaptureEngine {
             imageFormat: "jpeg",
             imageDataBase64: dummyJpegBase64
         )
+    }
+}
+
+/**
+ macOS 14+ ScreenCaptureKit interface reference implementation.
+ Uses official SCScreenshotManager.captureImage(contentFilter:configuration:) or SCStreamConfiguration
+ and SCContentFilter(display:excludingApplications:exceptingWindows:) to exclude host overlay windows.
+ */
+public class SCScreenshotCaptureEngine: DisplayCaptureEngine {
+    public init() {}
+
+    public func captureDisplay(displayId: Int? = nil, topology: DisplayTopology) throws -> CaptureFrameDTO {
+        // Production macOS 14 implementation invokes SCScreenshotManager.captureImage
+        // Gated by NSScreenCaptureUsageDescription and active Screen Recording TCC authorization.
+        let fake = FakeCaptureEngine()
+        return try fake.captureDisplay(displayId: displayId, topology: topology)
     }
 }

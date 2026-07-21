@@ -147,9 +147,18 @@ export function createComputerUseServer(hostClient?: HostClient): Server {
     };
   });
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const { name, arguments: args } = request.params;
+    const signal = extra?.signal;
     Logger.info(`Tool called: ${name}`);
+
+    if (signal?.aborted) {
+      Logger.warn(`Request for tool ${name} aborted before execution.`);
+      return {
+        isError: true,
+        content: [{ type: "text", text: "Tool request cancelled by client signal." }]
+      };
+    }
 
     try {
       switch (name) {

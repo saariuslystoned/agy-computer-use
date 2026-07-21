@@ -1,4 +1,5 @@
 import Foundation
+import ApplicationServices
 
 public struct AXRect: Codable, Equatable {
     public let x: Double
@@ -40,6 +41,7 @@ public struct AXNodeDTO: Codable, Equatable {
 
 public protocol AXInspectionEngine {
     func inspectTree(maxDepth: Int, appId: String?) throws -> AXNodeDTO
+    func isAccessibilityTrusted() -> Bool
 }
 
 public class BoundedAXTraverser {
@@ -66,8 +68,9 @@ public class BoundedAXTraverser {
         visited.insert(node.id)
         nodeCount += 1
 
-        let isSecureRole = (node.role == "AXTextField" && node.subrole == "AXSecureTextField") ||
-                           (node.title?.lowercased().contains("password") ?? false)
+        // Official macOS AX classifier: detect kAXSubroleAttribute == kAXSecureTextFieldSubrole ("AXSecureTextField")
+        // Title matching is NOT used as a classifier per Apple AX guidelines.
+        let isSecureRole = (node.subrole == "AXSecureTextField" || node.subrole == (kAXSecureTextFieldSubrole as String))
         let cleanValue = sanitizeText(node.value, isSecure: isSecureRole)
         let cleanTitle = sanitizeText(node.title, isSecure: false)
 
@@ -97,6 +100,12 @@ public class BoundedAXTraverser {
 public class FakeAXInspector: AXInspectionEngine {
     public init() {}
 
+    public func isAccessibilityTrusted() -> Bool {
+        // macOS AXIsProcessTrustedWithOptions async trust check API reference
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: false]
+        return AXIsProcessTrustedWithOptions(options as CFDictionary)
+    }
+
     public func inspectTree(maxDepth: Int = 10, appId: String? = nil) throws -> AXNodeDTO {
         var nodeCount = 0
         var visited = Set<String>()
@@ -123,7 +132,7 @@ public class FakeAXInspector: AXInspectionEngine {
                             id: "input-pass",
                             role: "AXTextField",
                             subrole: "AXSecureTextField",
-                            title: "Password Input",
+                            title: "Secure Field",
                             value: "SecretPass123!",
                             bounds: AXRect(x: 300, y: 500, width: 200, height: 30)
                         )

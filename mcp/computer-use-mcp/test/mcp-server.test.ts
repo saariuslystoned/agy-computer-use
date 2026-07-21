@@ -3,25 +3,27 @@ import assert from "node:assert/strict";
 import { createComputerUseServer } from "../src/index.js";
 import { MockHostClient } from "../src/host-client.js";
 
-describe("Computer Use MCP Server", () => {
-  test("Lists available tools correctly", async () => {
+describe("Computer Use MCP Server Bridge", () => {
+  test("Performs handshake and status check correctly", async () => {
     const mockClient = new MockHostClient();
-    const server = createComputerUseServer(mockClient);
+    const hs = await mockClient.request("handshake");
+    assert.equal(hs.success, true);
+    assert.equal(hs.data?.protocol_version, "1.0");
 
-    // Call internal list tools handler directly or test client
     const resp = await mockClient.request("status");
     assert.equal(resp.success, true);
     assert.equal(resp.data?.connected, true);
+    assert.equal(resp.data?.accessibility_trusted, true);
   });
 
-  test("Executes observe and click workflow cleanly", async () => {
+  test("Executes observe and click workflow returning post_action_observation", async () => {
     const mockClient = new MockHostClient();
 
     // 1. Observe
     const obsResp = await mockClient.request("observe", { display_id: 1 });
     assert.equal(obsResp.success, true);
-    const capId = obsResp.data?.capture_id as string;
-    assert.ok(capId);
+    const capId1 = obsResp.data?.capture_id as string;
+    assert.ok(capId1);
 
     // 2. Click with valid capture_id
     const clickResp = await mockClient.request("click", {
@@ -29,22 +31,37 @@ describe("Computer Use MCP Server", () => {
       y: 500,
       button: "left",
       click_count: 1,
-      capture_id: capId
+      capture_id: capId1
     });
     assert.equal(clickResp.success, true);
     assert.equal(clickResp.data?.status, "verified");
 
-    // 3. Click with STALE capture_id should fail
+    // Post-action observation check
+    const postObs = clickResp.data?.post_action_observation as any;
+    assert.ok(postObs);
+    const capId2 = postObs.capture_id as string;
+    assert.ok(capId2);
+    assert.notEqual(capId1, capId2);
+
+    // 3. Second click with old capId1 should fail with STALE_CAPTURE
     const staleResp = await mockClient.request("click", {
       x: 500,
       y: 500,
-      capture_id: "stale-cap-0000"
+      capture_id: capId1
     });
     assert.equal(staleResp.success, false);
     assert.equal(staleResp.error?.code, "STALE_CAPTURE");
+
+    // 4. Click with new post-action capId2 should succeed
+    const click2Resp = await mockClient.request("click", {
+      x: 500,
+      y: 500,
+      capture_id: capId2
+    });
+    assert.equal(click2Resp.success, true);
   });
 
-  test("Fetches AX tree with redacted password fields", async () => {
+  test("Fetches AX tree with subrole redacted password fields", async () => {
     const mockClient = new MockHostClient();
     const axResp = await mockClient.request("ax_tree", { max_depth: 5 });
 

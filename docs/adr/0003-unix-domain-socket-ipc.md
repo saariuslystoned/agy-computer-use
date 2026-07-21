@@ -4,16 +4,19 @@
 - **Date**: 2026-07-21
 
 ## Context
-Communication between the TypeScript MCP server and the native Swift host requires low latency, strict local privilege isolation, and framed message boundaries for binary payload (screenshot) transport.
+Communication between the TypeScript MCP server and the native Swift host requires low latency, local privilege isolation, and framed message boundaries for binary payload (screenshot) transport.
 
 ## Decision
-1. **Transport**:
-   - Unix domain socket located at `/tmp/agy-computer-use-$UID/agy-computer-use.sock`.
-   - Socket directory permissions restricted to `chmod 0700` (owner read/write/execute only).
-2. **Peer Security**:
-   - Host checks connecting client effective UID (`LOCAL_PEERCRED` / `SO_PEERCRED`).
-   - Limits socket server to 1 active client connection at a time.
-3. **Framing**:
-   - 4-byte big-endian `uint32` payload length header preceding JSON-encoded UTF-8 message payloads.
-4. **Residual Risk**:
-   - Same-UID unprivileged local processes can connect to the socket if running under the same user account.
+1. **Transport & Darwin Paths**:
+   - Unix domain socket located at Darwin per-user directory `/tmp/agy-computer-use-$UID/agy-computer-use.sock`.
+   - Socket directory created with `umask 077` (`chmod 0700` owner-only).
+   - Socket creation performs fail-closed `lstat` checks verifying owner UID, mode `0700`, and non-symlink status before binding. Never unlinks unverified or live sockets.
+2. **macOS Peer Credentials**:
+   - Peer UID is verified on macOS via `getpeereid(fd, &uid, &gid)` or `getsockopt(fd, SOL_LOCAL, LOCAL_PEERCRED, ...)` (never Linux `SO_PEERCRED`).
+3. **Protocol Framing & Handshake**:
+   - Version handshake (`method: "handshake"`) negotiating protocol version `1.0`.
+   - 4-byte big-endian `uint32` payload length header preceding JSON-encoded UTF-8 message payloads (max payload size 16MB).
+   - Incremental buffer decoding handles fragmented streams and partial writes cleanly.
+4. **Residual Threat Boundary & Future Auth Binding**:
+   - Peer UID check is an admission filter, not authorization against malicious same-UID processes.
+   - Future releases will incorporate signed client token bindings (`AUTH_SECRET` handshake) to prevent untrusted same-UID processes from sending IPC commands.

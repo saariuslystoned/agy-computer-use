@@ -1,12 +1,25 @@
 import Foundation
 
-public class HostServer {
+public final class HostServer: @unchecked Sendable {
+    private let lock = NSLock()
     public let topology: DisplayTopology
     public let captureEngine: DisplayCaptureEngine
     public let axEngine: AXInspectionEngine
     public let inputEngine: InputSynthesisEngine
 
-    public private(set) var latestCapture: CaptureFrameDTO?
+    private var _latestCapture: CaptureFrameDTO?
+    public var latestCapture: CaptureFrameDTO? {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return _latestCapture
+        }
+        set {
+            lock.lock()
+            defer { lock.unlock() }
+            _latestCapture = newValue
+        }
+    }
 
     public init(
         topology: DisplayTopology? = nil,
@@ -21,35 +34,48 @@ public class HostServer {
         self.inputEngine = inputEngine ?? FakeInputInjector()
     }
 
+    private func createPostActionObservation(displayId: Int) throws -> (CaptureFrameDTO, [String: AnyCodable]) {
+        let frame = try captureEngine.captureDisplay(displayId: displayId, topology: topology)
+        self.latestCapture = frame
+        let obsData: [String: AnyCodable] = [
+            "capture_id": .string(frame.captureId),
+            "timestamp": .int(Int(frame.timestamp)),
+            "topology_version": .string(frame.topologyVersion),
+            "display_id": .int(frame.displayId),
+            "width_points": .double(frame.widthPoints),
+            "height_points": .double(frame.heightPoints),
+            "scale_factor": .double(frame.scaleFactor),
+            "image_format": .string(frame.imageFormat),
+            "image_data_base64": .string(frame.imageDataBase64)
+        ]
+        return (frame, obsData)
+    }
+
     public func handleRequest(_ request: IPCRequest) -> IPCResponse {
         do {
             switch request.method {
+            case "handshake":
+                let handshakeData: [String: AnyCodable] = [
+                    "protocol_version": .string("1.0"),
+                    "host_version": .string("0.1.0"),
+                    "topology_version": .string(topology.version)
+                ]
+                return IPCResponse(id: request.id, success: true, data: handshakeData)
+
             case "status":
                 let statusData: [String: AnyCodable] = [
                     "connected": .bool(true),
                     "topology_version": .string(topology.version),
                     "primary_display_id": .int(topology.primaryDisplayId),
                     "display_count": .int(topology.displays.count),
-                    "tcc_permission_state": .string("fake_granted")
+                    "tcc_permission_state": .string("fake_granted"),
+                    "accessibility_trusted": .bool(axEngine.isAccessibilityTrusted())
                 ]
                 return IPCResponse(id: request.id, success: true, data: statusData)
 
             case "observe":
                 let displayId = request.params?["display_id"]?.rawValue as? Int
-                let frame = try captureEngine.captureDisplay(displayId: displayId, topology: topology)
-                self.latestCapture = frame
-
-                let observeData: [String: AnyCodable] = [
-                    "capture_id": .string(frame.captureId),
-                    "timestamp": .int(Int(frame.timestamp)),
-                    "topology_version": .string(frame.topologyVersion),
-                    "display_id": .int(frame.displayId),
-                    "width_points": .double(frame.widthPoints),
-                    "height_points": .double(frame.heightPoints),
-                    "scale_factor": .double(frame.scaleFactor),
-                    "image_format": .string(frame.imageFormat),
-                    "image_data_base64": .string(frame.imageDataBase64)
-                ]
+                let (_, observeData) = try createPostActionObservation(displayId: displayId ?? topology.primaryDisplayId)
                 return IPCResponse(id: request.id, success: true, data: observeData)
 
             case "ax_tree":
@@ -81,11 +107,14 @@ public class HostServer {
                 let targetDisplay = topology.displays.first(where: { $0.id == currentCap.displayId }) ?? topology.displays[0]
                 let result = try inputEngine.performClick(gridX: x, gridY: y, button: btn, clickCount: clickCount, captureId: capId, currentCaptureId: currentCap.captureId, display: targetDisplay)
 
+                let (_, postObs) = try createPostActionObservation(displayId: targetDisplay.id)
+
                 let resultData: [String: AnyCodable] = [
                     "action_id": .string(result.actionId),
                     "status": .string(result.status),
                     "capture_id": .string(result.captureId),
-                    "duration_ms": .double(result.durationMs)
+                    "duration_ms": .double(result.durationMs),
+                    "post_action_observation": .dictionary(postObs)
                 ]
                 return IPCResponse(id: request.id, success: true, data: resultData)
 
@@ -101,11 +130,14 @@ public class HostServer {
                 let targetDisplay = topology.displays.first(where: { $0.id == currentCap.displayId }) ?? topology.displays[0]
                 let result = try inputEngine.performMove(gridX: x, gridY: y, captureId: capId, currentCaptureId: currentCap.captureId, display: targetDisplay)
 
+                let (_, postObs) = try createPostActionObservation(displayId: targetDisplay.id)
+
                 let resultData: [String: AnyCodable] = [
                     "action_id": .string(result.actionId),
                     "status": .string(result.status),
                     "capture_id": .string(result.captureId),
-                    "duration_ms": .double(result.durationMs)
+                    "duration_ms": .double(result.durationMs),
+                    "post_action_observation": .dictionary(postObs)
                 ]
                 return IPCResponse(id: request.id, success: true, data: resultData)
 
@@ -123,11 +155,14 @@ public class HostServer {
                 let targetDisplay = topology.displays.first(where: { $0.id == currentCap.displayId }) ?? topology.displays[0]
                 let result = try inputEngine.performDrag(startX: startX, startY: startY, endX: endX, endY: endY, captureId: capId, currentCaptureId: currentCap.captureId, display: targetDisplay)
 
+                let (_, postObs) = try createPostActionObservation(displayId: targetDisplay.id)
+
                 let resultData: [String: AnyCodable] = [
                     "action_id": .string(result.actionId),
                     "status": .string(result.status),
                     "capture_id": .string(result.captureId),
-                    "duration_ms": .double(result.durationMs)
+                    "duration_ms": .double(result.durationMs),
+                    "post_action_observation": .dictionary(postObs)
                 ]
                 return IPCResponse(id: request.id, success: true, data: resultData)
 
@@ -139,13 +174,17 @@ public class HostServer {
                 guard let currentCap = latestCapture else {
                     throw ComputerUseError.staleCapture(current: "none", received: capId)
                 }
+                let targetDisplay = topology.displays.first(where: { $0.id == currentCap.displayId }) ?? topology.displays[0]
                 let result = try inputEngine.performType(text: text, captureId: capId, currentCaptureId: currentCap.captureId)
+
+                let (_, postObs) = try createPostActionObservation(displayId: targetDisplay.id)
 
                 let resultData: [String: AnyCodable] = [
                     "action_id": .string(result.actionId),
                     "status": .string(result.status),
                     "capture_id": .string(result.captureId),
-                    "duration_ms": .double(result.durationMs)
+                    "duration_ms": .double(result.durationMs),
+                    "post_action_observation": .dictionary(postObs)
                 ]
                 return IPCResponse(id: request.id, success: true, data: resultData)
 
@@ -158,13 +197,17 @@ public class HostServer {
                 guard let currentCap = latestCapture else {
                     throw ComputerUseError.staleCapture(current: "none", received: capId)
                 }
+                let targetDisplay = topology.displays.first(where: { $0.id == currentCap.displayId }) ?? topology.displays[0]
                 let result = try inputEngine.performShortcut(keys: keys, captureId: capId, currentCaptureId: currentCap.captureId)
+
+                let (_, postObs) = try createPostActionObservation(displayId: targetDisplay.id)
 
                 let resultData: [String: AnyCodable] = [
                     "action_id": .string(result.actionId),
                     "status": .string(result.status),
                     "capture_id": .string(result.captureId),
-                    "duration_ms": .double(result.durationMs)
+                    "duration_ms": .double(result.durationMs),
+                    "post_action_observation": .dictionary(postObs)
                 ]
                 return IPCResponse(id: request.id, success: true, data: resultData)
 
@@ -182,11 +225,14 @@ public class HostServer {
                 let targetDisplay = topology.displays.first(where: { $0.id == currentCap.displayId }) ?? topology.displays[0]
                 let result = try inputEngine.performScroll(gridX: x, gridY: y, deltaX: deltaX, deltaY: deltaY, captureId: capId, currentCaptureId: currentCap.captureId, display: targetDisplay)
 
+                let (_, postObs) = try createPostActionObservation(displayId: targetDisplay.id)
+
                 let resultData: [String: AnyCodable] = [
                     "action_id": .string(result.actionId),
                     "status": .string(result.status),
                     "capture_id": .string(result.captureId),
-                    "duration_ms": .double(result.durationMs)
+                    "duration_ms": .double(result.durationMs),
+                    "post_action_observation": .dictionary(postObs)
                 ]
                 return IPCResponse(id: request.id, success: true, data: resultData)
 
