@@ -108,7 +108,7 @@ public final class SocketListener: @unchecked Sendable {
                 throw ComputerUseError.ipcError(reason: "Failed to open or create host.lock file at \(lockPath)")
             }
 
-            let flockRes = syscalls.flock(lockFd, LOCK_EX | LOCK_NB)
+            let flockRes = syscalls.fileFlock(lockFd, LOCK_EX | LOCK_NB)
             guard flockRes == 0 else {
                 _ = syscalls.close(lockFd)
                 lockFd = -1
@@ -265,7 +265,7 @@ public final class SocketListener: @unchecked Sendable {
                 }
             }
             if lockFd >= 0 {
-                _ = syscalls.flock(lockFd, LOCK_UN)
+                _ = syscalls.fileFlock(lockFd, LOCK_UN)
                 _ = syscalls.close(lockFd)
                 lockFd = -1
             }
@@ -537,7 +537,7 @@ public final class SocketListener: @unchecked Sendable {
         }
 
         if lockFd >= 0 {
-            _ = syscalls.flock(lockFd, LOCK_UN)
+            _ = syscalls.fileFlock(lockFd, LOCK_UN)
             _ = syscalls.close(lockFd)
             lockFd = -1
         }

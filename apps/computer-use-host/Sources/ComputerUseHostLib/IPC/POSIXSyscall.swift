@@ -15,7 +15,7 @@ public protocol POSIXSyscallProviding: Sendable {
     func getsockopt(_ socket: Int32, _ level: Int32, _ optionName: Int32, _ optionValue: UnsafeMutableRawPointer?, _ optionLen: UnsafeMutablePointer<socklen_t>?) -> Int32
     func lstat(_ path: UnsafePointer<CChar>, _ buf: UnsafeMutablePointer<stat>?) -> Int32
     func fstat(_ fd: Int32, _ buf: UnsafeMutablePointer<stat>?) -> Int32
-    func flock(_ fd: Int32, _ operation: Int32) -> Int32
+    func fileFlock(_ fd: Int32, _ operation: Int32) -> Int32
     func unlink(_ path: UnsafePointer<CChar>) -> Int32
     func rmdir(_ path: UnsafePointer<CChar>) -> Int32
     func mkdir(_ path: UnsafePointer<CChar>, _ mode: mode_t) -> Int32
@@ -88,7 +88,7 @@ public final class DarwinPOSIXSyscalls: POSIXSyscallProviding, @unchecked Sendab
     public func fstat(_ fd: Int32, _ buf: UnsafeMutablePointer<stat>?) -> Int32 {
         Darwin.fstat(fd, buf)
     }
-    public func flock(_ fd: Int32, _ operation: Int32) -> Int32 {
+    public func fileFlock(_ fd: Int32, _ operation: Int32) -> Int32 {
         sys_flock(fd, operation)
     }
     public func unlink(_ path: UnsafePointer<CChar>) -> Int32 {

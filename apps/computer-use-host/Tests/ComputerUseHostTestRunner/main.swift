@@ -198,7 +198,7 @@ public final class ScriptedPOSIXSyscalls: POSIXSyscallProviding, @unchecked Send
     public func getsockopt(_ socket: Int32, _ level: Int32, _ optionName: Int32, _ optionValue: UnsafeMutableRawPointer?, _ optionLen: UnsafeMutablePointer<socklen_t>?) -> Int32 { clearErrno(); return underlying.getsockopt(socket, level, optionName, optionValue, optionLen) }
     public func lstat(_ path: UnsafePointer<CChar>, _ buf: UnsafeMutablePointer<stat>?) -> Int32 { clearErrno(); return underlying.lstat(path, buf) }
     public func fstat(_ fd: Int32, _ buf: UnsafeMutablePointer<stat>?) -> Int32 { clearErrno(); return underlying.fstat(fd, buf) }
-    public func flock(_ fd: Int32, _ operation: Int32) -> Int32 { clearErrno(); return underlying.flock(fd, operation) }
+    public func fileFlock(_ fd: Int32, _ operation: Int32) -> Int32 { clearErrno(); return underlying.fileFlock(fd, operation) }
     public func unlink(_ path: UnsafePointer<CChar>) -> Int32 { clearErrno(); return underlying.unlink(path) }
     public func rmdir(_ path: UnsafePointer<CChar>) -> Int32 { clearErrno(); return underlying.rmdir(path) }
     public func mkdir(_ path: UnsafePointer<CChar>, _ mode: mode_t) -> Int32 { clearErrno(); return underlying.mkdir(path, mode) }
