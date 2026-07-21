@@ -34,7 +34,7 @@ jobs:
         run: |
           set -euo pipefail
           TEST_OUT=$(./bin/agy-computer-use test-native 2>&1 | tee /dev/stderr)
-          echo "$TEST_OUT" | grep -E "Executed 13 native test cases successfully"
+          echo "$TEST_OUT" | grep -E "Executed 15 native test cases successfully"
 
       - name: Build Release Executable & Guard Binary Symbols
         run: |

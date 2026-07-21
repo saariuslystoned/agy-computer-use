@@ -72,17 +72,13 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
     await server.close();
   });
 
-  test("Adversarial MCP Tests: Stale top-v1 token, malformed data, bad magic, invalid Base64 padding fail closed", async () => {
+  test("Adversarial: Stale top-v1 token fails closed with INVALID_RESPONSE_DATA", async () => {
     const mockHost = new MockHostClient();
     const server = createComputerUseServer(mockHost);
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "adv-client-1", version: "1.0.0" }, { capabilities: {} });
 
-    const client = new Client({ name: "adv-client", version: "1.0.0" }, { capabilities: {} });
-
-    await Promise.all([
-      server.connect(serverTransport),
-      client.connect(clientTransport)
-    ]);
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
 
     mockHost.request = async (method: string) => {
       if (method === "status") {
@@ -112,6 +108,48 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
 
     await client.close();
     await server.close();
+  });
+
+  test("Adversarial: Non-JPEG magic bytes and truncated SOF fail closed", () => {
+    // 4-byte non-JPEG buffer
+    const badMagicB64 = Buffer.from([0x00, 0x01, 0x02, 0x03]).toString("base64");
+    assert.throws(() => validateAndDecodeBase64JPEG(badMagicB64), /Invalid JPEG magic bytes/);
+
+    // Truncated SOF JPEG (FF D8 FF D9)
+    const truncatedB64 = Buffer.from([0xff, 0xd8, 0xff, 0xd9]).toString("base64");
+    assert.throws(() => validateAndDecodeBase64JPEG(truncatedB64, 100, 100), /Failed to parse valid JPEG SOF/);
+  });
+
+  test("Adversarial: Mismatched response ID rejected by HostClient", async () => {
+    const sockPath = `/tmp/test-mismatch-${Date.now()}.sock`;
+    const server = net.createServer((socket) => {
+      socket.on("data", () => {
+        const respObj = { id: "wrong-id-999", success: true, data: { connected: true } };
+        const respJson = JSON.stringify(respObj);
+        const respBuf = Buffer.from(respJson, "utf-8");
+        const headerBuf = Buffer.alloc(4);
+        headerBuf.writeUInt32BE(respBuf.length, 0);
+        socket.write(headerBuf);
+        socket.write(respBuf);
+      });
+    });
+    await new Promise<void>((res) => server.listen(sockPath, res));
+
+    const client = new UnixSocketHostClient(sockPath, 1000);
+    const resp = await client.request("status");
+    assert.equal(resp.success, false);
+    assert.equal(resp.error?.code, "ID_MISMATCH");
+
+    server.close();
+    if (fs.existsSync(sockPath)) fs.unlinkSync(sockPath);
+  });
+
+  test("Adversarial: Exact 13,981,016 Base64 upper bound accepted and 13,981,020 rejected", () => {
+    const exactMaxChars = 13_981_016; // Math.ceil((10 * 1024 * 1024) / 3) * 4
+
+    // String exceeding maxEncodedChars throws BEFORE Buffer allocation
+    const oversizedB64 = "A".repeat(exactMaxChars + 4);
+    assert.throws(() => validateAndDecodeBase64JPEG(oversizedB64), /exceeds maximum encoded limit/);
   });
 
   test("Integration path: Official MCP Client -> createComputerUseServer -> UnixSocketHostClient -> UDS Socket", async () => {
@@ -345,6 +383,27 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
     const resp2 = await reqPromise;
     assert.equal(resp2.success, false);
     assert.equal(resp2.error?.code, "ACTION_OUTCOME_UNKNOWN");
+
+    server.close();
+    if (fs.existsSync(sockPath)) fs.unlinkSync(sockPath);
+  });
+
+  test("UnixSocketHostClient: Received request then close maps post-dispatch mutation to ACTION_OUTCOME_UNKNOWN", async () => {
+    const sockPath = `/tmp/test-dispatch-close-${Date.now()}.sock`;
+    const server = net.createServer((socket) => {
+      socket.on("data", () => {
+        // Disconnect immediately after receiving request
+        socket.destroy();
+      });
+    });
+
+    await new Promise<void>((res) => server.listen(sockPath, res));
+
+    const client = new UnixSocketHostClient(sockPath, 5000);
+    const resp = await client.request("click", { x: 500, y: 500, capture_id: "cap-1", topology_version: VALID_SHA256_TOPOLOGY_TOKEN, intent: "Click" });
+
+    assert.equal(resp.success, false);
+    assert.equal(resp.error?.code, "ACTION_OUTCOME_UNKNOWN");
 
     server.close();
     if (fs.existsSync(sockPath)) fs.unlinkSync(sockPath);

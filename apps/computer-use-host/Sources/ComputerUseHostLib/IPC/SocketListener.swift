@@ -5,6 +5,7 @@ public final class SocketListener: @unchecked Sendable {
     private let server: HostServer
     private var serverFd: Int32 = -1
     private var isRunning: Bool = false
+    private var boundInode: ino_t = 0
     private let lock = NSLock()
     private let perFrameTimeoutSec: Double
 
@@ -48,6 +49,10 @@ public final class SocketListener: @unchecked Sendable {
             throw ComputerUseError.ipcError(reason: "Failed to lstat directory: \(path)")
         }
 
+        guard statBuf.st_uid == getuid() else {
+            throw ComputerUseError.ipcError(reason: "Directory owner UID \(statBuf.st_uid) does not match current user UID \(getuid())")
+        }
+
         guard (statBuf.st_mode & S_IFMT) == S_IFDIR else {
             throw ComputerUseError.ipcError(reason: "Path is not a directory: \(path)")
         }
@@ -66,7 +71,14 @@ public final class SocketListener: @unchecked Sendable {
         let parentDir = (socketPath as NSString).deletingLastPathComponent
         try SocketListener.prepareDirectory(at: parentDir)
 
-        if FileManager.default.fileExists(atPath: socketPath) {
+        var statBuf = stat()
+        if lstat(socketPath, &statBuf) == 0 {
+            guard statBuf.st_uid == getuid() else {
+                throw ComputerUseError.ipcError(reason: "Refusing to unlink socket owned by foreign UID \(statBuf.st_uid)")
+            }
+            guard (statBuf.st_mode & S_IFMT) == S_IFSOCK else {
+                throw ComputerUseError.ipcError(reason: "Refusing to unlink non-socket file at \(socketPath)")
+            }
             _ = unlink(socketPath)
         }
 
@@ -110,6 +122,11 @@ public final class SocketListener: @unchecked Sendable {
             throw ComputerUseError.ipcError(reason: "Failed to bind socket at \(socketPath): errno \(err)")
         }
 
+        var boundStat = stat()
+        if lstat(socketPath, &boundStat) == 0 {
+            self.boundInode = boundStat.st_ino
+        }
+
         let listenRes = listen(serverFd, 5)
         guard listenRes == 0 else {
             let err = errno
@@ -150,24 +167,30 @@ public final class SocketListener: @unchecked Sendable {
             close(clientFd)
         }
 
+        var peerUid: uid_t = 0
+        var peerGid: gid_t = 0
+        let peerRes = getpeereid(clientFd, &peerUid, &peerGid)
+        guard peerRes == 0, peerUid == getuid() else {
+            return true
+        }
+
         var nosigpipe: Int32 = 1
         let optRes = setsockopt(clientFd, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, socklen_t(MemoryLayout<Int32>.size))
         guard optRes == 0 else {
             return true
         }
 
-        // Monotonic deadline calculations using ContinuousClock
         let clock = ContinuousClock()
-        let headerDeadline = clock.now + .seconds(2)
-        let bodyDeadline = clock.now + .seconds(3)
-        let writeDeadline = clock.now + .seconds(2)
 
+        // 1. Header read phase: 2s deadline
+        let headerDeadline = clock.now + .seconds(2)
         do {
             var headerBuffer = Data()
             try readExactly(count: 4, from: clientFd, into: &headerBuffer, clock: clock, deadline: headerDeadline, operation: "socket_read_header")
 
             let payloadLength = Int(headerBuffer[0]) << 24 | Int(headerBuffer[1]) << 16 | Int(headerBuffer[2]) << 8 | Int(headerBuffer[3])
             guard payloadLength > 0, payloadLength <= LengthPrefixedFramer.maxPayloadSize else {
+                let writeDeadline = clock.now + .seconds(2)
                 let errResp = IPCResponse(
                     id: "unknown",
                     success: false,
@@ -177,14 +200,21 @@ public final class SocketListener: @unchecked Sendable {
                 return true
             }
 
+            // 2. Body read phase: 3s deadline starting at body phase start
+            let bodyDeadline = clock.now + .seconds(3)
             var payloadBuffer = Data()
             try readExactly(count: payloadLength, from: clientFd, into: &payloadBuffer, clock: clock, deadline: bodyDeadline, operation: "socket_read_body")
 
             let request = try JSONDecoder().decode(IPCRequest.self, from: payloadBuffer)
+
+            // 3. Execution phase: HostServer handles request with its own deadline
             let response = await server.handleRequest(request)
 
+            // 4. Response write phase: 2s deadline starting at write phase start
+            let writeDeadline = clock.now + .seconds(2)
             try writeResponse(response, to: clientFd, clock: clock, deadline: writeDeadline)
         } catch let err as ComputerUseError {
+            let writeDeadline = clock.now + .seconds(2)
             let errResp = IPCResponse(
                 id: "err-\(UUID().uuidString)",
                 success: false,
@@ -192,6 +222,7 @@ public final class SocketListener: @unchecked Sendable {
             )
             _ = try? writeResponse(errResp, to: clientFd, clock: clock, deadline: writeDeadline)
         } catch {
+            let writeDeadline = clock.now + .seconds(2)
             let errResp = IPCResponse(
                 id: "err-\(UUID().uuidString)",
                 success: false,
@@ -302,8 +333,11 @@ public final class SocketListener: @unchecked Sendable {
             serverFd = -1
         }
 
-        if FileManager.default.fileExists(atPath: socketPath) {
-            _ = unlink(socketPath)
+        var statBuf = stat()
+        if lstat(socketPath, &statBuf) == 0 {
+            if statBuf.st_ino == self.boundInode && statBuf.st_uid == getuid() {
+                _ = unlink(socketPath)
+            }
         }
     }
 }

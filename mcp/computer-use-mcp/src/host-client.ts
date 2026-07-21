@@ -6,14 +6,14 @@ export const IPCErrorPayloadSchema = z.object({
   code: z.string().min(1),
   message: z.string().min(1),
   details: z.record(z.unknown()).optional()
-});
+}).strict();
 
 export const IPCResponseSchema = z.object({
   id: z.string().min(1),
   success: z.boolean(),
   data: z.record(z.unknown()).optional(),
   error: IPCErrorPayloadSchema.optional()
-}).refine(
+}).strict().refine(
   (data) => {
     if (data.success) {
       return data.data !== undefined && data.error === undefined;
@@ -77,7 +77,7 @@ export class MockHostClient implements HostClient {
     if (method === "observe") {
       const targetId = (params?.display_id as number) ?? this.mockDisplayId;
       const topVer = "top-sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-      const dummyJpegBase64 = "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=";
+      const dummyJpegBase64 = "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAARCABkAGQDAREAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/9oADAMBAAIRAxEAPwD+2AD/2Q==";
 
       return {
         id: "mock-obs",
@@ -90,8 +90,8 @@ export class MockHostClient implements HostClient {
           width_points: 1920,
           height_points: 1080,
           scale_factor: 2.0,
-          pixel_width: 1,
-          pixel_height: 1,
+          pixel_width: 100,
+          pixel_height: 100,
           image_format: "jpeg",
           image_data_base64: dummyJpegBase64,
           normalized_bounds: {
@@ -266,11 +266,19 @@ export class UnixSocketHostClient implements HostClient {
         client?.write(msgBuf, (err) => {
           if (err) {
             clearTimeout(timer);
-            finish({
-              id: reqId,
-              success: false,
-              error: { code: "IPC_ERROR", message: `Socket write error: ${err.message}` }
-            });
+            if (isDispatched) {
+              finish({
+                id: reqId,
+                success: false,
+                error: { code: "ACTION_OUTCOME_UNKNOWN", message: `Socket write error after dispatch: ${err.message}` }
+              });
+            } else {
+              finish({
+                id: reqId,
+                success: false,
+                error: { code: "IPC_ERROR", message: `Socket write error: ${err.message}` }
+              });
+            }
           }
         });
       });
@@ -302,6 +310,14 @@ export class UnixSocketHostClient implements HostClient {
           try {
             const rawObj = JSON.parse(jsonBuf.toString("utf-8"));
             const parsedResp = IPCResponseSchema.parse(rawObj);
+            if (parsedResp.id !== reqId) {
+              finish({
+                id: reqId,
+                success: false,
+                error: { code: "ID_MISMATCH", message: `IPC response ID '${parsedResp.id}' does not match request ID '${reqId}'` }
+              });
+              return;
+            }
             finish(parsedResp);
           } catch (parseErr: any) {
             finish({
@@ -315,21 +331,37 @@ export class UnixSocketHostClient implements HostClient {
 
       client.on("error", (err) => {
         clearTimeout(timer);
-        finish({
-          id: reqId,
-          success: false,
-          error: { code: "IPC_ERROR", message: `IPC socket error: ${err.message}` }
-        });
+        if (isDispatched) {
+          finish({
+            id: reqId,
+            success: false,
+            error: { code: "ACTION_OUTCOME_UNKNOWN", message: `IPC socket error after dispatch: ${err.message}` }
+          });
+        } else {
+          finish({
+            id: reqId,
+            success: false,
+            error: { code: "IPC_ERROR", message: `IPC socket error: ${err.message}` }
+          });
+        }
       });
 
       client.on("end", () => {
         if (!isSettled && (expectedLen === null || responseBuffer.length < 4 + expectedLen)) {
           clearTimeout(timer);
-          finish({
-            id: reqId,
-            success: false,
-            error: { code: "EOF", message: "IPC socket closed before complete response payload was received" }
-          });
+          if (isDispatched) {
+            finish({
+              id: reqId,
+              success: false,
+              error: { code: "ACTION_OUTCOME_UNKNOWN", message: "Socket closed after mutation dispatch; action outcome is unknown." }
+            });
+          } else {
+            finish({
+              id: reqId,
+              success: false,
+              error: { code: "EOF", message: "IPC socket closed before complete response payload was received" }
+            });
+          }
         }
       });
     });

@@ -29,8 +29,10 @@ export function parseJPEGDimensions(buf: Buffer): JPEGDimensions | null {
 
     // SOF0 (0xC0), SOF1 (0xC1), SOF2 (0xC2)
     if (marker === 0xc0 || marker === 0xc1 || marker === 0xc2) {
+      if (offset + 8 >= buf.length) return null;
       const height = (buf[offset + 5] << 8) | buf[offset + 6];
       const width = (buf[offset + 7] << 8) | buf[offset + 8];
+      if (width <= 0 || height <= 0) return null;
       return { width, height };
     }
 
@@ -42,6 +44,7 @@ export function parseJPEGDimensions(buf: Buffer): JPEGDimensions | null {
     // Skip segment payload
     if (offset + 3 < buf.length) {
       const segLen = (buf[offset + 2] << 8) | buf[offset + 3];
+      if (segLen < 2) return null;
       offset += 2 + segLen;
     } else {
       break;
@@ -60,7 +63,7 @@ export function validateAndDecodeBase64JPEG(base64Data: string, expectedPixelWid
     throw new Error("Base64 string length must be a multiple of 4");
   }
 
-  const maxEncodedChars = Math.ceil((10 * 1024 * 1024 * 4) / 3);
+  const maxEncodedChars = Math.ceil((10 * 1024 * 1024) / 3) * 4;
   if (base64Data.length > maxEncodedChars) {
     throw new Error(`Base64 payload length ${base64Data.length} exceeds maximum encoded limit ${maxEncodedChars}`);
   }
@@ -85,10 +88,11 @@ export function validateAndDecodeBase64JPEG(base64Data: string, expectedPixelWid
 
   if (expectedPixelWidth !== undefined && expectedPixelHeight !== undefined) {
     const dims = parseJPEGDimensions(imageBuffer);
-    if (dims) {
-      if (dims.width !== expectedPixelWidth || dims.height !== expectedPixelHeight) {
-        throw new Error(`JPEG dimensions (${dims.width}x${dims.height}) do not match declared pixel dimensions (${expectedPixelWidth}x${expectedPixelHeight})`);
-      }
+    if (!dims) {
+      throw new Error("Failed to parse valid JPEG SOF marker or dimensions are absent");
+    }
+    if (dims.width !== expectedPixelWidth || dims.height !== expectedPixelHeight) {
+      throw new Error(`JPEG dimensions (${dims.width}x${dims.height}) do not match declared pixel dimensions (${expectedPixelWidth}x${expectedPixelHeight})`);
     }
   }
 
@@ -247,18 +251,36 @@ export function createComputerUseServer(hostClient: HostClient): Server {
     };
   });
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const { name, arguments: args } = request.params;
 
     if (name === "computer_use_status") {
-      const ipcResp = await hostClient.request("status");
+      const ipcResp = await hostClient.request("status", undefined, extra?.signal);
       return formatToolResponse(ipcResp, name);
     }
 
     if (name === "computer_use_observe") {
+      if (args?.display_id !== undefined) {
+        if (typeof args.display_id !== "number" || !Number.isInteger(args.display_id) || args.display_id < 1 || !Number.isFinite(args.display_id)) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  error: {
+                    code: "INVALID_ARGUMENT",
+                    message: "Parameter 'display_id' must be a positive integer"
+                  }
+                }, null, 2)
+              }
+            ]
+          };
+        }
+      }
       const displayId = args?.display_id as number | undefined;
       const params = displayId !== undefined ? { display_id: displayId } : undefined;
-      const ipcResp = await hostClient.request("observe", params);
+      const ipcResp = await hostClient.request("observe", params, extra?.signal);
       return formatToolResponse(ipcResp, name);
     }
 

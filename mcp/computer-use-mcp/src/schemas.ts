@@ -27,22 +27,22 @@ export const Base64ImageSchema = z.string().superRefine((data, ctx) => {
 });
 
 export const DisplayInfoSchema = z.object({
-  id: z.number().int().positive(),
-  width_points: z.number().positive(),
-  height_points: z.number().positive(),
-  scale_factor: z.number().positive(),
-  origin_x: z.number(),
-  origin_y: z.number(),
-  pixel_width: z.number().int().positive(),
-  pixel_height: z.number().int().positive(),
-  rotation: z.number()
-});
+  id: z.number().int().positive().finite(),
+  width_points: z.number().positive().finite(),
+  height_points: z.number().positive().finite(),
+  scale_factor: z.number().positive().finite(),
+  origin_x: z.number().finite(),
+  origin_y: z.number().finite(),
+  pixel_width: z.number().int().positive().finite(),
+  pixel_height: z.number().int().positive().finite(),
+  rotation: z.number().finite()
+}).strict();
 
 export const DisplayTopologySchema = z.object({
   version: TopologyVersionSchema,
-  primary_display_id: z.number().int().positive(),
+  primary_display_id: z.number().int().positive().finite(),
   displays: z.array(DisplayInfoSchema).min(1)
-}).refine(
+}).strict().refine(
   (data) => data.displays.some((d) => d.id === data.primary_display_id),
   { message: "primary_display_id must exist in displays array" }
 ).refine(
@@ -60,10 +60,10 @@ export const StatusDataSchema = z.object({
   accessibility_trusted: z.boolean(),
   input_mutation_state: z.enum(["enabled", "disabled"]),
   topology_version: TopologyVersionSchema,
-  primary_display_id: z.number().int().positive(),
-  display_count: z.number().int().positive(),
+  primary_display_id: z.number().int().positive().finite(),
+  display_count: z.number().int().positive().finite(),
   topology: DisplayTopologySchema
-}).refine(
+}).strict().refine(
   (data) => data.topology_version === data.topology.version,
   { message: "topology_version must match topology.version" }
 ).refine(
@@ -76,20 +76,20 @@ export const StatusDataSchema = z.object({
 
 export const ObserveDataSchema = z.object({
   capture_id: z.string().min(1),
-  timestamp: z.number().int().positive(),
+  timestamp: z.number().int().positive().finite(),
   topology_version: TopologyVersionSchema,
-  display_id: z.number().int().positive(),
-  width_points: z.number().positive(),
-  height_points: z.number().positive(),
-  scale_factor: z.number().positive(),
-  pixel_width: z.number().int().positive(),
-  pixel_height: z.number().int().positive(),
+  display_id: z.number().int().positive().finite(),
+  width_points: z.number().positive().finite(),
+  height_points: z.number().positive().finite(),
+  scale_factor: z.number().positive().finite(),
+  pixel_width: z.number().int().positive().finite(),
+  pixel_height: z.number().int().positive().finite(),
   image_format: z.literal("jpeg"),
   image_data_base64: Base64ImageSchema,
   normalized_bounds: z.object({
-    min_x: z.number().int().min(0).max(999),
-    min_y: z.number().int().min(0).max(999),
-    max_x: z.number().int().min(0).max(999),
-    max_y: z.number().int().min(0).max(999)
-  })
-});
+    min_x: z.number().int().min(0).max(999).finite(),
+    min_y: z.number().int().min(0).max(999).finite(),
+    max_x: z.number().int().min(0).max(999).finite(),
+    max_y: z.number().int().min(0).max(999).finite()
+  }).strict()
+}).strict();

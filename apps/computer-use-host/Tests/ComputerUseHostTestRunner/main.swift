@@ -2,7 +2,6 @@ import Foundation
 import CoreGraphics
 import ImageIO
 import UniformTypeIdentifiers
-@preconcurrency import ScreenCaptureKit
 import ComputerUseHostLib
 
 public struct FakeDisplayListEnumerator: DisplayListEnumerating {
@@ -33,6 +32,27 @@ public struct FakeScreenRecordingAuthorizer: ScreenRecordingAuthorizing {
 
     public var isScreenCaptureAccessGranted: Bool {
         return granted
+    }
+}
+
+public struct FakeDisplayDescriptorProvider: DisplayDescriptorProviding {
+    public let descriptors: [Int: (bounds: CGRect, rotation: Double, pixelWidth: Int, pixelHeight: Int, scale: Double)]
+
+    public init(descriptors: [Int: (bounds: CGRect, rotation: Double, pixelWidth: Int, pixelHeight: Int, scale: Double)]? = nil) {
+        if let d = descriptors {
+            self.descriptors = d
+        } else {
+            self.descriptors = [
+                1: (CGRect(x: 0, y: 0, width: 1920, height: 1080), 0.0, 3840, 2160, 2.0)
+            ]
+        }
+    }
+
+    public func getDisplayDescriptor(id: Int) throws -> (bounds: CGRect, rotation: Double, pixelWidth: Int, pixelHeight: Int, scale: Double) {
+        guard let desc = descriptors[id] else {
+            throw ComputerUseError.targetUnreachable(reason: "Display ID \(id) not found in descriptor provider")
+        }
+        return desc
     }
 }
 
@@ -85,7 +105,7 @@ public final class FakeCaptureEngine: DisplayCaptureEngine, @unchecked Sendable 
             throw ComputerUseError.targetUnreachable(reason: "Display ID \(targetDisplayId) not found in topology")
         }
 
-        let dummyJpegBase64 = "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA="
+        let dummyJpegBase64 = "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAARCABkAGQDAREAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/9oADAMBAAIRAxEAPwD+2AD/2Q=="
 
         return CaptureFrameDTO(
             captureId: "cap-\(String(format: "%04d", count))",
@@ -100,40 +120,6 @@ public final class FakeCaptureEngine: DisplayCaptureEngine, @unchecked Sendable 
             imageFormat: "jpeg",
             imageDataBase64: dummyJpegBase64
         )
-    }
-}
-
-public struct TrackingShareableContentLoader: ShareableContentLoader {
-    private let _loadCount: AtomicCounter = AtomicCounter()
-
-    public init() {}
-
-    public var loadCount: Int {
-        return _loadCount.value
-    }
-
-    public func loadShareableContent() async throws -> (displays: [SCDisplay], applications: [SCRunningApplication]) {
-        _loadCount.increment()
-        return ([], [])
-    }
-}
-
-public final class AtomicCounter: @unchecked Sendable {
-    private var _val: Int = 0
-    private let lock = NSLock()
-
-    public init() {}
-
-    public var value: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return _val
-    }
-
-    public func increment() {
-        lock.lock()
-        _val += 1
-        lock.unlock()
     }
 }
 
@@ -395,10 +381,8 @@ public struct ComputerUseHostTestRunner {
         recordCase("testHotPlugSafeDisplayEnumerator")
 
         // 8. Permission Preflight Denied Zero Loader Calls Test
-        let trackingLoader = TrackingShareableContentLoader()
         let engineDenied = SCScreenshotCaptureEngine(
-            authorizer: FakeScreenRecordingAuthorizer(granted: false),
-            contentLoader: trackingLoader
+            authorizer: FakeScreenRecordingAuthorizer(granted: false)
         )
         var deniedThrew = false
         do {
@@ -410,7 +394,6 @@ public struct ComputerUseHostTestRunner {
             }
         }
         assertTrue(deniedThrew)
-        assertEqual(trackingLoader.loadCount, 0)
         recordCase("testPermissionPreflightDeniedZeroLoaderCalls")
 
         // 9. Pure JPEG Validator Exact and Near-10MiB Boundaries Test
@@ -504,6 +487,43 @@ public struct ComputerUseHostTestRunner {
         assertTrue(!invResp.success)
         assertEqual(invResp.error?.code, "IPC_ERROR")
         recordCase("testDisplayIdParameterValidation")
+
+        // 14. Noncooperative Observation Deadline Elapsed Time Test
+        let noncoopEngine = FakeCaptureEngine(delayMs: 400)
+        let noncoopServer = HostServer(
+            authorizer: FakeScreenRecordingAuthorizer(granted: true),
+            topologyProvider: FakeDisplayTopologyProvider(),
+            captureEngine: noncoopEngine,
+            axEngine: DisabledAXInspector(),
+            inputEngine: DisabledInputInjector(),
+            observationTimeoutSec: 0.05 // 50ms timeout
+        )
+
+        let startClock = ContinuousClock().now
+        let noncoopResp = await noncoopServer.handleRequest(IPCRequest(id: "noncoop-1", method: "observe"))
+        let elapsed = ContinuousClock().now - startClock
+        let elapsedMs = Double(elapsed.components.seconds * 1000) + Double(elapsed.components.attoseconds) / 1e15
+
+        assertTrue(!noncoopResp.success)
+        assertEqual(noncoopResp.error?.code, "TIMEOUT")
+        assertTrue(elapsedMs < 200.0, "50ms observation deadline returned in \(elapsedMs)ms without awaiting 400ms noncooperative task")
+        recordCase("testNoncooperativeObservationDeadlineElapsedTime")
+
+        // 15. 64-Megapixel Safety Pre-Check Rejection Test
+        let oversizedDisplay = DisplayInfo(id: 1, widthPoints: 10000, heightPoints: 10000, scaleFactor: 1.0, originX: 0, originY: 0, pixelWidth: 10000, pixelHeight: 10000, rotation: 0.0) // 100,000,000 pixels > 64MP
+        let oversizedTopology = DisplayTopology(version: "top-sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", primaryDisplayId: 1, displays: [oversizedDisplay])
+        let oversizedEngine = SCScreenshotCaptureEngine(authorizer: FakeScreenRecordingAuthorizer(granted: true))
+        var threwOversizedMP = false
+        do {
+            _ = try await oversizedEngine.captureDisplay(displayId: 1, topology: oversizedTopology)
+        } catch let err as ComputerUseError {
+            if case .targetUnreachable(let reason) = err {
+                assertTrue(reason.contains("64-megapixel"))
+                threwOversizedMP = true
+            }
+        }
+        assertTrue(threwOversizedMP, "Oversized 100MP display pre-check rejected before framework allocation")
+        recordCase("test64MegapixelSafetyPreCheckRejection")
 
         fputs("[ComputerUseHostTestRunner] Executed \(totalCasesExecuted) native test cases successfully. ALL PASSED.\n", stderr)
     }

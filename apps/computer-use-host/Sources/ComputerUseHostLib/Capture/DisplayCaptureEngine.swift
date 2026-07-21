@@ -63,33 +63,15 @@ public protocol DisplayCaptureEngine: Sendable {
     func captureDisplay(displayId: Int?, topology: DisplayTopology) async throws -> CaptureFrameDTO
 }
 
-public protocol ShareableContentLoader: Sendable {
-    func loadShareableContent() async throws -> (displays: [SCDisplay], applications: [SCRunningApplication])
-}
-
-public struct SystemShareableContentLoader: ShareableContentLoader {
-    public init() {}
-
-    public func loadShareableContent() async throws -> (displays: [SCDisplay], applications: [SCRunningApplication]) {
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-        return (content.displays, content.applications)
-    }
-}
-
 public actor SCScreenshotCaptureEngine: DisplayCaptureEngine {
     private let authorizer: ScreenRecordingAuthorizing
-    private let contentLoader: ShareableContentLoader
 
-    public init(
-        authorizer: ScreenRecordingAuthorizing = CGScreenRecordingAuthorizer(),
-        contentLoader: ShareableContentLoader = SystemShareableContentLoader()
-    ) {
+    public init(authorizer: ScreenRecordingAuthorizing = CGScreenRecordingAuthorizer()) {
         self.authorizer = authorizer
-        self.contentLoader = contentLoader
     }
 
     public func captureDisplay(displayId: Int? = nil, topology: DisplayTopology) async throws -> CaptureFrameDTO {
-        // 1. Permission Preflight Check BEFORE touching SCShareableContent
+        // 1. Permission Preflight Check BEFORE touching ScreenCaptureKit
         guard authorizer.isScreenCaptureAccessGranted else {
             throw ComputerUseError.permissionDenied(permission: "screen_recording")
         }
@@ -99,14 +81,20 @@ public actor SCScreenshotCaptureEngine: DisplayCaptureEngine {
             throw ComputerUseError.targetUnreachable(reason: "Display ID \(targetDisplayId) not found in topology")
         }
 
-        // 2. Load shareable content
-        let (scDisplays, scApps) = try await contentLoader.loadShareableContent()
-        guard let scDisplay = scDisplays.first(where: { Int($0.displayID) == targetDisplayId }) else {
+        // 2. Pre-check 64-megapixel budget BEFORE framework allocation
+        let (totalPixels, overflow) = targetDisplay.pixelWidth.multipliedReportingOverflow(by: targetDisplay.pixelHeight)
+        guard !overflow, totalPixels > 0, totalPixels <= 64_000_000 else {
+            throw ComputerUseError.targetUnreachable(reason: "Display ID \(targetDisplayId) pixel dimensions (\(targetDisplay.pixelWidth)x\(targetDisplay.pixelHeight)) exceed 64-megapixel safety limit")
+        }
+
+        // 3. Perform SCShareableContent discovery and filter creation entirely inside actor scope
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        guard let scDisplay = content.displays.first(where: { Int($0.displayID) == targetDisplayId }) else {
             throw ComputerUseError.targetUnreachable(reason: "Display ID \(targetDisplayId) not found in SCShareableContent")
         }
 
         let currentPid = ProcessInfo.processInfo.processIdentifier
-        let excludingApps = scApps.filter { $0.processID == currentPid }
+        let excludingApps = content.applications.filter { $0.processID == currentPid }
         let contentFilter = SCContentFilter(display: scDisplay, excludingApplications: excludingApps, exceptingWindows: [])
 
         let streamConfig = SCStreamConfiguration()
@@ -114,10 +102,10 @@ public actor SCScreenshotCaptureEngine: DisplayCaptureEngine {
         streamConfig.height = targetDisplay.pixelHeight
         streamConfig.showsCursor = false
 
-        // 3. Capture image
+        // 4. Capture image
         let cgImage = try await SCScreenshotManager.captureImage(contentFilter: contentFilter, configuration: streamConfig)
 
-        // 4. Validate and encode image via pure validator
+        // 5. Validate and encode image via pure validator
         let (_, base64Str) = try SCScreenshotCaptureEngine.validateAndEncode(image: cgImage, targetDisplay: targetDisplay, quality: 0.8)
 
         let capId = "cap-\(UUID().uuidString)"

@@ -2,7 +2,7 @@
 
 - **Date**: 2026-07-21
 - **Branch**: `codex/bobby-computer-use-v0-20260721t174022z-a9ab71173113`
-- **Scope**: Milestone D2 Production-Bounded Native Observation Slice (Closure Slice)
+- **Scope**: Milestone D2 Production-Bounded Native Observation Slice (Hardening & Closure Addendum)
 
 ---
 
@@ -25,7 +25,9 @@ Executed via `./bin/agy-computer-use test-native` (Swift 5.10 strict concurrency
 [TEST CASE 11] testTopologyChangeDuringCaptureDiscarded - PASSED
 [TEST CASE 12] testDisabledActionsAndAXTreeRejection - PASSED
 [TEST CASE 13] testDisplayIdParameterValidation - PASSED
-[ComputerUseHostTestRunner] Executed 13 native test cases successfully. ALL PASSED.
+[TEST CASE 14] testNoncooperativeObservationDeadlineElapsedTime - PASSED
+[TEST CASE 15] test64MegapixelSafetyPreCheckRejection - PASSED
+[ComputerUseHostTestRunner] Executed 15 native test cases successfully. ALL PASSED.
 ```
 
 ---
@@ -59,9 +61,9 @@ Executed via `./bin/agy-computer-use test-native` (Swift 5.10 strict concurrency
 Executed via `cd mcp/computer-use-mcp && pnpm check && pnpm test`:
 
 ```text
-# tests 23
+# tests 27
 # suites 2
-# pass 23
+# pass 27
 # fail 0
 # cancelled 0
 # skipped 0
@@ -69,6 +71,13 @@ Executed via `cd mcp/computer-use-mcp && pnpm check && pnpm test`:
 ```
 
 - **Tool Inventory**: `computer_use_status` and `computer_use_observe` (Exactly 2 tools).
+- **Adversarial & Hardening Tests**:
+  - `parseJPEGDimensions` strict SOF validation and dimension match.
+  - Base64 exact upper bound: 13,981,016 characters accepted; 13,981,020 characters rejected before decode allocation.
+  - Host client response ID matching (`parsedResp.id === reqId`).
+  - Post-dispatch mutation error mapping to `ACTION_OUTCOME_UNKNOWN`.
+  - Signal propagation and `display_id` argument runtime Zod checks.
+  - Strict Zod schemas (`.strict()`) and finite numbers (`.finite()`).
 - **Skill Sync**: 100% byte-for-byte identity verified between `.agents/skills/computer-use/` and `skills/computer-use/`.
 
 ---

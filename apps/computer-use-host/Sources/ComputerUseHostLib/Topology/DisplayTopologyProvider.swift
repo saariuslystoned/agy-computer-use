@@ -10,29 +10,67 @@ public struct CGDisplayListEnumerator: DisplayListEnumerating {
     public init() {}
 
     public func getActiveDisplays() throws -> (primaryId: Int, displayIDs: [Int]) {
-        var maxCount: UInt32 = 0
-        let countRes = CGGetActiveDisplayList(0, nil, &maxCount)
-        guard countRes == .success, maxCount > 0 else {
-            throw ComputerUseError.targetUnreachable(reason: "No active displays reported by CGGetActiveDisplayList")
+        var attempts = 0
+        while attempts < 3 {
+            attempts += 1
+            var maxCount: UInt32 = 0
+            let countRes = CGGetActiveDisplayList(0, nil, &maxCount)
+            guard countRes == .success, maxCount > 0 else {
+                if attempts < 3 { continue }
+                throw ComputerUseError.targetUnreachable(reason: "No active displays reported by CGGetActiveDisplayList")
+            }
+
+            var activeDisplays = [CGDirectDisplayID](repeating: 0, count: Int(maxCount))
+            var actualCount: UInt32 = 0
+            let listRes = CGGetActiveDisplayList(maxCount, &activeDisplays, &actualCount)
+            guard listRes == .success, actualCount > 0 else {
+                if attempts < 3 { continue }
+                throw ComputerUseError.targetUnreachable(reason: "Failed to fetch active display list")
+            }
+
+            let validCount = Int(actualCount)
+            guard validCount > 0, validCount <= activeDisplays.count else {
+                if attempts < 3 { continue }
+                throw ComputerUseError.targetUnreachable(reason: "Display count mismatch or invalid count (\(validCount))")
+            }
+
+            let slice = activeDisplays.prefix(validCount)
+            let validIDs = slice.map { Int($0) }
+            let primaryId = Int(CGMainDisplayID())
+
+            return (primaryId, validIDs)
+        }
+        throw ComputerUseError.targetUnreachable(reason: "Exhausted retries on display list enumeration")
+    }
+}
+
+public protocol DisplayDescriptorProviding: Sendable {
+    func getDisplayDescriptor(id: Int) throws -> (bounds: CGRect, rotation: Double, pixelWidth: Int, pixelHeight: Int, scale: Double)
+}
+
+public struct CGDisplayDescriptorProvider: DisplayDescriptorProviding {
+    public init() {}
+
+    public func getDisplayDescriptor(id: Int) throws -> (bounds: CGRect, rotation: Double, pixelWidth: Int, pixelHeight: Int, scale: Double) {
+        let dID = CGDirectDisplayID(id)
+        let bounds = CGDisplayBounds(dID)
+        let rotation = Double(CGDisplayRotation(dID))
+
+        var pixelW = Int(bounds.width)
+        var pixelH = Int(bounds.height)
+        var scale = 1.0
+
+        if let mode = CGDisplayCopyDisplayMode(dID) {
+            let mw = mode.pixelWidth
+            let mh = mode.pixelHeight
+            if mw > 0 && mh > 0 {
+                pixelW = mw
+                pixelH = mh
+                scale = Double(mw) / bounds.width
+            }
         }
 
-        var activeDisplays = [CGDirectDisplayID](repeating: 0, count: Int(maxCount))
-        var actualCount: UInt32 = 0
-        let listRes = CGGetActiveDisplayList(maxCount, &activeDisplays, &actualCount)
-        guard listRes == .success, actualCount > 0 else {
-            throw ComputerUseError.targetUnreachable(reason: "Failed to fetch active display list")
-        }
-
-        let validCount = Int(actualCount)
-        guard validCount > 0, validCount <= activeDisplays.count else {
-            throw ComputerUseError.targetUnreachable(reason: "Display count mismatch or invalid count (\(validCount))")
-        }
-
-        let slice = activeDisplays.prefix(validCount)
-        let validIDs = slice.map { Int($0) }
-        let primaryId = Int(CGMainDisplayID())
-
-        return (primaryId, validIDs)
+        return (bounds, rotation, pixelW, pixelH, scale)
     }
 }
 
@@ -42,9 +80,14 @@ public protocol DisplayTopologyProviding: Sendable {
 
 public struct SystemDisplayTopologyProvider: DisplayTopologyProviding {
     private let enumerator: DisplayListEnumerating
+    private let descriptorProvider: DisplayDescriptorProviding
 
-    public init(enumerator: DisplayListEnumerating = CGDisplayListEnumerator()) {
+    public init(
+        enumerator: DisplayListEnumerating = CGDisplayListEnumerator(),
+        descriptorProvider: DisplayDescriptorProviding = CGDisplayDescriptorProvider()
+    ) {
         self.enumerator = enumerator
+        self.descriptorProvider = descriptorProvider
     }
 
     public func getTopology() throws -> DisplayTopology {
@@ -72,29 +115,13 @@ public struct SystemDisplayTopologyProvider: DisplayTopologyProviding {
         var displayInfos: [DisplayInfo] = []
 
         for id in validIDs {
-            let dID = CGDirectDisplayID(id)
-            let bounds = CGDisplayBounds(dID)
-            let rotation = Double(CGDisplayRotation(dID))
+            let (bounds, rotation, pixelW, pixelH, scale) = try descriptorProvider.getDisplayDescriptor(id: id)
 
             guard bounds.width.isFinite, bounds.height.isFinite, bounds.origin.x.isFinite, bounds.origin.y.isFinite, rotation.isFinite else {
                 throw ComputerUseError.targetUnreachable(reason: "Display ID \(id) has non-finite geometry or rotation")
             }
             guard bounds.width > 0, bounds.height > 0 else {
                 throw ComputerUseError.targetUnreachable(reason: "Display ID \(id) has non-positive logical dimensions (\(bounds.width)x\(bounds.height))")
-            }
-
-            var pixelW = Int(bounds.width)
-            var pixelH = Int(bounds.height)
-            var scale = 1.0
-
-            if let mode = CGDisplayCopyDisplayMode(dID) {
-                let mw = mode.pixelWidth
-                let mh = mode.pixelHeight
-                if mw > 0 && mh > 0 {
-                    pixelW = mw
-                    pixelH = mh
-                    scale = Double(mw) / bounds.width
-                }
             }
 
             guard scale.isFinite, scale > 0, pixelW > 0, pixelH > 0 else {
