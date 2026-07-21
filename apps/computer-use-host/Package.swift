@@ -22,8 +22,12 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "ComputerUseHostLib",
+            name: "CagyPOSIX",
             dependencies: []
+        ),
+        .target(
+            name: "ComputerUseHostLib",
+            dependencies: ["CagyPOSIX"]
         ),
         .executableTarget(
             name: "ComputerUseHost",
