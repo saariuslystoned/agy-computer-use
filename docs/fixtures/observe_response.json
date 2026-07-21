@@ -4,11 +4,13 @@
   "data": {
     "capture_id": "cap-20260721-001",
     "timestamp": 1784656800000,
-    "topology_version": "top-v1",
+    "topology_version": "top-sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     "display_id": 1,
     "width_points": 1920,
     "height_points": 1080,
     "scale_factor": 2.0,
+    "pixel_width": 3840,
+    "pixel_height": 2160,
     "image_format": "jpeg",
     "image_data_base64": "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=",
     "normalized_bounds": {

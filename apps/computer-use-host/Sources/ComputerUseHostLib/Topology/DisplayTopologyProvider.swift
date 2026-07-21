@@ -2,14 +2,14 @@ import Foundation
 import CoreGraphics
 import CryptoKit
 
-public protocol DisplayTopologyProviding: Sendable {
-    func getTopology() throws -> DisplayTopology
+public protocol DisplayListEnumerating: Sendable {
+    func getActiveDisplays() throws -> (primaryId: Int, displayIDs: [Int])
 }
 
-public struct SystemDisplayTopologyProvider: DisplayTopologyProviding {
+public struct CGDisplayListEnumerator: DisplayListEnumerating {
     public init() {}
 
-    public func getTopology() throws -> DisplayTopology {
+    public func getActiveDisplays() throws -> (primaryId: Int, displayIDs: [Int]) {
         var maxCount: UInt32 = 0
         let countRes = CGGetActiveDisplayList(0, nil, &maxCount)
         guard countRes == .success, maxCount > 0 else {
@@ -23,29 +23,62 @@ public struct SystemDisplayTopologyProvider: DisplayTopologyProviding {
             throw ComputerUseError.targetUnreachable(reason: "Failed to fetch active display list")
         }
 
-        let validCount = min(Int(actualCount), activeDisplays.count)
-        let validDisplayIDs = activeDisplays.prefix(validCount).filter { $0 != 0 }
-        guard !validDisplayIDs.isEmpty else {
-            throw ComputerUseError.targetUnreachable(reason: "Active display list contains zero valid display IDs")
+        let validCount = Int(actualCount)
+        guard validCount > 0, validCount <= activeDisplays.count else {
+            throw ComputerUseError.targetUnreachable(reason: "Display count mismatch or invalid count (\(validCount))")
+        }
+
+        let slice = activeDisplays.prefix(validCount)
+        var seen = Set<Int>()
+        var validIDs: [Int] = []
+
+        for rawId in slice {
+            let id = Int(rawId)
+            guard id != 0 else {
+                throw ComputerUseError.targetUnreachable(reason: "Display list contained invalid zero ID")
+            }
+            guard !seen.contains(id) else {
+                throw ComputerUseError.targetUnreachable(reason: "Display list contained duplicate display ID \(id)")
+            }
+            seen.insert(id)
+            validIDs.append(id)
         }
 
         let primaryCGId = CGMainDisplayID()
-        guard primaryCGId != 0, validDisplayIDs.contains(primaryCGId) else {
-            throw ComputerUseError.targetUnreachable(reason: "Primary display ID \(primaryCGId) missing from active display list")
+        let primaryId = Int(primaryCGId)
+        guard primaryId != 0, validIDs.contains(primaryId) else {
+            throw ComputerUseError.targetUnreachable(reason: "Primary display ID \(primaryId) missing from active display list")
         }
 
-        let primaryId = Int(primaryCGId)
+        return (primaryId, validIDs)
+    }
+}
+
+public protocol DisplayTopologyProviding: Sendable {
+    func getTopology() throws -> DisplayTopology
+}
+
+public struct SystemDisplayTopologyProvider: DisplayTopologyProviding {
+    private let enumerator: DisplayListEnumerating
+
+    public init(enumerator: DisplayListEnumerating = CGDisplayListEnumerator()) {
+        self.enumerator = enumerator
+    }
+
+    public func getTopology() throws -> DisplayTopology {
+        let (primaryId, validIDs) = try enumerator.getActiveDisplays()
         var displayInfos: [DisplayInfo] = []
 
-        for dID in validDisplayIDs {
+        for id in validIDs {
+            let dID = CGDirectDisplayID(id)
             let bounds = CGDisplayBounds(dID)
             let rotation = Double(CGDisplayRotation(dID))
 
             guard bounds.width.isFinite, bounds.height.isFinite, bounds.origin.x.isFinite, bounds.origin.y.isFinite, rotation.isFinite else {
-                throw ComputerUseError.targetUnreachable(reason: "Display ID \(dID) has non-finite geometry or rotation")
+                throw ComputerUseError.targetUnreachable(reason: "Display ID \(id) has non-finite geometry or rotation")
             }
             guard bounds.width > 0, bounds.height > 0 else {
-                throw ComputerUseError.targetUnreachable(reason: "Display ID \(dID) has non-positive logical dimensions (\(bounds.width)x\(bounds.height))")
+                throw ComputerUseError.targetUnreachable(reason: "Display ID \(id) has non-positive logical dimensions (\(bounds.width)x\(bounds.height))")
             }
 
             var pixelW = Int(bounds.width)
@@ -63,11 +96,11 @@ public struct SystemDisplayTopologyProvider: DisplayTopologyProviding {
             }
 
             guard scale.isFinite, scale > 0, pixelW > 0, pixelH > 0 else {
-                throw ComputerUseError.targetUnreachable(reason: "Display ID \(dID) has invalid scale or pixel dimensions")
+                throw ComputerUseError.targetUnreachable(reason: "Display ID \(id) has invalid scale or pixel dimensions")
             }
 
             let info = DisplayInfo(
-                id: Int(dID),
+                id: id,
                 widthPoints: bounds.width,
                 heightPoints: bounds.height,
                 scaleFactor: scale,
@@ -94,13 +127,13 @@ public struct SystemDisplayTopologyProvider: DisplayTopologyProviding {
         let sorted = displays.sorted { $0.id < $1.id }
         var canonicalString = "primary:\(primaryId);"
         for d in sorted {
-            let ox = String(format: "%.4f", d.originX)
-            let oy = String(format: "%.4f", d.originY)
-            let w = String(format: "%.4f", d.widthPoints)
-            let h = String(format: "%.4f", d.heightPoints)
-            let s = String(format: "%.4f", d.scaleFactor)
-            let r = String(format: "%.4f", d.rotation)
-            canonicalString += "id:\(d.id),ox:\(ox),oy:\(oy),w:\(w),h:\(h),s:\(s),pw:\(d.pixelWidth),ph:\(d.pixelHeight),r:\(r);"
+            let oxHex = String(format: "%016x", d.originX.bitPattern)
+            let oyHex = String(format: "%016x", d.originY.bitPattern)
+            let wHex = String(format: "%016x", d.widthPoints.bitPattern)
+            let hHex = String(format: "%016x", d.heightPoints.bitPattern)
+            let sHex = String(format: "%016x", d.scaleFactor.bitPattern)
+            let rHex = String(format: "%016x", d.rotation.bitPattern)
+            canonicalString += "id:\(d.id),ox:\(oxHex),oy:\(oyHex),w:\(wHex),h:\(hHex),s:\(sHex),pw:\(d.pixelWidth),ph:\(d.pixelHeight),r:\(rHex);"
         }
         let digest = SHA256.hash(data: Data(canonicalString.utf8))
         let hexString = digest.compactMap { String(format: "%02x", $0) }.joined()

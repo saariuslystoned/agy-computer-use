@@ -106,26 +106,26 @@ function validateMcpConfigStruct() {
   }
 
   const mcpConfig = JSON.parse(fs.readFileSync(mcpConfigPath, "utf-8"));
+
+  // Validate real D2 server entry
+  const prodServer = mcpConfig?.mcpServers?.["computer-use"];
+  if (!prodServer) {
+    throw new Error(`.agents/mcp_config.json must register 'computer-use'`);
+  }
+  if (prodServer.command !== "node" || prodServer.args[0] !== "./mcp/computer-use-mcp/dist/src/index.js") {
+    throw new Error(`computer-use server config must point to './mcp/computer-use-mcp/dist/src/index.js'`);
+  }
+  if (!fs.existsSync(path.join(rootDir, prodServer.args[0]))) {
+    throw new Error(`Target dist file for computer-use does not exist at ${prodServer.args[0]}`);
+  }
+
+  // Validate canary server entry
   const canaryServer = mcpConfig?.mcpServers?.["computer-use-canary"];
   if (!canaryServer) {
     throw new Error(`.agents/mcp_config.json must register 'computer-use-canary'`);
   }
-
-  if (canaryServer.command !== "node") {
-    throw new Error(`Config command must be 'node', got '${canaryServer.command}'`);
-  }
-
-  if (!Array.isArray(canaryServer.args) || canaryServer.args[0] !== "./mcp/computer-use-mcp/dist/src/canary.js") {
-    throw new Error(`Config args[0] must be './mcp/computer-use-mcp/dist/src/canary.js'`);
-  }
-
-  if (canaryServer.cwd !== ".") {
-    throw new Error(`Config cwd must be '.', got '${canaryServer.cwd}'`);
-  }
-
-  const targetPath = path.join(rootDir, canaryServer.args[0]);
-  if (!fs.existsSync(targetPath)) {
-    throw new Error(`Target dist file specified in config does not exist at ${targetPath}`);
+  if (canaryServer.command !== "node" || canaryServer.args[0] !== "./mcp/computer-use-mcp/dist/src/canary.js") {
+    throw new Error(`computer-use-canary server config must point to './mcp/computer-use-mcp/dist/src/canary.js'`);
   }
 }
 
@@ -175,7 +175,7 @@ async function main() {
   }
 
   if (subcommand === "canary-ready") {
-    log("Validating canary readiness for Dogfood D1...");
+    log("Validating canary readiness for Dogfood D1 & D2...");
 
     // 1. Toolchain Check
     try {
@@ -187,15 +187,16 @@ async function main() {
 
     // 2. Build & Target Existence Check
     const canaryDistPath = path.join(mcpPkgDir, "dist/src/canary.js");
-    if (!fs.existsSync(canaryDistPath)) {
+    const indexDistPath = path.join(mcpPkgDir, "dist/src/index.js");
+    if (!fs.existsSync(canaryDistPath) || !fs.existsSync(indexDistPath)) {
       log("Building MCP package for canary-ready check...");
       execSync("pnpm build", { cwd: mcpPkgDir, stdio: "inherit" });
     }
 
-    // 3. Config Validation (command, args, cwd, target existence from workspace root)
+    // 3. Config Validation
     try {
       validateMcpConfigStruct();
-      log("Verified .agents/mcp_config.json command, args, cwd, and target existence.");
+      log("Verified .agents/mcp_config.json computer-use & computer-use-canary server registrations.");
     } catch (err) {
       fail(`MCP Config validation failed: ${err.message}`);
     }

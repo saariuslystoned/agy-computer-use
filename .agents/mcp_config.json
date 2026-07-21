@@ -1,5 +1,12 @@
 {
   "mcpServers": {
+    "computer-use": {
+      "command": "node",
+      "args": [
+        "./mcp/computer-use-mcp/dist/src/index.js"
+      ],
+      "cwd": "."
+    },
     "computer-use-canary": {
       "command": "node",
       "args": [

@@ -1,5 +1,5 @@
 import Foundation
-import ScreenCaptureKit
+@preconcurrency import ScreenCaptureKit
 import ImageIO
 import UniformTypeIdentifiers
 import CoreGraphics
@@ -89,7 +89,7 @@ public actor SCScreenshotCaptureEngine: DisplayCaptureEngine {
     }
 
     public func captureDisplay(displayId: Int? = nil, topology: DisplayTopology) async throws -> CaptureFrameDTO {
-        // 1. Preflight TCC permission check BEFORE calling SCShareableContent
+        // 1. Permission Preflight Check BEFORE touching SCShareableContent
         guard authorizer.isScreenCaptureAccessGranted else {
             throw ComputerUseError.permissionDenied(permission: "screen_recording")
         }
@@ -99,18 +99,7 @@ public actor SCScreenshotCaptureEngine: DisplayCaptureEngine {
             throw ComputerUseError.targetUnreachable(reason: "Display ID \(targetDisplayId) not found in topology")
         }
 
-        // 2. Bound & overflow check target dimensions
-        let pixelWidth = targetDisplay.pixelWidth
-        let pixelHeight = targetDisplay.pixelHeight
-        guard pixelWidth > 0, pixelHeight > 0 else {
-            throw ComputerUseError.targetUnreachable(reason: "Display ID \(targetDisplayId) has invalid pixel dimensions")
-        }
-        let (totalPixels, overflow) = pixelWidth.multipliedReportingOverflow(by: pixelHeight)
-        guard !overflow, totalPixels > 0, totalPixels <= 64_000_000 else { // 8K resolution boundary check
-            throw ComputerUseError.targetUnreachable(reason: "Display ID \(targetDisplayId) pixel dimensions (\(pixelWidth)x\(pixelHeight)) exceed safety limits")
-        }
-
-        // 3. Load shareable content
+        // 2. Load shareable content
         let (scDisplays, scApps) = try await contentLoader.loadShareableContent()
         guard let scDisplay = scDisplays.first(where: { Int($0.displayID) == targetDisplayId }) else {
             throw ComputerUseError.targetUnreachable(reason: "Display ID \(targetDisplayId) not found in SCShareableContent")
@@ -121,28 +110,15 @@ public actor SCScreenshotCaptureEngine: DisplayCaptureEngine {
         let contentFilter = SCContentFilter(display: scDisplay, excludingApplications: excludingApps, exceptingWindows: [])
 
         let streamConfig = SCStreamConfiguration()
-        streamConfig.width = pixelWidth
-        streamConfig.height = pixelHeight
+        streamConfig.width = targetDisplay.pixelWidth
+        streamConfig.height = targetDisplay.pixelHeight
         streamConfig.showsCursor = false
 
-        // 4. Capture CGImage via SCScreenshotManager
+        // 3. Capture image
         let cgImage = try await SCScreenshotManager.captureImage(contentFilter: contentFilter, configuration: streamConfig)
 
-        // 5. Verify returned CGImage dimensions match requested topology
-        guard cgImage.width == pixelWidth, cgImage.height == pixelHeight else {
-            throw ComputerUseError.targetUnreachable(reason: "Captured image dimensions (\(cgImage.width)x\(cgImage.height)) mismatch requested topology (\(pixelWidth)x\(pixelHeight))")
-        }
-
-        // 6. In-process JPEG encoding & exact 10 MiB limit check
-        let jpegData = try SCScreenshotCaptureEngine.encodeToJPEG(image: cgImage, quality: 0.8)
-        guard !jpegData.isEmpty else {
-            throw ComputerUseError.ipcError(reason: "Encoded JPEG image data is empty")
-        }
-
-        let maxByteLimit = 10 * 1024 * 1024 // 10 MiB limit before base64 encoding
-        guard jpegData.count <= maxByteLimit else {
-            throw ComputerUseError.ipcError(reason: "Captured JPEG image size (\(jpegData.count) bytes) exceeds maximum 10 MiB limit")
-        }
+        // 4. Validate and encode image via pure validator
+        let (_, base64Str) = try SCScreenshotCaptureEngine.validateAndEncode(image: cgImage, targetDisplay: targetDisplay, quality: 0.8)
 
         let capId = "cap-\(UUID().uuidString)"
         return CaptureFrameDTO(
@@ -153,11 +129,41 @@ public actor SCScreenshotCaptureEngine: DisplayCaptureEngine {
             widthPoints: targetDisplay.widthPoints,
             heightPoints: targetDisplay.heightPoints,
             scaleFactor: targetDisplay.scaleFactor,
-            pixelWidth: pixelWidth,
-            pixelHeight: pixelHeight,
+            pixelWidth: targetDisplay.pixelWidth,
+            pixelHeight: targetDisplay.pixelHeight,
             imageFormat: "jpeg",
-            imageDataBase64: jpegData.base64EncodedString()
+            imageDataBase64: base64Str
         )
+    }
+
+    public static func validateAndEncode(image: CGImage, targetDisplay: DisplayInfo, quality: Double = 0.8) throws -> (data: Data, base64: String) {
+        let pixelWidth = targetDisplay.pixelWidth
+        let pixelHeight = targetDisplay.pixelHeight
+
+        guard pixelWidth > 0, pixelHeight > 0 else {
+            throw ComputerUseError.targetUnreachable(reason: "Display ID \(targetDisplay.id) has non-positive pixel dimensions")
+        }
+
+        let (totalPixels, overflow) = pixelWidth.multipliedReportingOverflow(by: pixelHeight)
+        guard !overflow, totalPixels > 0, totalPixels <= 64_000_000 else {
+            throw ComputerUseError.targetUnreachable(reason: "Display ID \(targetDisplay.id) pixel dimensions exceed safety limits")
+        }
+
+        guard image.width == pixelWidth, image.height == pixelHeight else {
+            throw ComputerUseError.targetUnreachable(reason: "Captured CGImage dimensions (\(image.width)x\(image.height)) mismatch requested topology (\(pixelWidth)x\(pixelHeight))")
+        }
+
+        let jpegData = try encodeToJPEG(image: image, quality: quality)
+        guard !jpegData.isEmpty else {
+            throw ComputerUseError.ipcError(reason: "Encoded JPEG data is empty")
+        }
+
+        let maxRawBytes = 10 * 1024 * 1024 // Exact 10 MiB limit
+        guard jpegData.count <= maxRawBytes else {
+            throw ComputerUseError.ipcError(reason: "Captured JPEG image size (\(jpegData.count) bytes) exceeds maximum 10 MiB limit")
+        }
+
+        return (jpegData, jpegData.base64EncodedString())
     }
 
     public static func encodeToJPEG(image: CGImage, quality: Double = 0.8) throws -> Data {

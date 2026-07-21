@@ -3,16 +3,18 @@ import Foundation
 public final class SocketListener: @unchecked Sendable {
     public let socketPath: String
     private let server: HostServer
+    private let perFrameTimeoutSec: Double
     private var listeningSocket: Int32 = -1
     private var isRunning = false
     private var boundInode: ino_t = 0
     private var boundDev: dev_t = 0
 
-    public init(socketPath: String? = nil, server: HostServer) {
+    public init(socketPath: String? = nil, server: HostServer, perFrameTimeoutSec: Double = 5.0) {
         let uid = getuid()
         let defaultPath = "/tmp/agy-computer-use-\(uid)/agy-computer-use.sock"
         self.socketPath = socketPath ?? defaultPath
         self.server = server
+        self.perFrameTimeoutSec = perFrameTimeoutSec
     }
 
     public static func resolvePerUserSocketDirectory() -> String {
@@ -209,10 +211,12 @@ public final class SocketListener: @unchecked Sendable {
             close(clientFd)
         }
 
-        // Configure per-frame 5-second socket read and write timeouts
-        var tv = timeval(tv_sec: 5, tv_usec: 0)
-        _ = setsockopt(clientFd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-        _ = setsockopt(clientFd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        // Configure SO_NOSIGPIPE so client disconnect never triggers SIGPIPE in host process
+        var noSigPipe: Int32 = 1
+        let nosigRes = setsockopt(clientFd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
+        guard nosigRes == 0 else {
+            throw ComputerUseError.ipcError(reason: "Failed to set SO_NOSIGPIPE on client socket")
+        }
 
         // Validate peer credentials on Darwin via getpeereid
         var peuid: uid_t = 0
@@ -225,81 +229,94 @@ public final class SocketListener: @unchecked Sendable {
             throw ComputerUseError.permissionDenied(permission: "Peer UID \(peuid) does not match host UID \(getuid())")
         }
 
-        // Read length-prefixed request header with EINTR and timeout mapping
-        var headerBuf = [UInt8](repeating: 0, count: 4)
-        var headerRead = 0
-        while headerRead < 4 {
-            let n = headerBuf.withUnsafeMutableBufferPointer { bPtr in
-                read(clientFd, bPtr.baseAddress! + headerRead, 4 - headerRead)
-            }
-            if n < 0 {
-                if errno == EINTR { continue }
-                if errno == EAGAIN || errno == EWOULDBLOCK {
-                    throw ComputerUseError.timeout(operation: "socket_read_header", seconds: 5.0)
-                }
-                throw ComputerUseError.ipcError(reason: "Socket header read error: \(String(cString: strerror(errno)))")
-            }
-            if n == 0 { break }
-            headerRead += n
-        }
+        // Establish absolute monotonic deadline for full frame read/write
+        let deadline = Date().addingTimeInterval(perFrameTimeoutSec)
 
-        guard headerRead == 4 else {
-            return false // Socket closed without complete frame
-        }
+        // Read 4-byte length prefix
+        var headerBuf = [UInt8](repeating: 0, count: 4)
+        try readExact(fd: clientFd, into: &headerBuf, count: 4, deadline: deadline, operation: "socket_read_header")
 
         let payloadLen = Int(headerBuf[0]) << 24 | Int(headerBuf[1]) << 16 | Int(headerBuf[2]) << 8 | Int(headerBuf[3])
         guard payloadLen > 0 && payloadLen <= 16 * 1024 * 1024 else {
             throw ComputerUseError.ipcError(reason: "Invalid payload length \(payloadLen)")
         }
 
-        // Read payload bytes with EINTR and timeout mapping
+        // Read payload bytes
         var payloadBuf = [UInt8](repeating: 0, count: payloadLen)
-        var totalRead = 0
-        while totalRead < payloadLen {
-            let bytesRead = payloadBuf.withUnsafeMutableBufferPointer { bPtr in
-                read(clientFd, bPtr.baseAddress! + totalRead, payloadLen - totalRead)
-            }
-            if bytesRead < 0 {
-                if errno == EINTR { continue }
-                if errno == EAGAIN || errno == EWOULDBLOCK {
-                    throw ComputerUseError.timeout(operation: "socket_read_payload", seconds: 5.0)
-                }
-                throw ComputerUseError.ipcError(reason: "Socket payload read error: \(String(cString: strerror(errno)))")
-            }
-            if bytesRead == 0 { break }
-            totalRead += bytesRead
-        }
-
-        guard totalRead == payloadLen else {
-            throw ComputerUseError.ipcError(reason: "Incomplete read of request payload")
-        }
+        try readExact(fd: clientFd, into: &payloadBuf, count: payloadLen, deadline: deadline, operation: "socket_read_payload")
 
         let requestData = Data(payloadBuf)
         let request = try JSONDecoder().decode(IPCRequest.self, from: requestData)
 
-        // Dispatch request to HostServer actor
+        // Dispatch request to HostServer actor with timeout guard
         let response = await server.handleRequest(request)
         let responseData = try JSONEncoder().encode(response)
 
         let encodedResponse = try LengthPrefixedFramer.encode(payload: responseData)
 
-        // Write response frame with timeout mapping
-        try writeAll(fd: clientFd, data: encodedResponse)
+        // Write response frame with absolute deadline
+        try writeAll(fd: clientFd, data: encodedResponse, deadline: deadline)
 
         return true
     }
 
-    private func writeAll(fd: Int32, data: Data) throws {
+    private func readExact(fd: Int32, into buf: inout [UInt8], count: Int, deadline: Date, operation: String) throws {
+        var totalRead = 0
+        while totalRead < count {
+            let remainingSec = deadline.timeIntervalSince(Date())
+            guard remainingSec > 0 else {
+                throw ComputerUseError.timeout(operation: operation, seconds: perFrameTimeoutSec)
+            }
+
+            var tv = timeval(tv_sec: Int(remainingSec), tv_usec: __darwin_suseconds_t((remainingSec - floor(remainingSec)) * 1_000_000))
+            let optRes = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+            guard optRes == 0 else {
+                throw ComputerUseError.ipcError(reason: "Failed to set SO_RCVTIMEO socket option")
+            }
+
+            let n = buf.withUnsafeMutableBufferPointer { bPtr in
+                read(fd, bPtr.baseAddress! + totalRead, count - totalRead)
+            }
+
+            if n < 0 {
+                if errno == EINTR { continue }
+                if errno == EAGAIN || errno == EWOULDBLOCK {
+                    throw ComputerUseError.timeout(operation: operation, seconds: perFrameTimeoutSec)
+                }
+                throw ComputerUseError.ipcError(reason: "Socket read error: \(String(cString: strerror(errno)))")
+            }
+            if n == 0 {
+                if totalRead < count {
+                    throw ComputerUseError.ipcError(reason: "Socket closed prematurely before complete read")
+                }
+                break
+            }
+            totalRead += n
+        }
+    }
+
+    private func writeAll(fd: Int32, data: Data, deadline: Date) throws {
         var written = 0
         let total = data.count
         try data.withUnsafeBytes { rawPtr in
             guard let basePtr = rawPtr.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
             while written < total {
+                let remainingSec = deadline.timeIntervalSince(Date())
+                guard remainingSec > 0 else {
+                    throw ComputerUseError.timeout(operation: "socket_write_response", seconds: perFrameTimeoutSec)
+                }
+
+                var tv = timeval(tv_sec: Int(remainingSec), tv_usec: __darwin_suseconds_t((remainingSec - floor(remainingSec)) * 1_000_000))
+                let optRes = setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+                guard optRes == 0 else {
+                    throw ComputerUseError.ipcError(reason: "Failed to set SO_SNDTIMEO socket option")
+                }
+
                 let res = write(fd, basePtr + written, total - written)
                 if res < 0 {
                     if errno == EINTR { continue }
                     if errno == EAGAIN || errno == EWOULDBLOCK {
-                        throw ComputerUseError.timeout(operation: "socket_write_response", seconds: 5.0)
+                        throw ComputerUseError.timeout(operation: "socket_write_response", seconds: perFrameTimeoutSec)
                     }
                     throw ComputerUseError.ipcError(reason: "Socket write error: \(String(cString: strerror(errno)))")
                 }

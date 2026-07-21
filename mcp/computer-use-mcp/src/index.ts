@@ -5,23 +5,17 @@ import { HostClient, UnixSocketHostClient, IPCResponsePayload } from "./host-cli
 import { Logger } from "./logger.js";
 import {
   ObserveSchema,
-  AXTreeSchema,
-  ClickSchema,
-  MoveSchema,
-  DragSchema,
-  TypeSchema,
-  ShortcutSchema,
-  ScrollSchema
+  StatusDataSchema,
+  ObserveDataSchema
 } from "./schemas.js";
 
 const MAX_DECODED_BYTES = 10 * 1024 * 1024; // 10 MiB limit
 
-function validateAndDecodeBase64Image(base64Str: string): Buffer {
+function validateAndDecodeBase64JPEG(base64Str: string): Buffer {
   if (!base64Str || typeof base64Str !== "string") {
     throw new Error("CANARY_RESPONSE_INVALID: Missing base64 image payload");
   }
 
-  // Pre-allocation guard & canonical padding/character check
   if (base64Str.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(base64Str)) {
     throw new Error("CANARY_RESPONSE_INVALID: Invalid canonical base64 format");
   }
@@ -42,7 +36,7 @@ function validateAndDecodeBase64Image(base64Str: string): Buffer {
   return buf;
 }
 
-function formatToolResponse(resp: IPCResponsePayload) {
+function formatToolResponse(resp: IPCResponsePayload, method: string) {
   if (!resp.success) {
     return {
       isError: true,
@@ -56,19 +50,44 @@ function formatToolResponse(resp: IPCResponsePayload) {
   }
 
   const data = resp.data ?? {};
+
+  // Method-specific DTO Zod schema validation
+  if (method === "status") {
+    const parsedStatus = StatusDataSchema.safeParse(data);
+    if (!parsedStatus.success) {
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ error: { code: "INVALID_RESPONSE_DATA", message: `Status payload schema validation failed: ${parsedStatus.error.message}` } }, null, 2)
+          }
+        ]
+      };
+    }
+  } else if (method === "observe") {
+    const parsedObserve = ObserveDataSchema.safeParse(data);
+    if (!parsedObserve.success) {
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ error: { code: "INVALID_RESPONSE_DATA", message: `Observe payload schema validation failed: ${parsedObserve.error.message}` } }, null, 2)
+          }
+        ]
+      };
+    }
+  }
+
   let imageBase64: string | undefined;
 
   if (typeof data.image_data_base64 === "string") {
     imageBase64 = data.image_data_base64;
-  } else if (data.post_action_observation && typeof (data.post_action_observation as any).image_data_base64 === "string") {
-    imageBase64 = (data.post_action_observation as any).image_data_base64;
   }
 
   const cleanData = JSON.parse(JSON.stringify(data));
   delete cleanData.image_data_base64;
-  if (cleanData.post_action_observation) {
-    delete cleanData.post_action_observation.image_data_base64;
-  }
 
   const content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [
     {
@@ -79,7 +98,7 @@ function formatToolResponse(resp: IPCResponsePayload) {
 
   if (imageBase64) {
     try {
-      validateAndDecodeBase64Image(imageBase64);
+      validateAndDecodeBase64JPEG(imageBase64);
       content.push({
         type: "image" as const,
         data: imageBase64,
@@ -152,55 +171,13 @@ export function createComputerUseServer(hostClient?: HostClient): Server {
       switch (name) {
         case "computer_use_status": {
           const resp = await client.request("status", {}, signal);
-          return formatToolResponse(resp);
+          return formatToolResponse(resp, "status");
         }
 
         case "computer_use_observe": {
           const parsed = ObserveSchema.parse(args ?? {});
           const resp = await client.request("observe", parsed as Record<string, unknown>, signal);
-          return formatToolResponse(resp);
-        }
-
-        case "computer_use_ax_tree": {
-          const parsed = AXTreeSchema.parse(args ?? {});
-          const resp = await client.request("ax_tree", parsed as Record<string, unknown>, signal);
-          return formatToolResponse(resp);
-        }
-
-        case "computer_use_click": {
-          const parsed = ClickSchema.parse(args);
-          const resp = await client.request("click", parsed as Record<string, unknown>, signal);
-          return formatToolResponse(resp);
-        }
-
-        case "computer_use_move": {
-          const parsed = MoveSchema.parse(args);
-          const resp = await client.request("move", parsed as Record<string, unknown>, signal);
-          return formatToolResponse(resp);
-        }
-
-        case "computer_use_drag": {
-          const parsed = DragSchema.parse(args);
-          const resp = await client.request("drag", parsed as Record<string, unknown>, signal);
-          return formatToolResponse(resp);
-        }
-
-        case "computer_use_type": {
-          const parsed = TypeSchema.parse(args);
-          const resp = await client.request("type", parsed as Record<string, unknown>, signal);
-          return formatToolResponse(resp);
-        }
-
-        case "computer_use_shortcut": {
-          const parsed = ShortcutSchema.parse(args);
-          const resp = await client.request("shortcut", parsed as Record<string, unknown>, signal);
-          return formatToolResponse(resp);
-        }
-
-        case "computer_use_scroll": {
-          const parsed = ScrollSchema.parse(args);
-          const resp = await client.request("scroll", parsed as Record<string, unknown>, signal);
-          return formatToolResponse(resp);
+          return formatToolResponse(resp, "observe");
         }
 
         default:

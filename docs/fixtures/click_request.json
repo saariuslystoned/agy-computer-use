@@ -7,7 +7,7 @@
     "button": "left",
     "click_count": 1,
     "capture_id": "cap-20260721-001",
-    "topology_version": "top-v1",
+    "topology_version": "top-sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     "intent": "Click Open button in main window"
   }
 }

@@ -20,14 +20,22 @@ export interface IPCResponsePayload {
 }
 
 export const IPCResponseSchema = z.object({
-  id: z.string(),
+  id: z.string().min(1),
   success: z.boolean(),
   data: z.record(z.unknown()).optional(),
   error: z.object({
-    code: z.string(),
-    message: z.string(),
+    code: z.string().min(1),
+    message: z.string().min(1),
     details: z.record(z.string()).optional()
   }).optional()
+}).refine(res => {
+  if (res.success) {
+    return res.data !== undefined && res.error === undefined;
+  } else {
+    return res.data === undefined && res.error !== undefined;
+  }
+}, {
+  message: "IPCResponse must contain data XOR error consistent with success boolean"
 });
 
 export interface HostClient {
@@ -39,10 +47,6 @@ const MUTATION_METHODS = new Set(["click", "move", "drag", "type", "shortcut", "
 const VALID_DUMMY_JPEG_BASE64 = "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=";
 const MOCK_TOPOLOGY_VERSION = "top-sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-/**
- * MockHostClient provides a deterministic test host implementation
- * matching the Swift HostServer protocol behavior for Node unit and integration tests.
- */
 export class MockHostClient implements HostClient {
   private latestCaptureId: string | null = null;
   private reqCounter = 1;
@@ -121,85 +125,18 @@ export class MockHostClient implements HostClient {
     }
 
     if (method === "ax_tree") {
-      if (!this.axAvailable) {
-        return {
-          id,
-          success: false,
-          error: { code: "TARGET_UNREACHABLE", message: "AX tree inspection is unavailable in this build phase" }
-        };
-      }
       return {
         id,
-        success: true,
-        data: {
-          id: "app-root",
-          role: "AXApplication",
-          title: "Finder",
-          bounds: { x: 0, y: 0, width: 1920, height: 1080 },
-          children: [
-            {
-              id: "win-1",
-              role: "AXWindow",
-              title: "Main Window",
-              bounds: { x: 100, y: 100, width: 800, height: 600 }
-            }
-          ]
-        }
+        success: false,
+        error: { code: "TARGET_UNREACHABLE", message: "AX tree inspection is unavailable in this build phase" }
       };
     }
 
     if (MUTATION_METHODS.has(method)) {
-      if (this.inputMutationState === "disabled") {
-        return {
-          id,
-          success: false,
-          error: { code: "MUTATION_DISABLED", message: "Input mutations are disabled in this build phase." }
-        };
-      }
-
-      const reqCapId = params?.capture_id as string | undefined;
-      const reqTopVer = params?.topology_version as string | undefined;
-      const reqIntent = params?.intent as string | undefined;
-
-      if (!reqCapId) {
-        return { id, success: false, error: { code: "IPC_ERROR", message: "Missing or empty capture_id parameter" } };
-      }
-      if (reqTopVer !== MOCK_TOPOLOGY_VERSION) {
-        return { id, success: false, error: { code: "STALE_TOPOLOGY", message: `Display topology version mismatch. Current: ${MOCK_TOPOLOGY_VERSION}, received: ${reqTopVer ?? "none"}.` } };
-      }
-      if (!reqIntent || reqIntent.trim().length === 0) {
-        return { id, success: false, error: { code: "IPC_ERROR", message: "Missing non-empty action intent description" } };
-      }
-      if (!this.latestCaptureId || this.latestCaptureId !== reqCapId) {
-        return { id, success: false, error: { code: "STALE_CAPTURE", message: `Capture precondition failed. Current capture: ${this.latestCaptureId ?? "none"}, received: ${reqCapId}.` } };
-      }
-
-      this.latestCaptureId = null; // Atomically consume lease ONLY AFTER all validations pass
-      const freshCapId = `cap-mock-post-${Date.now()}`;
-      this.latestCaptureId = freshCapId;
-
       return {
         id,
-        success: true,
-        data: {
-          action_id: `act-${method}-${Date.now()}`,
-          status: "dispatched",
-          capture_id: reqCapId,
-          duration_ms: 15.0,
-          post_action_observation: {
-            capture_id: freshCapId,
-            timestamp: Date.now(),
-            topology_version: MOCK_TOPOLOGY_VERSION,
-            display_id: 1,
-            width_points: 1920,
-            height_points: 1080,
-            scale_factor: 2.0,
-            pixel_width: 3840,
-            pixel_height: 2160,
-            image_format: "jpeg",
-            image_data_base64: VALID_DUMMY_JPEG_BASE64
-          }
-        }
+        success: false,
+        error: { code: "MUTATION_DISABLED", message: "Input mutations are disabled in this build phase." }
       };
     }
 

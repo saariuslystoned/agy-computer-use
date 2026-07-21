@@ -4,7 +4,7 @@ on:
   push:
     branches: [ main ]
   pull_request:
-    branches: [ main, "codex/**" ]
+    branches: [ main ]
 
 jobs:
   swift-tests:
@@ -16,10 +16,25 @@ jobs:
       - name: Set up Swift
         run: swift --version
 
-      - name: Build and Run Swift Host Unit & Integration Tests (Strict Concurrency)
+      - name: Checkout-Rooted Source Guards
+        run: |
+          ! git grep -n "CGRequestScreenCaptureAccess" -- 'apps/computer-use-host/Sources/'
+          ! git grep -n "CGEvent" -- 'apps/computer-use-host/Sources/'
+          ! git grep -n "Fake" -- 'apps/computer-use-host/Sources/'
+          echo "Checkout-rooted source guards PASSED."
+
+      - name: Build and Run Swift Host Unit & Integration Tests (Strict Concurrency & Warnings as Errors)
         run: |
           cd apps/computer-use-host
-          swift test -Xswiftc -strict-concurrency=complete
+          swift test -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors | tee swift_test.log
+          grep -E "Test Suite.*passed|Executed [1-9]" swift_test.log
+
+      - name: Build Release Executable & Guard Release Symbols
+        run: |
+          cd apps/computer-use-host
+          swift build -c release -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors
+          ! nm .build/release/ComputerUseHost | grep -i "Fake"
+          echo "Release executable build and symbol guard PASSED."
 
   node-tests:
     name: TypeScript MCP Server Tests

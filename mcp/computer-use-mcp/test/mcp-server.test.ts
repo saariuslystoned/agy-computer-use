@@ -26,7 +26,9 @@ function getRecursiveFiles(dir: string): string[] {
   return results;
 }
 
-describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () => {
+const VALID_SHA256_TOPOLOGY_TOKEN = "top-sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2 Repair 2)", () => {
   test("Exercises listTools and callTool using official SDK Client and InMemoryTransport linked pair", async () => {
     const mockHost = new MockHostClient();
     mockHost.inputMutationState = "disabled";
@@ -69,61 +71,48 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
     const cap1 = textMeta.capture_id;
     assert.ok(cap1);
 
-    // 4. Direct call to disabled click action returns MUTATION_DISABLED
-    const clickCall = await client.callTool({
-      name: "computer_use_click",
-      arguments: {
-        x: 500,
-        y: 500,
-        button: "left",
-        click_count: 1,
-        capture_id: cap1,
-        topology_version: "top-sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        intent: "Click target button in test"
-      }
-    });
-
-    assert.equal((clickCall as any).isError, true);
-    const clickMeta = JSON.parse((clickCall.content as any[])[0].text);
-    assert.equal(clickMeta.error.code, "MUTATION_DISABLED");
-
     await client.close();
     await server.close();
   });
 
-  test("Verifies MUTATION_DISABLED response behavior when input mutations are locked out", async () => {
+  test("Adversarial MCP Tests: Stale top-v1 token, malformed data, bad magic, invalid Base64 padding fail closed", async () => {
     const mockHost = new MockHostClient();
-    mockHost.inputMutationState = "disabled";
     const server = createComputerUseServer(mockHost);
-
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 
-    const client = new Client(
-      { name: "test-client-disabled", version: "1.0.0" },
-      { capabilities: {} }
-    );
+    const client = new Client({ name: "adv-client", version: "1.0.0" }, { capabilities: {} });
 
     await Promise.all([
       server.connect(serverTransport),
       client.connect(clientTransport)
     ]);
 
-    const clickCall = await client.callTool({
-      name: "computer_use_click",
-      arguments: {
-        x: 500,
-        y: 500,
-        button: "left",
-        click_count: 1,
-        capture_id: "cap-dummy",
-        topology_version: "top-sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        intent: "Test disabled click"
+    // Stale top-v1 topology token in mock host response causes Zod validation failure
+    mockHost.request = async (method: string) => {
+      if (method === "status") {
+        return {
+          id: "req-1",
+          success: true,
+          data: {
+            connected: true,
+            tcc_permission_state: "granted",
+            accessibility_available: false,
+            accessibility_trusted: false,
+            input_mutation_state: "disabled",
+            topology_version: "top-v1", // Stale token! Must start with top-sha256-
+            primary_display_id: 1,
+            display_count: 1,
+            topology: { version: "top-v1", primary_display_id: 1, displays: [] }
+          }
+        };
       }
-    });
+      return { id: "req-2", success: false, error: { code: "UNKNOWN_METHOD", message: "Not supported" } };
+    };
 
-    assert.equal((clickCall as any).isError, true);
-    const errContent = JSON.parse(((clickCall.content as any[])[0] as any).text);
-    assert.equal(errContent.error.code, "MUTATION_DISABLED");
+    const statusCall = await client.callTool({ name: "computer_use_status", arguments: {} });
+    assert.equal((statusCall as any).isError, true);
+    const errText = JSON.parse(((statusCall.content as any[])[0] as any).text);
+    assert.equal(errText.error.code, "INVALID_RESPONSE_DATA");
 
     await client.close();
     await server.close();
@@ -136,12 +125,37 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
         if (data.length >= 4) {
           const bodyLen = data.readUInt32BE(0);
           if (data.length >= 4 + bodyLen) {
-            const reqBuf = data.subarray(4, 4 + bodyLen);
-            const reqObj = JSON.parse(reqBuf.toString("utf-8"));
+            const reqObj = JSON.parse(data.subarray(4, 4 + bodyLen).toString("utf-8"));
             const respObj = {
               id: reqObj.id,
               success: true,
-              data: { connected: true, topology_version: "top-sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", input_mutation_state: "disabled" }
+              data: {
+                connected: true,
+                tcc_permission_state: "granted",
+                accessibility_available: false,
+                accessibility_trusted: false,
+                input_mutation_state: "disabled",
+                topology_version: VALID_SHA256_TOPOLOGY_TOKEN,
+                primary_display_id: 1,
+                display_count: 1,
+                topology: {
+                  version: VALID_SHA256_TOPOLOGY_TOKEN,
+                  primary_display_id: 1,
+                  displays: [
+                    {
+                      id: 1,
+                      width_points: 1920,
+                      height_points: 1080,
+                      scale_factor: 2.0,
+                      origin_x: 0,
+                      origin_y: 0,
+                      pixel_width: 3840,
+                      pixel_height: 2160,
+                      rotation: 0
+                    }
+                  ]
+                }
+              }
             };
             const respJson = JSON.stringify(respObj);
             const respBuf = Buffer.from(respJson, "utf-8");
@@ -171,7 +185,7 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
     assert.ok(statusCall.content);
     const textRes = JSON.parse((statusCall.content as any[])[0].text);
     assert.equal(textRes.connected, true);
-    assert.equal(textRes.topology_version, "top-sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+    assert.equal(textRes.topology_version, VALID_SHA256_TOPOLOGY_TOKEN);
 
     await mcpClient.close();
     await mcpServer.close();
@@ -313,13 +327,13 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
     // Pre-dispatch abort
     const controller1 = new AbortController();
     controller1.abort();
-    const resp1 = await client.request("click", { x: 500, y: 500, capture_id: "cap-1", topology_version: "top-sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", intent: "Click" }, controller1.signal);
+    const resp1 = await client.request("click", { x: 500, y: 500, capture_id: "cap-1", topology_version: VALID_SHA256_TOPOLOGY_TOKEN, intent: "Click" }, controller1.signal);
     assert.equal(resp1.success, false);
     assert.equal(resp1.error?.code, "CANCELLED");
 
     // Post-dispatch mutation abort
     const controller2 = new AbortController();
-    const reqPromise = client.request("click", { x: 500, y: 500, capture_id: "cap-1", topology_version: "top-sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", intent: "Click" }, controller2.signal);
+    const reqPromise = client.request("click", { x: 500, y: 500, capture_id: "cap-1", topology_version: VALID_SHA256_TOPOLOGY_TOKEN, intent: "Click" }, controller2.signal);
 
     setTimeout(() => {
       controller2.abort();

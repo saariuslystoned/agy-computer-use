@@ -10,6 +10,7 @@
     "IPCRequest": {
       "type": "object",
       "required": ["id", "method"],
+      "additionalProperties": false,
       "properties": {
         "id": { "type": "string", "minLength": 1 },
         "method": {
@@ -18,6 +19,7 @@
         },
         "params": {
           "type": "object",
+          "additionalProperties": false,
           "properties": {
             "display_id": { "type": "integer" },
             "max_depth": { "type": "integer", "minimum": 1, "maximum": 10, "default": 10 },
@@ -37,7 +39,7 @@
             "delta_y": { "type": "integer" },
             "direction": { "type": "string", "enum": ["up", "down", "left", "right"] },
             "capture_id": { "type": "string", "minLength": 1 },
-            "topology_version": { "type": "string", "minLength": 1 },
+            "topology_version": { "type": "string", "pattern": "^top-sha256-[0-9a-f]{64}$" },
             "intent": { "type": "string", "minLength": 1, "maxLength": 200, "pattern": "^.*\\S.*$" }
           }
         }
@@ -96,6 +98,7 @@
     "IPCResponse": {
       "type": "object",
       "required": ["id", "success"],
+      "additionalProperties": false,
       "properties": {
         "id": { "type": "string", "minLength": 1 },
         "success": { "type": "boolean" },
@@ -103,40 +106,28 @@
         "error": {
           "type": "object",
           "required": ["code", "message"],
+          "additionalProperties": false,
           "properties": {
             "code": { "type": "string", "minLength": 1 },
             "message": { "type": "string", "minLength": 1 },
             "details": { "type": "object" }
           }
         }
-      }
-    },
-    "AXNode": {
-      "type": "object",
-      "required": ["role", "bounds"],
-      "properties": {
-        "id": { "type": "string" },
-        "role": { "type": "string" },
-        "subrole": { "type": "string" },
-        "title": { "type": "string" },
-        "value": { "type": "string" },
-        "enabled": { "type": "boolean" },
-        "focused": { "type": "boolean" },
-        "bounds": {
-          "type": "object",
-          "required": ["x", "y", "width", "height"],
+      },
+      "oneOf": [
+        {
           "properties": {
-            "x": { "type": "number" },
-            "y": { "type": "number" },
-            "width": { "type": "number" },
-            "height": { "type": "number" }
-          }
+            "success": { "const": true }
+          },
+          "required": ["data"]
         },
-        "children": {
-          "type": "array",
-          "items": { "$ref": "#/definitions/AXNode" }
+        {
+          "properties": {
+            "success": { "const": false }
+          },
+          "required": ["error"]
         }
-      }
+      ]
     }
   }
 }
