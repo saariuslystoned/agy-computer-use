@@ -110,14 +110,26 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
     await server.close();
   });
 
-  test("Adversarial: Non-JPEG magic bytes and truncated SOF fail closed", () => {
-    // 4-byte non-JPEG buffer
+  test("Adversarial: Non-JPEG magic bytes fail closed", () => {
     const badMagicB64 = Buffer.from([0x00, 0x01, 0x02, 0x03]).toString("base64");
     assert.throws(() => validateAndDecodeBase64JPEG(badMagicB64), /Invalid JPEG magic bytes/);
+  });
 
-    // Truncated SOF JPEG (FF D8 FF D9)
+  test("Adversarial: Truncated or missing JPEG SOF dimensions fail closed", () => {
     const truncatedB64 = Buffer.from([0xff, 0xd8, 0xff, 0xd9]).toString("base64");
     assert.throws(() => validateAndDecodeBase64JPEG(truncatedB64, 100, 100), /Failed to parse valid JPEG SOF/);
+  });
+
+  test("Adversarial: Base64 unpadded (length % 4 != 0) fails closed", () => {
+    const unpaddedB64 = "/9j/4AAQSkZJRgABAQEAYABgAAD"; // length 27 (% 4 != 0)
+    assert.throws(() => validateAndDecodeBase64JPEG(unpaddedB64), /length must be a multiple of 4/);
+  });
+
+  test("Adversarial: Base64 non-canonical encoding fails closed", () => {
+    const canonicalB64 = "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAARCABkAGQDAREAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/9oADAMBAAIRAxEAPwD+2AD/2R==";
+    // Replace '2R==' with '2S==' (non-zero padding bits)
+    const tamperedB64 = canonicalB64.replace("2R==", "2S==");
+    assert.throws(() => validateAndDecodeBase64JPEG(tamperedB64), /not canonically encoded/);
   });
 
   test("Adversarial: Mismatched response ID rejected by HostClient", async () => {
@@ -144,12 +156,16 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
     if (fs.existsSync(sockPath)) fs.unlinkSync(sockPath);
   });
 
-  test("Adversarial: Exact 13,981,016 Base64 upper bound accepted and 13,981,020 rejected", () => {
+  test("Adversarial: Exact 13,981,016 Base64 upper bound accepted and 13,981,017 unpadded rejected", () => {
     const exactMaxChars = 13_981_016; // Math.ceil((10 * 1024 * 1024) / 3) * 4
 
-    // String exceeding maxEncodedChars throws BEFORE Buffer allocation
-    const oversizedB64 = "A".repeat(exactMaxChars + 4);
-    assert.throws(() => validateAndDecodeBase64JPEG(oversizedB64), /exceeds maximum encoded limit/);
+    // 13,981,017 characters (unpadded % 4 != 0) fails before Buffer allocation
+    const unpaddedOversizedB64 = "A".repeat(exactMaxChars + 1);
+    assert.throws(() => validateAndDecodeBase64JPEG(unpaddedOversizedB64), /multiple of 4/);
+
+    // 13,981,020 characters (% 4 == 0) fails with encoded limit error
+    const paddedOversizedB64 = "A".repeat(exactMaxChars + 4);
+    assert.throws(() => validateAndDecodeBase64JPEG(paddedOversizedB64), /exceeds maximum encoded limit/);
   });
 
   test("Integration path: Official MCP Client -> createComputerUseServer -> UnixSocketHostClient -> UDS Socket", async () => {
@@ -392,7 +408,6 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
     const sockPath = `/tmp/test-dispatch-close-${Date.now()}.sock`;
     const server = net.createServer((socket) => {
       socket.on("data", () => {
-        // Disconnect immediately after receiving request
         socket.destroy();
       });
     });

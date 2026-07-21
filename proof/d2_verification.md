@@ -61,9 +61,9 @@ Executed via `./bin/agy-computer-use test-native` (Swift 5.10 strict concurrency
 Executed via `cd mcp/computer-use-mcp && pnpm check && pnpm test`:
 
 ```text
-# tests 27
+# tests 30
 # suites 2
-# pass 27
+# pass 30
 # fail 0
 # cancelled 0
 # skipped 0
@@ -73,7 +73,7 @@ Executed via `cd mcp/computer-use-mcp && pnpm check && pnpm test`:
 - **Tool Inventory**: `computer_use_status` and `computer_use_observe` (Exactly 2 tools).
 - **Adversarial & Hardening Tests**:
   - `parseJPEGDimensions` strict SOF validation and dimension match.
-  - Base64 exact upper bound: 13,981,016 characters accepted; 13,981,020 characters rejected before decode allocation.
+  - Base64 exact upper bound: 13,981,016 characters accepted; 13,981,017 unpadded and 13,981,020 padded characters rejected before decode allocation.
   - Host client response ID matching (`parsedResp.id === reqId`).
   - Post-dispatch mutation error mapping to `ACTION_OUTCOME_UNKNOWN`.
   - Signal propagation and `display_id` argument runtime Zod checks.
