@@ -180,7 +180,7 @@ public final class ComputerUseHostTests: XCTestCase {
         try runSync { try await ComputerUseHostTestRunner.run35_InjectedListenFailurePostBindRollback() }
     }
 
-    public static var __allTests = [
+    public static let __allTests = [
         ("test01_LengthPrefixedFraming", test01_LengthPrefixedFraming),
         ("test02_OversizedFramingHeaderRejection", test02_OversizedFramingHeaderRejection),
         ("test03_DirectoryPreparation", test03_DirectoryPreparation),
@@ -215,15 +215,6 @@ public final class ComputerUseHostTests: XCTestCase {
         ("test32_ReadHeaderBodyEINTRRetry", test32_ReadHeaderBodyEINTRRetry),
         ("test33_WriteResponseEAGAINDeadlineAndSingleAttempt", test33_WriteResponseEAGAINDeadlineAndSingleAttempt),
         ("test34_PositiveByteAdvancesClockPastDeadlineReturnsTimeout", test34_PositiveByteAdvancesClockPastDeadlineReturnsTimeout),
-        ("test35_InjectedListenFailurePostBindRollback", test35_InjectedListenFailurePostBindRollback)
     ]
 }
-
-#if canImport(XCTest) && !os(macOS)
-public func __allTests() -> [XCTestCaseEntry] {
-    return [
-        testCase(ComputerUseHostTests.__allTests)
-    ]
-}
-#endif
 #endif

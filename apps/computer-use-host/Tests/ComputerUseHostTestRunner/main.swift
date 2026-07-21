@@ -35,33 +35,77 @@ public final class TestManualClock: HostClock, @unchecked Sendable {
     }
 }
 
-public final class ManualSleeper: Sleeper, @unchecked Sendable {
+public actor ManualSleeper: Sleeper {
     private struct PendingSleep {
         let continuation: CheckedContinuation<Void, Error>
     }
 
-    private let lock = NSLock()
     private var pending: [PendingSleep] = []
+    private var armedWaiters: [Int: [CheckedContinuation<Void, Never>]] = [:]
+    private var totalArmedCount: Int = 0
+    private var bufferedAdvances: Int = 0
 
     public init() {}
 
     public func sleep(nanoseconds: UInt64) async throws {
+        try Task.checkCancellation()
+
         try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                lock.lock()
-                pending.append(PendingSleep(continuation: continuation))
-                lock.unlock()
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                Task {
+                    await self.registerOrResume(continuation: continuation)
+                }
             }
         } onCancel: {
-            self.cancelAll()
+            Task {
+                await self.cancelAll()
+            }
+        }
+    }
+
+    private func registerOrResume(continuation: CheckedContinuation<Void, Error>) async {
+        if Task.isCancelled {
+            continuation.resume(throwing: CancellationError())
+            return
+        }
+        if bufferedAdvances > 0 {
+            bufferedAdvances -= 1
+            totalArmedCount += 1
+            notifyArmedWaiters()
+            continuation.resume()
+            return
+        }
+        pending.append(PendingSleep(continuation: continuation))
+        totalArmedCount += 1
+        notifyArmedWaiters()
+    }
+
+    public func waitUntilArmed(count: Int) async {
+        if totalArmedCount >= count {
+            return
+        }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            armedWaiters[count, default: []].append(continuation)
+        }
+    }
+
+    private func notifyArmedWaiters() {
+        let currentCount = totalArmedCount
+        for (targetCount, waiters) in armedWaiters where currentCount >= targetCount {
+            armedWaiters.removeValue(forKey: targetCount)
+            for waiter in waiters {
+                waiter.resume()
+            }
         }
     }
 
     public func advance() {
-        lock.lock()
+        if pending.isEmpty {
+            bufferedAdvances += 1
+            return
+        }
         let toResume = pending
         pending.removeAll()
-        lock.unlock()
 
         for item in toResume {
             item.continuation.resume()
@@ -69,10 +113,8 @@ public final class ManualSleeper: Sleeper, @unchecked Sendable {
     }
 
     public func cancelAll() {
-        lock.lock()
         let toCancel = pending
         pending.removeAll()
-        lock.unlock()
 
         for item in toCancel {
             item.continuation.resume(throwing: CancellationError())
@@ -1116,6 +1158,35 @@ public struct ComputerUseHostTestRunner {
         }
         assertTrue(threwDenied)
         assertEqual(await engine18.frameworkInvocationCount, 0)
+
+        let engine18_granted = SCScreenshotCaptureEngine(
+            authorizer: FakeScreenRecordingAuthorizer(granted: true)
+        )
+        let invalidTop = DisplayTopology(
+            version: "v1.0",
+            primaryDisplayId: 1,
+            displays: [
+                DisplayInfo(
+                    id: 1,
+                    widthPoints: 8001,
+                    heightPoints: 8000,
+                    scaleFactor: 1.0,
+                    originX: 0,
+                    originY: 0,
+                    pixelWidth: 8001,
+                    pixelHeight: 8000,
+                    rotation: 0.0
+                )
+            ]
+        )
+        var threwInvalidDimensions = false
+        do {
+            _ = try await engine18_granted.captureDisplay(displayId: 1, topology: invalidTop)
+        } catch {
+            threwInvalidDimensions = true
+        }
+        assertTrue(threwInvalidDimensions)
+        assertEqual(await engine18_granted.frameworkInvocationCount, 0, "captureDisplay must fail before Framework allocation on >64MP pixel dimensions")
     }
 
     public static func run19_PureJPEGValidatorExactAndNear10MiBBoundaries() async throws {
@@ -1187,6 +1258,53 @@ public struct ComputerUseHostTestRunner {
         assertTrue(dimsSOF2 != nil)
         assertEqual(dimsSOF2?.width, 512)
         assertEqual(dimsSOF2?.height, 256)
+
+        // Test COM (0xFE) segment before SOF
+        let comData = Data([
+            0xFF, 0xD8,
+            0xFF, 0xFE, 0x00, 0x07, 0x48, 0x65, 0x6C, 0x6C, 0x6F,
+            0xFF, 0xC0, 0x00, 0x11, 0x08, 0x01, 0x00, 0x02, 0x00, 0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01,
+            0xFF, 0xDA, 0x00, 0x0C, 0x03, 0x01, 0x00, 0x02, 0x11, 0x03, 0x11, 0x00, 0x3F, 0x00,
+            0xFF, 0xD9
+        ])
+        let dimsCOM = SCScreenshotCaptureEngine.parseJPEGDimensions(data: comData)
+        assertTrue(dimsCOM != nil, "COM (0xFE) segment before SOF must be parsed successfully")
+        assertEqual(dimsCOM?.width, 512)
+        assertEqual(dimsCOM?.height, 256)
+
+        // Test Multi-scan Progressive JPEG with inter-scan DHT/DQT markers
+        let multiScanData = Data([
+            0xFF, 0xD8,
+            0xFF, 0xC2, 0x00, 0x11, 0x08, 0x01, 0x00, 0x02, 0x00, 0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01,
+            0xFF, 0xDB, 0x00, 0x05, 0x00, 0x01, 0x02,
+            0xFF, 0xDA, 0x00, 0x0C, 0x03, 0x01, 0x00, 0x02, 0x11, 0x03, 0x11, 0x00, 0x3F, 0x00,
+            0xFF, 0xC4, 0x00, 0x05, 0x00, 0x00, 0x00,
+            0xFF, 0xDA, 0x00, 0x0C, 0x03, 0x01, 0x00, 0x02, 0x11, 0x03, 0x11, 0x00, 0x3F, 0x00,
+            0xFF, 0xD9
+        ])
+        let dimsMulti = SCScreenshotCaptureEngine.parseJPEGDimensions(data: multiScanData)
+        assertTrue(dimsMulti != nil, "Multi-scan progressive JPEG must be parsed successfully")
+        assertEqual(dimsMulti?.width, 512)
+        assertEqual(dimsMulti?.height, 256)
+
+        // Negative: Nested SOI inside stream
+        let nestedSOIData = Data([
+            0xFF, 0xD8,
+            0xFF, 0xD8,
+            0xFF, 0xC0, 0x00, 0x11, 0x08, 0x01, 0x00, 0x02, 0x00, 0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01,
+            0xFF, 0xDA, 0x00, 0x0C, 0x03, 0x01, 0x00, 0x02, 0x11, 0x03, 0x11, 0x00, 0x3F, 0x00,
+            0xFF, 0xD9
+        ])
+        assertTrue(SCScreenshotCaptureEngine.parseJPEGDimensions(data: nestedSOIData) == nil, "Must reject nested SOI")
+
+        // Negative: Zero-component SOS (Ns == 0)
+        let zeroCompSOSData = Data([
+            0xFF, 0xD8,
+            0xFF, 0xC0, 0x00, 0x11, 0x08, 0x01, 0x00, 0x02, 0x00, 0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01,
+            0xFF, 0xDA, 0x00, 0x06, 0x00, 0x00, 0x3F, 0x00,
+            0xFF, 0xD9
+        ])
+        assertTrue(SCScreenshotCaptureEngine.parseJPEGDimensions(data: zeroCompSOSData) == nil, "Must reject zero-component SOS")
     }
 
     public static func run21_JPEGInvalidMagicTruncatedSegmentAndMismatchRejection() async throws {
@@ -1224,7 +1342,8 @@ public struct ComputerUseHostTestRunner {
 
         let reqATask = Task { await fenceServer.handleRequest(IPCRequest(id: "fence-A", method: "observe")) }
         await controlledEngine.waitUntilRegistered(count: 1)
-        sleeper.advance()
+        await sleeper.waitUntilArmed(count: 1)
+        await sleeper.advance()
 
         let respA = await reqATask.value
         assertTrue(!respA.success)
@@ -1334,7 +1453,8 @@ public struct ComputerUseHostTestRunner {
 
         let taskA = Task { await server.handleRequest(IPCRequest(id: "orphan-A", method: "observe")) }
         await controlledEngine.waitUntilRegistered(count: 1)
-        sleeper.advance()
+        await sleeper.waitUntilArmed(count: 1)
+        await sleeper.advance()
 
         let respA = await taskA.value
         assertTrue(!respA.success)

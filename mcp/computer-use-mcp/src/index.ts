@@ -107,8 +107,8 @@ export function parseJPEGDimensions(buf: Buffer): JPEGDimensions | null {
       continue;
     }
 
-    // Whitelist legal header/inter-scan segment markers: 0xC4 (DHT), 0xDB (DQT), 0xDD (DRI), 0xE0..0xEF (APP0..APP15)
-    const isWhitelisted = marker === 0xc4 || marker === 0xdb || marker === 0xdd || (marker >= 0xe0 && marker <= 0xef);
+    // Whitelist legal header/inter-scan segment markers: 0xC4 (DHT), 0xDB (DQT), 0xDD (DRI), 0xFE (COM), 0xE0..0xEF (APP0..APP15)
+    const isWhitelisted = marker === 0xc4 || marker === 0xdb || marker === 0xdd || marker === 0xfe || (marker >= 0xe0 && marker <= 0xef);
     if (!isWhitelisted) return null;
 
     if (marker === 0xdd) {

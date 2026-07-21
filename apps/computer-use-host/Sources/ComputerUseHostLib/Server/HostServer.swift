@@ -273,7 +273,8 @@ public actor HostServer {
                         initialTopology: initialTopology,
                         timeoutSec: self.observationTimeoutSec,
                         budget: budget,
-                        sleeper: self.sleeper
+                        sleeper: self.sleeper,
+                        clock: self.clock
                     )
                 } catch {
                     throw error

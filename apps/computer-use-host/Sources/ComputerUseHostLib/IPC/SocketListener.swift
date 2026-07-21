@@ -335,13 +335,13 @@ public final class SocketListener: @unchecked Sendable {
             let payloadLength = Int(headerBuffer[0]) << 24 | Int(headerBuffer[1]) << 16 | Int(headerBuffer[2]) << 8 | Int(headerBuffer[3])
             guard payloadLength > 0, payloadLength <= LengthPrefixedFramer.maxPayloadSize else {
                 writeAttempted = true
-                let writeDeadline = clock.now + .seconds(2)
+                let writeDeadline = clock.now + .seconds(self.perFrameTimeoutSec)
                 let errResp = IPCResponse(
                     id: "unknown",
                     success: false,
                     error: IPCErrorPayload(code: "IPC_ERROR", message: "Oversized or zero payload header length: \(payloadLength)")
                 )
-                try await writeResponse(errResp, to: clientFd, clock: clock, deadline: writeDeadline, phaseBudgetSec: 2.0)
+                try await writeResponse(errResp, to: clientFd, clock: clock, deadline: writeDeadline, phaseBudgetSec: self.perFrameTimeoutSec)
                 return true
             }
 
@@ -355,29 +355,29 @@ public final class SocketListener: @unchecked Sendable {
             // 3. Execution phase: HostServer handles request with its own deadline
             let response = await server.handleRequest(request)
 
-            // 4. Response write phase: 2s deadline starting at write phase start
+            // 4. Response write phase: perFrameTimeoutSec deadline starting at write phase start
             writeAttempted = true
-            let writeDeadline = clock.now + .seconds(2)
-            try await writeResponse(response, to: clientFd, clock: clock, deadline: writeDeadline, phaseBudgetSec: 2.0)
+            let writeDeadline = clock.now + .seconds(self.perFrameTimeoutSec)
+            try await writeResponse(response, to: clientFd, clock: clock, deadline: writeDeadline, phaseBudgetSec: self.perFrameTimeoutSec)
         } catch let err as ComputerUseError {
             if !writeAttempted {
-                let writeDeadline = clock.now + .seconds(2)
+                let writeDeadline = clock.now + .seconds(self.perFrameTimeoutSec)
                 let errResp = IPCResponse(
                     id: "err-\(UUID().uuidString)",
                     success: false,
                     error: IPCErrorPayload(code: err.errorCode, message: err.errorMessage)
                 )
-                _ = try? await writeResponse(errResp, to: clientFd, clock: clock, deadline: writeDeadline, phaseBudgetSec: 2.0)
+                _ = try? await writeResponse(errResp, to: clientFd, clock: clock, deadline: writeDeadline, phaseBudgetSec: self.perFrameTimeoutSec)
             }
         } catch {
             if !writeAttempted {
-                let writeDeadline = clock.now + .seconds(2)
+                let writeDeadline = clock.now + .seconds(self.perFrameTimeoutSec)
                 let errResp = IPCResponse(
                     id: "err-\(UUID().uuidString)",
                     success: false,
                     error: IPCErrorPayload(code: "IPC_ERROR", message: error.localizedDescription)
                 )
-                _ = try? await writeResponse(errResp, to: clientFd, clock: clock, deadline: writeDeadline, phaseBudgetSec: 2.0)
+                _ = try? await writeResponse(errResp, to: clientFd, clock: clock, deadline: writeDeadline, phaseBudgetSec: self.perFrameTimeoutSec)
             }
         }
 

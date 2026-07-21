@@ -235,8 +235,8 @@ public actor SCScreenshotCaptureEngine: DisplayCaptureEngine {
                 continue
             }
 
-            // Whitelist legal header/inter-scan segment markers: 0xC4 (DHT), 0xDB (DQT), 0xDD (DRI), 0xE0..0xEF (APP0..APP15)
-            let isWhitelisted = marker == 0xC4 || marker == 0xDB || marker == 0xDD || (marker >= 0xE0 && marker <= 0xEF)
+            // Whitelist legal header/inter-scan segment markers: 0xC4 (DHT), 0xDB (DQT), 0xDD (DRI), 0xFE (COM), 0xE0..0xEF (APP0..APP15)
+            let isWhitelisted = marker == 0xC4 || marker == 0xDB || marker == 0xDD || marker == 0xFE || (marker >= 0xE0 && marker <= 0xEF)
             guard isWhitelisted else { return nil }
 
             if marker == 0xDD {
