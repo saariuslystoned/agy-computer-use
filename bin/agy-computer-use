@@ -1,0 +1,106 @@
+#!/usr/bin/env node
+
+import { execSync } from "child_process";
+import * as fs from "fs";
+import * as path from "path";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const rootDir = path.resolve(__dirname, "..");
+
+function log(msg) {
+  console.log(`[bin/agy-computer-use] ${msg}`);
+}
+
+function fail(msg) {
+  console.error(`[FAIL] ${msg}`);
+  process.exit(1);
+}
+
+const command = process.argv[2] || "doctor";
+
+if (command === "doctor" || command === "canary-ready" || command === "build") {
+  log("Validating environment, dependencies, and canary readiness...");
+
+  // 1. Toolchain Check
+  try {
+    const nodeVer = process.version;
+    log(`Node.js version: ${nodeVer}`);
+    const pnpmVer = execSync("pnpm --version", { encoding: "utf-8" }).trim();
+    log(`pnpm version: ${pnpmVer}`);
+  } catch (err) {
+    fail("Node.js or pnpm missing in environment.");
+  }
+
+  // 2. Build MCP Server if needed
+  const canaryDistPath = path.join(rootDir, "mcp/computer-use-mcp/dist/src/canary.js");
+  log("Building MCP package...");
+  try {
+    execSync("pnpm build", { cwd: path.join(rootDir, "mcp/computer-use-mcp"), stdio: "inherit" });
+  } catch (err) {
+    fail("pnpm build failed in mcp/computer-use-mcp.");
+  }
+
+  if (!fs.existsSync(canaryDistPath)) {
+    fail(`Canary dist file missing at ${canaryDistPath}`);
+  }
+  log(`Verified canary dist executable at ${canaryDistPath}`);
+
+  // 3. MCP Config Verification
+  const mcpConfigPath = path.join(rootDir, ".agents/mcp_config.json");
+  if (!fs.existsSync(mcpConfigPath)) {
+    fail(`.agents/mcp_config.json missing at ${mcpConfigPath}`);
+  }
+
+  const mcpConfig = JSON.parse(fs.readFileSync(mcpConfigPath, "utf-8"));
+  if (!mcpConfig.mcpServers || !mcpConfig.mcpServers["computer-use-canary"]) {
+    fail(`.agents/mcp_config.json must register 'computer-use-canary'`);
+  }
+  log("Verified .agents/mcp_config.json registration.");
+
+  // 4. Single-Tool Inventory Dry-Run Test
+  log("Testing canary server single-tool inventory dry-run...");
+  try {
+    const { createCanaryServer } = await import(path.join(rootDir, "mcp/computer-use-mcp/dist/src/canary.js"));
+    const { MockPeekabooImageClient } = await import(path.join(rootDir, "mcp/computer-use-mcp/dist/src/peekaboo-client.js"));
+
+    const mockClient = new MockPeekabooImageClient();
+    const server = createCanaryServer(mockClient);
+
+    const listToolsHandler = server._requestHandlers?.get("tools/list");
+    if (!listToolsHandler) {
+      fail("Canary server missing 'tools/list' request handler.");
+    }
+
+    const toolsResult = await listToolsHandler({ method: "tools/list" });
+    const tools = toolsResult.tools;
+
+    if (!tools || tools.length !== 1) {
+      fail(`Canary server tool inventory count must be EXACTLY 1, got ${tools?.length ?? 0}`);
+    }
+
+    if (tools[0].name !== "computer_use_canary_screenshot") {
+      fail(`Canary tool name must be 'computer_use_canary_screenshot', got '${tools[0].name}'`);
+    }
+
+    log(`Canary inventory verified: Exactly 1 tool ('${tools[0].name}')`);
+  } catch (err) {
+    fail(`Canary dry-run tool inventory check failed: ${err.message}`);
+  }
+
+  // 5. Peekaboo Read-Only Bridge Permissions Check
+  log("Checking Peekaboo bridge read-only availability...");
+  try {
+    const peekabooBin = fs.existsSync("/opt/homebrew/bin/peekaboo") ? "/opt/homebrew/bin/peekaboo" : "peekaboo";
+    const permOut = execSync(`${peekabooBin} permissions`, { encoding: "utf-8" }).trim();
+    log(`Peekaboo permissions check output: ${permOut.split("\n")[0]}`);
+  } catch (err) {
+    log("Note: Peekaboo CLI read-only permissions check returned non-zero (mock client available for CI).");
+  }
+
+  log("ALL CANARY READINESS CHECKS PASSED!");
+  process.exit(0);
+} else {
+  console.log("Usage: bin/agy-computer-use [doctor|canary-ready|build]");
+}

@@ -1,20 +1,23 @@
 ---
 name: computer-use
-description: Provides dual-perception (Accessibility AXUIElement + Screen perception) and keyboard/mouse control for macOS desktop interactions.
+description: Provides dual-perception (Accessibility AXUIElement + Screen perception) and keyboard/mouse control for macOS desktop interactions. Contract Version v0.1.0-dogfood-d1.
 ---
 
-# Antigravity Computer Use Skill
+# Antigravity Computer Use Skill (`v0.1.0-dogfood-d1`)
 
 This skill teaches Google Antigravity agents (and Gemini models) how to reliably and safely interact with macOS graphical user interfaces using the `computer-use-mcp` tool suite.
+
+> [!NOTE]
+> **Dogfood Harness Canary**: The `computer_use_canary_screenshot` tool is an observation-only test harness proof for dogfood verification, not the native host product backend. Full production acceptance requires native host dual-perception via `computer_use_observe` and `computer_use_ax_tree`.
 
 ---
 
 ## Operational Core Principles
 
 ### 1. Observe-One-Action-Observe Loop
-- **ALWAYS** call `computer_use_observe` first to capture the current screen state and receive a valid `capture_id`.
-- Execute **EXACTLY ONE** input action (`computer_use_click`, `computer_use_move`, `computer_use_drag`, `computer_use_type`, `computer_use_shortcut`, `computer_use_scroll`) referencing that exact `capture_id`.
-- **NEVER** batch multiple click or type actions against the same stale `capture_id`.
+- **ALWAYS** call `computer_use_observe` first to capture current desktop screen state and receive a valid `capture_id` and `topology_version`.
+- Execute **EXACTLY ONE** input action (`computer_use_click`, `computer_use_move`, `computer_use_drag`, `computer_use_type`, `computer_use_shortcut`, `computer_use_scroll`) referencing that exact `capture_id`, `topology_version`, and non-whitespace `intent`.
+- **NEVER** batch multiple input actions against a stale `capture_id`.
 
 ### 2. AX-First, Vision-Fallback Strategy
 1. **Query AX Element Tree First**: Call `computer_use_ax_tree` to inspect exact window hierarchies, element titles, roles, and bounding boxes.
@@ -44,5 +47,6 @@ This skill teaches Google Antigravity agents (and Gemini models) how to reliably
 ---
 
 ## References & Operational Guides
+- [Dogfood Canary Reference](references/dogfood-canary.md)
 - [Observe-Action-Observe Loop Guide](references/observe-action-loop.md)
 - [Accessibility vs Vision Decision Matrix](references/ax-vs-vision.md)

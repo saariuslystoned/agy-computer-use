@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "computer-use-canary": {
+      "command": "node",
+      "args": [
+        "./mcp/computer-use-mcp/dist/src/canary.js"
+      ]
+    }
+  }
+}
