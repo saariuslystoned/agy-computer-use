@@ -123,6 +123,13 @@ public final class FakeCaptureEngine: DisplayCaptureEngine, @unchecked Sendable 
     }
 }
 
+public struct CancellingCaptureEngine: DisplayCaptureEngine {
+    public init() {}
+    public func captureDisplay(displayId: Int? = nil, topology: DisplayTopology) async throws -> CaptureFrameDTO {
+        throw CancellationError()
+    }
+}
+
 public struct FakeAXInspector: AXInspectionEngine {
     public let available: Bool
     public let trusted: Bool
@@ -175,6 +182,61 @@ public struct ComputerUseHostTestRunner {
         fputs("[TEST CASE \(totalCasesExecuted)] \(name) - PASSED\n", stderr)
     }
 
+    private static func writeAll(fd: Int32, data: Data, timeoutSec: Double = 5.0) throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now + .seconds(timeoutSec)
+        var totalWritten = 0
+        let totalCount = data.count
+        try data.withUnsafeBytes { rawBuf in
+            guard let basePtr = rawBuf.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
+            while totalWritten < totalCount {
+                let now = clock.now
+                guard now < deadline else {
+                    throw ComputerUseError.timeout(operation: "test_client_write", seconds: timeoutSec)
+                }
+                var tv = timeval(tv_sec: 1, tv_usec: 0)
+                _ = setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+                let n = write(fd, basePtr.advanced(by: totalWritten), totalCount - totalWritten)
+                if n > 0 {
+                    totalWritten += n
+                } else if n < 0 {
+                    let err = errno
+                    if err == EINTR { continue }
+                    throw ComputerUseError.ipcError(reason: "Test client write failed: errno \(err)")
+                }
+            }
+        }
+    }
+
+    private static func readExactly(fd: Int32, count: Int, timeoutSec: Double = 5.0) throws -> Data {
+        let clock = ContinuousClock()
+        let deadline = clock.now + .seconds(timeoutSec)
+        var data = Data(repeating: 0, count: count)
+        var totalRead = 0
+        try data.withUnsafeMutableBytes { rawBuf in
+            guard let basePtr = rawBuf.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
+            while totalRead < count {
+                let now = clock.now
+                guard now < deadline else {
+                    throw ComputerUseError.timeout(operation: "test_client_read", seconds: timeoutSec)
+                }
+                var tv = timeval(tv_sec: 1, tv_usec: 0)
+                _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+                let n = read(fd, basePtr.advanced(by: totalRead), count - totalRead)
+                if n > 0 {
+                    totalRead += n
+                } else if n == 0 {
+                    throw ComputerUseError.ipcError(reason: "Test client socket closed prematurely")
+                } else {
+                    let err = errno
+                    if err == EINTR { continue }
+                    throw ComputerUseError.ipcError(reason: "Test client read failed: errno \(err)")
+                }
+            }
+        }
+        return data
+    }
+
     public static func main() async throws {
         fputs("[ComputerUseHostTestRunner] Starting Portable Native Execution Test Authority...\n", stderr)
 
@@ -211,7 +273,7 @@ public struct ComputerUseHostTestRunner {
         assertTrue(FileManager.default.fileExists(atPath: testDirPath))
         recordCase("testDirectoryPreparation")
 
-        // 4. Real UDS Socket Roundtrip Test
+        // 4. Real UDS Socket Roundtrip Test with Monotonic Deadline Loops
         let testSocketPath = "\(testDirPath)/test-roundtrip-\(UUID().uuidString).sock"
         let fakeTopologyProvider = FakeDisplayTopologyProvider()
         let fakeCaptureEngine = FakeCaptureEngine()
@@ -257,31 +319,28 @@ public struct ComputerUseHostTestRunner {
         }
         assertEqual(connRes, 0)
 
-        let req = IPCRequest(id: "uds-test-1", method: "status")
-        let reqData = try JSONEncoder().encode(req)
-        let framedReq = try LengthPrefixedFramer.encode(payload: reqData)
-        _ = framedReq.withUnsafeBytes { bPtr in
-            write(clientFd, bPtr.baseAddress!, framedReq.count)
+        do {
+            defer { close(clientFd) }
+            let req = IPCRequest(id: "uds-test-1", method: "status")
+            let reqData = try JSONEncoder().encode(req)
+            let framedReq = try LengthPrefixedFramer.encode(payload: reqData)
+            try writeAll(fd: clientFd, data: framedReq)
+
+            let resHeader = try readExactly(fd: clientFd, count: 4)
+            let resLen = Int(resHeader[0]) << 24 | Int(resHeader[1]) << 16 | Int(resHeader[2]) << 8 | Int(resHeader[3])
+            assertTrue(resLen > 0)
+
+            let resPayload = try readExactly(fd: clientFd, count: resLen)
+            let resp = try JSONDecoder().decode(IPCResponse.self, from: resPayload)
+            assertTrue(resp.success)
+            assertEqual(resp.id, "uds-test-1")
         }
-
-        var resHeader = [UInt8](repeating: 0, count: 4)
-        _ = read(clientFd, &resHeader, 4)
-        let resLen = Int(resHeader[0]) << 24 | Int(resHeader[1]) << 16 | Int(resHeader[2]) << 8 | Int(resHeader[3])
-        assertTrue(resLen > 0)
-
-        var resPayload = [UInt8](repeating: 0, count: resLen)
-        _ = read(clientFd, &resPayload, resLen)
-        close(clientFd)
 
         _ = await serverTask.result
         listener.stop()
-
-        let resp = try JSONDecoder().decode(IPCResponse.self, from: Data(resPayload))
-        assertTrue(resp.success)
-        assertEqual(resp.id, "uds-test-1")
         recordCase("testUDSClientServerRoundTrip")
 
-        // 5. Post-Timeout UDS Recovery Test
+        // 5. Post-Timeout UDS Recovery Test with Monotonic Deadline Loops
         let recoverySocketPath = "\(testDirPath)/test-recovery-\(UUID().uuidString).sock"
         let recoveryListener = SocketListener(socketPath: recoverySocketPath, server: serverActor, perFrameTimeoutSec: 1.0)
         try recoveryListener.start()
@@ -304,9 +363,11 @@ public struct ComputerUseHostTestRunner {
             ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { saPtr in connect(clientFd1, saPtr, socklen_t(addrLen1)) }
         }
 
-        let badHeader = Data([0x00, 0x00, 0x00, 0x00])
-        _ = badHeader.withUnsafeBytes { write(clientFd1, $0.baseAddress!, 4) }
-        close(clientFd1)
+        do {
+            defer { close(clientFd1) }
+            let badHeader = Data([0x00, 0x00, 0x00, 0x00])
+            try writeAll(fd: clientFd1, data: badHeader)
+        }
         _ = await recTask1.result
 
         // Subsequent Client 2 connects and receives valid status response
@@ -317,13 +378,17 @@ public struct ComputerUseHostTestRunner {
         _ = withUnsafePointer(to: &addr1) { ptr in
             ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { saPtr in connect(clientFd2, saPtr, socklen_t(addrLen1)) }
         }
-        _ = framedReq.withUnsafeBytes { write(clientFd2, $0.baseAddress!, framedReq.count) }
 
-        var resHeader2 = [UInt8](repeating: 0, count: 4)
-        _ = read(clientFd2, &resHeader2, 4)
-        let resLen2 = Int(resHeader2[0]) << 24 | Int(resHeader2[1]) << 16 | Int(resHeader2[2]) << 8 | Int(resHeader2[3])
-        assertTrue(resLen2 > 0)
-        close(clientFd2)
+        do {
+            defer { close(clientFd2) }
+            let req2 = IPCRequest(id: "uds-rec-2", method: "status")
+            let framedReq2 = try LengthPrefixedFramer.encode(payload: try JSONEncoder().encode(req2))
+            try writeAll(fd: clientFd2, data: framedReq2)
+
+            let resHeader2 = try readExactly(fd: clientFd2, count: 4)
+            let resLen2 = Int(resHeader2[0]) << 24 | Int(resHeader2[1]) << 16 | Int(resHeader2[2]) << 8 | Int(resHeader2[3])
+            assertTrue(resLen2 > 0)
+        }
         _ = await recTask2.result
         recoveryListener.stop()
         recordCase("testPostTimeoutUDSRecovery")
@@ -524,6 +589,19 @@ public struct ComputerUseHostTestRunner {
         }
         assertTrue(threwOversizedMP, "Oversized 100MP display pre-check rejected before framework allocation")
         recordCase("test64MegapixelSafetyPreCheckRejection")
+
+        // 16. CancellationError Explicit Mapping Test
+        let cancellingServer = HostServer(
+            authorizer: FakeScreenRecordingAuthorizer(granted: true),
+            topologyProvider: FakeDisplayTopologyProvider(),
+            captureEngine: CancellingCaptureEngine(),
+            axEngine: DisabledAXInspector(),
+            inputEngine: DisabledInputInjector()
+        )
+        let cancelResp = await cancellingServer.handleRequest(IPCRequest(id: "cancel-1", method: "observe"))
+        assertTrue(!cancelResp.success)
+        assertEqual(cancelResp.error?.code, "CANCELLED")
+        recordCase("testCancellationErrorMappedToCancelledCode")
 
         fputs("[ComputerUseHostTestRunner] Executed \(totalCasesExecuted) native test cases successfully. ALL PASSED.\n", stderr)
     }

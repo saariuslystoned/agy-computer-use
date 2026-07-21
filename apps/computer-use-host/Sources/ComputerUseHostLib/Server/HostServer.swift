@@ -169,6 +169,12 @@ public actor HostServer {
                 success: false,
                 error: IPCErrorPayload(code: err.errorCode, message: err.errorMessage)
             )
+        } catch is CancellationError {
+            return IPCResponse(
+                id: request.id,
+                success: false,
+                error: IPCErrorPayload(code: "CANCELLED", message: "Task was cancelled")
+            )
         } catch {
             return IPCResponse(
                 id: request.id,
