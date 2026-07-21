@@ -59,7 +59,9 @@ jobs:
             local pattern="$1"
             local path_spec="$2"
 
-            validate_pathspec "$path_spec"
+            if ! validate_pathspec "$path_spec"; then
+              return 2
+            fi
 
             local status=0
             git grep -q "$pattern" -- "$path_spec" || status=$?
