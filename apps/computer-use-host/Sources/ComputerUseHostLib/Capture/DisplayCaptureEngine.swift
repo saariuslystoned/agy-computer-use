@@ -190,7 +190,8 @@ public actor SCScreenshotCaptureEngine: DisplayCaptureEngine {
                     eoiOffset = offset
                     break
                 }
-                return nil
+                // Inter-scan marker in progressive JPEG: transition out of entropy scan to parse next segment
+                foundSOS = false
             }
 
             if marker == 0xD8 {
@@ -289,14 +290,7 @@ public actor SCScreenshotCaptureEngine: DisplayCaptureEngine {
         let pixelWidth = targetDisplay.pixelWidth
         let pixelHeight = targetDisplay.pixelHeight
 
-        guard pixelWidth > 0, pixelHeight > 0 else {
-            throw ComputerUseError.targetUnreachable(reason: "Display ID \(targetDisplay.id) has non-positive pixel dimensions")
-        }
-
-        let (totalPixels, overflow) = pixelWidth.multipliedReportingOverflow(by: pixelHeight)
-        guard !overflow, totalPixels > 0, totalPixels <= 64_000_000 else {
-            throw ComputerUseError.targetUnreachable(reason: "Display ID \(targetDisplay.id) pixel dimensions exceed safety limits")
-        }
+        try validatePixelDimensions(width: pixelWidth, height: pixelHeight)
 
         guard image.width == pixelWidth, image.height == pixelHeight else {
             throw ComputerUseError.targetUnreachable(reason: "Captured CGImage dimensions (\(image.width)x\(image.height)) mismatch requested topology (\(pixelWidth)x\(pixelHeight))")

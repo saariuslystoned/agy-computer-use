@@ -80,7 +80,6 @@ public final class SocketListener: @unchecked Sendable {
         var boundPathForRollback: String? = nil
         var boundDevForRollback: dev_t = 0
         var boundInodeForRollback: ino_t = 0
-        var createdLockPathForRollback: String? = nil
 
         do {
             let parentDir = (socketPath as NSString).deletingLastPathComponent
@@ -98,7 +97,6 @@ public final class SocketListener: @unchecked Sendable {
                 lockFd = -1
                 throw ComputerUseError.ipcError(reason: "Refusing to start: another active host instance holds flock on \(lockPath)")
             }
-            createdLockPathForRollback = lockPath
 
             var statBuf = stat()
             if lstat(socketPath, &statBuf) == 0 {
@@ -254,9 +252,6 @@ public final class SocketListener: @unchecked Sendable {
                 close(lockFd)
                 lockFd = -1
             }
-            if let lockPath = createdLockPathForRollback {
-                _ = unlink(lockPath)
-            }
             self.boundDev = 0
             self.boundInode = 0
             self.isRunning = false
@@ -405,6 +400,9 @@ public final class SocketListener: @unchecked Sendable {
             let bytesRead = read(fd, &tempBuf[totalRead], count - totalRead)
             if bytesRead > 0 {
                 totalRead += bytesRead
+                if clock.now >= deadline {
+                    throw ComputerUseError.timeout(operation: operation, seconds: phaseBudgetSec)
+                }
             } else if bytesRead == 0 {
                 throw ComputerUseError.ipcError(reason: "Socket closed prematurely by peer during read")
             } else {
@@ -481,6 +479,9 @@ public final class SocketListener: @unchecked Sendable {
 
             if bytesWritten > 0 {
                 totalWritten += bytesWritten
+                if clock.now >= deadline {
+                    throw ComputerUseError.timeout(operation: "socket_write_response", seconds: phaseBudgetSec)
+                }
             } else if bytesWritten == 0 {
                 throw ComputerUseError.ipcError(reason: "Zero bytes written to socket")
             } else {
@@ -521,9 +522,6 @@ public final class SocketListener: @unchecked Sendable {
         if lockFd >= 0 {
             _ = flock(lockFd, LOCK_UN)
             close(lockFd)
-            let parentDir = (socketPath as NSString).deletingLastPathComponent
-            let lockPath = (parentDir as NSString).appendingPathComponent("host.lock")
-            _ = unlink(lockPath)
             lockFd = -1
         }
 

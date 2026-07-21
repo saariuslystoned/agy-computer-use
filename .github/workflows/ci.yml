@@ -12,6 +12,8 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Select Xcode & Verify Swift Toolchain
         run: |
@@ -32,11 +34,31 @@ jobs:
       - name: Run Source & Formatting Safety Guards
         run: |
           set -euo pipefail
-          git diff --check $(git merge-base HEAD origin/main) HEAD
-          ! git grep -n "CGRequestScreenCaptureAccess" -- 'apps/computer-use-host/Sources/'
-          ! git grep -n "CGEvent" -- 'apps/computer-use-host/Sources/'
-          ! git grep -n "Fake" -- 'apps/computer-use-host/Sources/'
-          ! git grep -n "recordCase(" -- 'apps/computer-use-host/Tests/'
+          git fetch origin main:refs/remotes/origin/main || true
+          BASE=$(git merge-base HEAD origin/main 2>/dev/null || echo "")
+          if [ -z "$BASE" ]; then
+            echo "Error: Failed to resolve non-empty merge-base between HEAD and origin/main" >&2
+            exit 1
+          fi
+          git diff --check "$BASE" HEAD
+
+          check_no_match() {
+            local pattern="$1"
+            local path_spec="$2"
+            if git grep -n "$pattern" -- "$path_spec" > /dev/null 2>&1; then
+              return 1
+            fi
+            return 0
+          }
+
+          check_no_match "CGRequestScreenCaptureAccess" 'apps/computer-use-host/Sources/'
+          check_no_match "CGEvent" 'apps/computer-use-host/Sources/'
+          check_no_match "Fake" 'apps/computer-use-host/Sources/'
+          check_no_match "recordCase(" 'apps/computer-use-host/Tests/'
+
+          # Negative self-probes proving each guard fails closed independently
+          ! check_no_match "import" 'apps/computer-use-host/Sources/'
+          ! check_no_match "func" 'apps/computer-use-host/Tests/'
 
       - name: Build & Run Native Swift Test Authority
         run: |

@@ -9,6 +9,13 @@ private final class AtomicCounter: @unchecked Sendable {
     var value: Int { lock.lock(); defer { lock.unlock() }; return val }
 }
 
+private final class ErrorBox: @unchecked Sendable {
+    private var err: Error? = nil
+    private let lock = NSLock()
+    func set(_ error: Error) { lock.lock(); err = error; lock.unlock() }
+    var value: Error? { lock.lock(); defer { lock.unlock() }; return err }
+}
+
 public final class FakeScreenRecordingAuthorizer: ScreenRecordingAuthorizing, @unchecked Sendable {
     public let granted: Bool
     public init(granted: Bool = true) { self.granted = granted }
@@ -852,13 +859,15 @@ public struct ComputerUseHostTestRunner {
             pixelHeight: 2160,
             rotation: 0.0
         )
+        let expectedDigestHex = "7275400fc06a64d3e67dad36ddfff2a9390c8adee90c0ceabb46715c2f403fe3"
+        let expectedGoldenVersion = "top-sha256-\(expectedDigestHex)"
         let goldVer = SystemDisplayTopologyProvider.computeTopologyVersion(primaryId: 1, displays: [primaryDisp])
 
+        assertEqual(goldVer, expectedGoldenVersion)
         assertTrue(goldVer.hasPrefix("top-sha256-"))
         assertEqual(goldVer.count, 75)
         let hexDigest = String(goldVer.dropFirst(11))
-        assertEqual(hexDigest.count, 64)
-        assertTrue(hexDigest.allSatisfy { $0.isHexDigit })
+        assertEqual(hexDigest, expectedDigestHex)
 
         let mutId = DisplayInfo(id: 2, widthPoints: 1920.0, heightPoints: 1080.0, scaleFactor: 2.0, originX: 0.0, originY: 0.0, pixelWidth: 3840, pixelHeight: 2160, rotation: 0.0)
         assertTrue(SystemDisplayTopologyProvider.computeTopologyVersion(primaryId: 1, displays: [mutId]) != goldVer)
@@ -1180,9 +1189,14 @@ public struct ComputerUseHostTestRunner {
         assertEqual(respA.error?.code, "TIMEOUT")
         assertEqual(budget.count, 1, "Budget must remain occupied while orphan task A runs")
 
+        let invocationsBeforeB = await controlledEngine.invocationCount
+        let genBeforeB = await server.latestIssuedGenerationSnapshot
+
         let respB = await server.handleRequest(IPCRequest(id: "orphan-B", method: "observe"))
         assertTrue(!respB.success)
         assertEqual(respB.error?.code, "CAPTURE_BUSY")
+        assertEqual(await controlledEngine.invocationCount, invocationsBeforeB, "Busy request B must cause zero capture engine invocations")
+        assertEqual(await server.latestIssuedGenerationSnapshot, genBeforeB, "Busy request B must cause zero generation changes")
 
         let frameA = try FakeCaptureEngine().generateDTO(topology: FakeDisplayTopologyProvider().getTopology())
         try await controlledEngine.complete(index: 0, with: .success(frameA))
@@ -1304,7 +1318,11 @@ public struct ComputerUseHostTestRunner {
         _ = rmdir(sockPath30)
 
         var statLock30 = stat()
-        assertTrue(lstat(lockPath30, &statLock30) != 0, "host.lock file must be unlinked on partial-start rollback")
+        assertTrue(lstat(lockPath30, &statLock30) == 0, "host.lock file must persist on disk after partial-start rollback")
+        let testLockFd30 = open(lockPath30, O_RDWR | O_CLOEXEC)
+        assertTrue(testLockFd30 >= 0, "host.lock must be readable/writable after rollback")
+        assertEqual(flock(testLockFd30, LOCK_EX | LOCK_NB), 0, "Persistent host.lock inode must be unlocked after rollback")
+        close(testLockFd30)
 
         try listener30.start()
         let clientFd30 = try connectToSocket(at: listener30.socketPath)
@@ -1313,17 +1331,28 @@ public struct ComputerUseHostTestRunner {
     }
 
     private static func runWithWatchdog(name: String, timeoutSec: Double = 10.0, _ block: @Sendable @escaping () async throws -> Void) async throws {
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            group.addTask {
+        let sem = DispatchSemaphore(value: 0)
+        let errorBox = ErrorBox()
+        let task = Task {
+            do {
                 try await block()
+            } catch {
+                errorBox.set(error)
             }
-            group.addTask {
-                try await Task.sleep(nanoseconds: UInt64(timeoutSec * 1_000_000_000))
-                throw ComputerUseError.timeout(operation: "test_watchdog_\(name)", seconds: timeoutSec)
-            }
-            try await group.next()
-            group.cancelAll()
+            sem.signal()
         }
+
+        let watchdogThread = Thread {
+            let timeoutResult = sem.wait(timeout: .now() + .seconds(Int(timeoutSec)))
+            if timeoutResult == .timedOut {
+                fputs("[FAIL] Hard watchdog timeout for test: \(name)\n", stderr)
+                task.cancel()
+                _exit(1)
+            }
+        }
+        watchdogThread.start()
+        _ = await task.value
+        if let err = errorBox.value { throw err }
     }
 
     public static func main() async throws {

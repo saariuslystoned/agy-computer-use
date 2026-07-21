@@ -30,7 +30,11 @@ private func runSync(_ block: @Sendable @escaping () async throws -> Void) throw
         }
         sem.signal()
     }
-    sem.wait()
+    let res = sem.wait(timeout: .now() + .seconds(15))
+    if res == .timedOut {
+        fputs("[FAIL] XCTest runner hard timeout\n", stderr)
+        _exit(1)
+    }
     if let err = box.value { throw err }
 }
 

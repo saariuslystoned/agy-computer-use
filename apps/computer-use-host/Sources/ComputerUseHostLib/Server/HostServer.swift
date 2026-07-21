@@ -131,6 +131,17 @@ public struct DefaultSleeper: Sleeper {
     }
 }
 
+public protocol HostClock: Sendable {
+    var now: ContinuousClock.Instant { get }
+}
+
+public struct DefaultHostClock: HostClock {
+    public init() {}
+    public var now: ContinuousClock.Instant {
+        ContinuousClock().now
+    }
+}
+
 public actor HostServer {
     private var isConnected: Bool = false
     private let authorizer: ScreenRecordingAuthorizing
@@ -141,6 +152,7 @@ public actor HostServer {
     private let observationTimeoutSec: Double
     private let budget: CaptureBudget
     private let sleeper: Sleeper
+    private let clock: HostClock
 
     private var latestCapture: CaptureFrameDTO?
     private var activeTopology: DisplayTopology?
@@ -162,7 +174,8 @@ public actor HostServer {
         inputEngine: InputSynthesisEngine = DisabledInputInjector(),
         observationTimeoutSec: Double = 5.0,
         budget: CaptureBudget = CaptureBudget(maxConcurrent: 2),
-        sleeper: Sleeper = DefaultSleeper()
+        sleeper: Sleeper = DefaultSleeper(),
+        clock: HostClock = DefaultHostClock()
     ) {
         self.authorizer = authorizer
         self.topologyProvider = topologyProvider
@@ -172,6 +185,7 @@ public actor HostServer {
         self.observationTimeoutSec = observationTimeoutSec
         self.budget = budget
         self.sleeper = sleeper
+        self.clock = clock
     }
 
     public func handleRequest(_ request: IPCRequest) async -> IPCResponse {

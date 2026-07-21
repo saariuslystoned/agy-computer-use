@@ -45,7 +45,6 @@ export function parseJPEGDimensions(buf: Buffer): JPEGDimensions | null {
     const marker = buf[offset + 1];
 
     if (foundSOS) {
-      // Entropy data state: only stuffed 0xFF 0x00, restart markers 0xFF 0xD0..0xD7, or EOI 0xFF 0xD9 are valid
       if (marker === 0x00) {
         offset += 2;
         continue;
@@ -58,8 +57,8 @@ export function parseJPEGDimensions(buf: Buffer): JPEGDimensions | null {
         eoiOffset = offset;
         break;
       }
-      // Any other marker in entropy data is invalid
-      return null;
+      // Inter-scan marker in progressive JPEG: transition out of entropy scan to parse next segment
+      foundSOS = false;
     }
 
     // Header / Segment state (before SOS)

@@ -120,13 +120,16 @@ async function main() {
     let hasXCTest = false;
     let actualList = "";
     try {
-      const testListRaw = execSync("swift test list 2>/dev/null", { cwd: hostDir, encoding: "utf-8" });
-      actualList = testListRaw.trim().split("\n").map(l => l.trim()).filter(Boolean).sort().join("\n");
-      if (actualList.length > 0) {
-        hasXCTest = true;
+      const testListRaw = execSync("swift test list 2>&1", { cwd: hostDir, encoding: "utf-8" });
+      actualList = testListRaw.trim().split("\n").map(l => l.trim()).filter(l => l.startsWith("ComputerUseHostTests.")).sort().join("\n");
+      hasXCTest = actualList.length > 0;
+    } catch (err) {
+      const output = (err.stdout || "") + "\n" + (err.stderr || "") + "\n" + (err.message || "");
+      if (output.includes("no such module 'XCTest'") || output.includes("XCTest is not supported")) {
+        hasXCTest = false;
+      } else {
+        fail(`'swift test list' failed closed with build/discovery/manifest error:\n${output}`);
       }
-    } catch {
-      hasXCTest = false;
     }
 
     if (hasXCTest) {
