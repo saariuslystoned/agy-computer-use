@@ -5,6 +5,8 @@ public class SocketListener {
     private let server: HostServer
     private var listeningSocket: Int32 = -1
     private var isRunning = false
+    private var boundInode: ino_t = 0
+    private var boundDev: dev_t = 0
 
     public init(socketPath: String? = nil, server: HostServer) {
         let uid = getuid()
@@ -34,12 +36,17 @@ public class SocketListener {
             throw ComputerUseError.ipcError(reason: "Runtime directory \(path) is a symlink or not a directory")
         }
 
-        guard statBuf.st_uid == getuid() else {
-            throw ComputerUseError.ipcError(reason: "Runtime directory \(path) owner \(statBuf.st_uid) != current user \(getuid())")
+        guard (statBuf.st_mode & S_IFLNK) == 0 else {
+            throw ComputerUseError.ipcError(reason: "Runtime directory \(path) must not be a symbolic link")
         }
 
-        guard (statBuf.st_mode & 0o077) == 0 else {
-            throw ComputerUseError.ipcError(reason: "Runtime directory \(path) permissions permits group/other access")
+        guard statBuf.st_uid == getuid() else {
+            throw ComputerUseError.ipcError(reason: "Runtime directory \(path) is not owned by current user (UID \(getuid()))")
+        }
+
+        let currentPermissions = statBuf.st_mode & 0o777
+        guard currentPermissions == 0o700 else {
+            throw ComputerUseError.ipcError(reason: "Runtime directory \(path) permissions are \(String(format: "%o", currentPermissions)), expected 0700")
         }
     }
 
@@ -50,25 +57,61 @@ public class SocketListener {
         let fm = FileManager.default
         if fm.fileExists(atPath: socketPath) {
             var statBuf = stat()
-            if lstat(socketPath, &statBuf) == 0, (statBuf.st_mode & S_IFMT) != S_IFLNK, statBuf.st_uid == getuid() {
-                try fm.removeItem(atPath: socketPath)
-            } else {
-                throw ComputerUseError.ipcError(reason: "Refusing to unlink unverified or unowned socket at \(socketPath)")
+            guard lstat(socketPath, &statBuf) == 0 else {
+                throw ComputerUseError.ipcError(reason: "Failed to stat existing socket path \(socketPath)")
             }
+
+            guard (statBuf.st_mode & S_IFMT) == S_IFSOCK else {
+                throw ComputerUseError.ipcError(reason: "Existing path \(socketPath) is not a socket file")
+            }
+
+            guard statBuf.st_uid == getuid() else {
+                throw ComputerUseError.ipcError(reason: "Existing socket \(socketPath) owned by another user")
+            }
+
+            // Distinguish live listener from stale socket file by attempting test connection
+            let testFd = socket(AF_UNIX, SOCK_STREAM, 0)
+            if testFd >= 0 {
+                var testAddr = sockaddr_un()
+                let pathBytes = socketPath.utf8CString
+                let addrLen = MemoryLayout<sa_family_t>.size + pathBytes.count
+                testAddr.sun_len = UInt8(addrLen)
+                testAddr.sun_family = sa_family_t(AF_UNIX)
+                withUnsafeMutableBytes(of: &testAddr.sun_path) { ptr in
+                    ptr.initializeMemory(as: CChar.self, repeating: 0)
+                    _ = pathBytes.withUnsafeBufferPointer { bPtr in
+                        memcpy(ptr.baseAddress!, bPtr.baseAddress!, bPtr.count)
+                    }
+                }
+
+                let connRes = withUnsafePointer(to: &testAddr) { ptr in
+                    ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { saPtr in
+                        connect(testFd, saPtr, socklen_t(addrLen))
+                    }
+                }
+                close(testFd)
+
+                if connRes == 0 {
+                    throw ComputerUseError.ipcError(reason: "Active listener process already bound to socket path \(socketPath)")
+                }
+            }
+
+            // Socket is stale and non-responsive; safely remove it
+            try fm.removeItem(atPath: socketPath)
         }
 
         listeningSocket = socket(AF_UNIX, SOCK_STREAM, 0)
         guard listeningSocket >= 0 else {
-            throw ComputerUseError.ipcError(reason: "Failed to create socket")
+            throw ComputerUseError.ipcError(reason: "Failed to create socket file descriptor")
         }
 
         var addr = sockaddr_un()
         let pathBytes = socketPath.utf8CString
-        guard pathBytes.count <= MemoryLayout.size(ofValue: addr.sun_path) else {
-            throw ComputerUseError.ipcError(reason: "Socket path too long")
+        let addrLen = MemoryLayout<sa_family_t>.size + pathBytes.count
+        guard addrLen <= MemoryLayout<sockaddr_un>.size else {
+            throw ComputerUseError.ipcError(reason: "Socket path '\(socketPath)' exceeds Darwin max length")
         }
 
-        let addrLen = MemoryLayout<sa_family_t>.size + pathBytes.count
         addr.sun_len = UInt8(addrLen)
         addr.sun_family = sa_family_t(AF_UNIX)
 
@@ -86,22 +129,32 @@ public class SocketListener {
         }
 
         guard bindRes == 0 else {
-            throw ComputerUseError.ipcError(reason: "Socket bind failed for \(socketPath)")
+            close(listeningSocket)
+            listeningSocket = -1
+            throw ComputerUseError.ipcError(reason: "Failed to bind Unix domain socket to \(socketPath)")
         }
 
         guard listen(listeningSocket, 5) == 0 else {
-            throw ComputerUseError.ipcError(reason: "Socket listen failed")
+            close(listeningSocket)
+            listeningSocket = -1
+            throw ComputerUseError.ipcError(reason: "Failed to listen on Unix domain socket")
         }
 
-        chmod(socketPath, 0o600)
+        var statBuf = stat()
+        if lstat(socketPath, &statBuf) == 0 {
+            self.boundInode = statBuf.st_ino
+            self.boundDev = statBuf.st_dev
+        }
+
         isRunning = true
     }
 
     public func acceptAndHandleOneConnection() async throws -> Bool {
-        guard isRunning, listeningSocket >= 0 else { return false }
+        guard isRunning && listeningSocket >= 0 else { return false }
 
         var clientAddr = sockaddr_un()
         var clientAddrLen = socklen_t(MemoryLayout<sockaddr_un>.size)
+
         let clientFd = withUnsafeMutablePointer(to: &clientAddr) { ptr in
             ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { saPtr in
                 accept(listeningSocket, saPtr, &clientAddrLen)
@@ -113,27 +166,37 @@ public class SocketListener {
             throw ComputerUseError.ipcError(reason: "Socket accept failed")
         }
 
-        defer { close(clientFd) }
+        defer {
+            close(clientFd)
+        }
 
-        // Darwin peer credential verification using getpeereid
+        // Validate peer credentials on Darwin via getpeereid
         var peuid: uid_t = 0
         var pegid: gid_t = 0
         guard getpeereid(clientFd, &peuid, &pegid) == 0 else {
-            throw ComputerUseError.ipcError(reason: "getpeereid failed for client connection")
+            throw ComputerUseError.ipcError(reason: "getpeereid failed on client socket")
         }
 
         guard peuid == getuid() else {
-            throw ComputerUseError.ipcError(reason: "Peer UID \(peuid) does not match process owner UID \(getuid())")
+            throw ComputerUseError.permissionDenied(permission: "Peer UID \(peuid) does not match host UID \(getuid())")
         }
 
-        // Read request length header (4-byte big endian)
-        var lengthBuf = [UInt8](repeating: 0, count: 4)
-        let readLen = read(clientFd, &lengthBuf, 4)
-        guard readLen == 4 else {
-            throw ComputerUseError.ipcError(reason: "Failed to read 4-byte framing header")
+        // Read length-prefixed request
+        var headerBuf = [UInt8](repeating: 0, count: 4)
+        var headerRead = 0
+        while headerRead < 4 {
+            let n = headerBuf.withUnsafeMutableBufferPointer { bPtr in
+                read(clientFd, bPtr.baseAddress! + headerRead, 4 - headerRead)
+            }
+            if n <= 0 { break }
+            headerRead += n
         }
 
-        let payloadLen = Int(lengthBuf[0]) << 24 | Int(lengthBuf[1]) << 16 | Int(lengthBuf[2]) << 8 | Int(lengthBuf[3])
+        guard headerRead == 4 else {
+            return false // Socket closed without complete frame
+        }
+
+        let payloadLen = Int(headerBuf[0]) << 24 | Int(headerBuf[1]) << 16 | Int(headerBuf[2]) << 8 | Int(headerBuf[3])
         guard payloadLen > 0 && payloadLen <= 16 * 1024 * 1024 else {
             throw ComputerUseError.ipcError(reason: "Invalid payload length \(payloadLen)")
         }
@@ -160,11 +223,30 @@ public class SocketListener {
         let responseData = try JSONEncoder().encode(response)
 
         let encodedResponse = try LengthPrefixedFramer.encode(payload: responseData)
-        _ = encodedResponse.withUnsafeBytes { bPtr in
-            write(clientFd, bPtr.baseAddress!, encodedResponse.count)
-        }
+
+        // Robust write loop handling partial writes and EINTR
+        try writeAll(fd: clientFd, data: encodedResponse)
 
         return true
+    }
+
+    private func writeAll(fd: Int32, data: Data) throws {
+        var written = 0
+        let total = data.count
+        try data.withUnsafeBytes { rawPtr in
+            guard let basePtr = rawPtr.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
+            while written < total {
+                let res = write(fd, basePtr + written, total - written)
+                if res < 0 {
+                    if errno == EINTR { continue }
+                    throw ComputerUseError.ipcError(reason: "Socket write error: \(String(cString: strerror(errno)))")
+                }
+                if res == 0 {
+                    throw ComputerUseError.ipcError(reason: "Socket closed prematurely during write")
+                }
+                written += res
+            }
+        }
     }
 
     public func stop() {
@@ -176,7 +258,11 @@ public class SocketListener {
         let fm = FileManager.default
         if fm.fileExists(atPath: socketPath) {
             var statBuf = stat()
-            if lstat(socketPath, &statBuf) == 0, (statBuf.st_mode & S_IFMT) != S_IFLNK, statBuf.st_uid == getuid() {
+            if lstat(socketPath, &statBuf) == 0,
+               (statBuf.st_mode & S_IFMT) == S_IFSOCK,
+               statBuf.st_uid == getuid(),
+               statBuf.st_ino == boundInode,
+               statBuf.st_dev == boundDev {
                 try? fm.removeItem(atPath: socketPath)
             }
         }

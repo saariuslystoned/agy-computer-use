@@ -16,7 +16,7 @@ jobs:
       - name: Set up Swift
         run: swift --version
 
-      - name: Build and Run Swift Host Unit Tests
+      - name: Build and Run Swift Host Unit & Integration Tests
         run: |
           cd apps/computer-use-host
           swift run ComputerUseHostTests
@@ -33,7 +33,7 @@ jobs:
           version: 10.33.0
 
       - name: Set up Node.js 22
-        uses: actions/setup-node@v4
+        uses: settings/setup-node@v4
         with:
           node-version: "22.23.1"
           cache: "pnpm"

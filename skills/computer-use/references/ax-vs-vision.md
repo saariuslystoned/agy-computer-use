@@ -1,6 +1,8 @@
-# Accessibility (AX) vs Vision Perception Matrix
+# Accessibility (AX) vs Vision Decision Matrix
 
-| Perception Strategy | Primary Strengths | Trade-offs & Boundaries | Recommended Use Case |
+| UI Scenario | Recommended Perception Mode | Tool to Call | Rationale |
 |---|---|---|---|
-| **Accessibility (`computer_use_ax_tree`)** | Deterministic element titles, exact bounding boxes, semantic roles | Unlabelled buttons, canvas apps (Figma/WebGPU), missing AX trees | Target native controls, input fields, menu items |
-| **Vision (`computer_use_observe`)** | Fallback for non-standard UI, canvas, games, image elements | Coordinate estimation error, requires OCR/grid mapping | Unlabelled buttons, canvas, image elements |
+| Standard macOS native controls (Buttons, TextFields, Menus) | **Accessibility Tree** | `computer_use_ax_tree` | Sub-millisecond element location, zero visual coordinate ambiguity, exact label matching. |
+| Password & Sensitive Fields | **Accessibility Tree** | `computer_use_ax_tree` | Sensitive text fields automatically display `[REDACTED]` to prevent credential leaks. |
+| Web Canvas, Video Player, Custom Drawn UI | **Visual Perception** | `computer_use_observe` | Non-standard DOM elements not exposed to macOS accessibility system. |
+| Icon-only buttons without accessibility labels | **Dual Perception** | `computer_use_observe` + `computer_use_ax_tree` | Use visual image for location and AX tree for bounding box confirmation. |

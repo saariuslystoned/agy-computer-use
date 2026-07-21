@@ -2,12 +2,28 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import * as net from "net";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createComputerUseServer } from "../src/index.js";
-import { MockHostClient } from "../src/host-client.js";
+import { MockHostClient, UnixSocketHostClient } from "../src/host-client.js";
 
-describe("Computer Use MCP Server End-to-End Integration", () => {
+function getRecursiveFiles(dir: string): string[] {
+  let results: string[] = [];
+  const list = fs.readdirSync(dir);
+  for (const file of list) {
+    const filePath = path.join(dir, file);
+    const stat = fs.statSync(filePath);
+    if (stat && stat.isDirectory()) {
+      results = results.concat(getRecursiveFiles(filePath));
+    } else {
+      results.push(filePath);
+    }
+  }
+  return results;
+}
+
+describe("Computer Use MCP Server & HostClient Test Suite", () => {
   test("Exercises listTools and callTool using official SDK Client and InMemoryTransport linked pair", async () => {
     const mockHost = new MockHostClient();
     const server = createComputerUseServer(mockHost);
@@ -95,7 +111,7 @@ describe("Computer Use MCP Server End-to-End Integration", () => {
     await server.close();
   });
 
-  test("Verifies skill package sync drift between .agents/skills and skills/", () => {
+  test("Verifies 100% recursive skill package sync drift between .agents/skills and skills/", () => {
     const rootDir = path.resolve(process.cwd(), "../../");
     const agentSkillDir = path.join(rootDir, ".agents/skills/computer-use");
     const rootSkillDir = path.join(rootDir, "skills/computer-use");
@@ -103,11 +119,128 @@ describe("Computer Use MCP Server End-to-End Integration", () => {
     assert.ok(fs.existsSync(agentSkillDir), `.agents/skills/computer-use must exist`);
     assert.ok(fs.existsSync(rootSkillDir), `skills/computer-use must exist`);
 
-    const agentSkillContent = fs.readFileSync(path.join(agentSkillDir, "SKILL.md"), "utf-8");
-    const rootSkillContent = fs.readFileSync(path.join(rootSkillDir, "SKILL.md"), "utf-8");
+    const agentFiles = getRecursiveFiles(agentSkillDir);
+    const rootFiles = getRecursiveFiles(rootSkillDir);
 
-    assert.equal(agentSkillContent.trim(), rootSkillContent.trim(), "SKILL.md files must be identical");
-    assert.ok(fs.existsSync(path.join(rootSkillDir, "references/observe-action-loop.md")));
-    assert.ok(fs.existsSync(path.join(rootSkillDir, "references/ax-vs-vision.md")));
+    const relAgentFiles = agentFiles.map(f => path.relative(agentSkillDir, f)).sort();
+    const relRootFiles = rootFiles.map(f => path.relative(rootSkillDir, f)).sort();
+
+    assert.deepEqual(relAgentFiles, relRootFiles, "Skill directory file hierarchies must match 100%");
+
+    for (const relFile of relAgentFiles) {
+      const agentContent = fs.readFileSync(path.join(agentSkillDir, relFile), "utf-8").trim();
+      const rootContent = fs.readFileSync(path.join(rootSkillDir, relFile), "utf-8").trim();
+      assert.equal(agentContent, rootContent, `Content of skill file '${relFile}' must match 100%`);
+    }
+  });
+
+  test("Validates all golden JSON fixtures in docs/fixtures/", () => {
+    const rootDir = path.resolve(process.cwd(), "../../");
+    const fixturesDir = path.join(rootDir, "docs/fixtures");
+    assert.ok(fs.existsSync(fixturesDir), "docs/fixtures directory must exist");
+
+    const fixtureFiles = fs.readdirSync(fixturesDir).filter(f => f.endsWith(".json"));
+    assert.ok(fixtureFiles.length >= 3, "Must contain at least 3 golden fixtures");
+
+    for (const file of fixtureFiles) {
+      const content = fs.readFileSync(path.join(fixturesDir, file), "utf-8");
+      assert.doesNotThrow(() => JSON.parse(content), `Fixture '${file}' must be valid JSON`);
+      const parsed = JSON.parse(content);
+      assert.ok(parsed.id, `Fixture '${file}' must contain id`);
+    }
+  });
+
+  test("UnixSocketHostClient: Oversized frame rejection (>16MB)", async () => {
+    const sockPath = `/tmp/test-oversized-${Date.now()}.sock`;
+    const server = net.createServer((socket) => {
+      socket.on("data", () => {
+        // Send header with bodyLen = 17MB (17,825,792 bytes)
+        const header = Buffer.alloc(4);
+        header.writeUInt32BE(17 * 1024 * 1024, 0);
+        socket.write(header);
+      });
+    });
+
+    await new Promise<void>((res) => server.listen(sockPath, res));
+
+    const client = new UnixSocketHostClient(sockPath, 1000);
+    const resp = await client.request("status");
+
+    assert.equal(resp.success, false);
+    assert.equal(resp.error?.code, "RESPONSE_TOO_LARGE");
+
+    server.close();
+    if (fs.existsSync(sockPath)) fs.unlinkSync(sockPath);
+  });
+
+  test("UnixSocketHostClient: EOF handling on premature socket close", async () => {
+    const sockPath = `/tmp/test-eof-${Date.now()}.sock`;
+    const server = net.createServer((socket) => {
+      socket.on("data", () => {
+        socket.end(); // Close socket mid-frame
+      });
+    });
+
+    await new Promise<void>((res) => server.listen(sockPath, res));
+
+    const client = new UnixSocketHostClient(sockPath, 1000);
+    const resp = await client.request("status");
+
+    assert.equal(resp.success, false);
+    assert.equal(resp.error?.code, "EOF");
+
+    server.close();
+    if (fs.existsSync(sockPath)) fs.unlinkSync(sockPath);
+  });
+
+  test("UnixSocketHostClient: Request timeout handling", async () => {
+    const sockPath = `/tmp/test-timeout-${Date.now()}.sock`;
+    const server = net.createServer((_socket) => {
+      // Intentionally do not respond
+    });
+
+    await new Promise<void>((res) => server.listen(sockPath, res));
+
+    const client = new UnixSocketHostClient(sockPath, 100); // 100ms timeout
+    const resp = await client.request("status");
+
+    assert.equal(resp.success, false);
+    assert.equal(resp.error?.code, "TIMEOUT");
+
+    server.close();
+    if (fs.existsSync(sockPath)) fs.unlinkSync(sockPath);
+  });
+
+  test("UnixSocketHostClient: Cancellation phase distinction (pre-dispatch vs post-dispatch)", async () => {
+    const sockPath = `/tmp/test-cancel-${Date.now()}.sock`;
+    const server = net.createServer((_socket) => {
+      // Hold socket open
+    });
+
+    await new Promise<void>((res) => server.listen(sockPath, res));
+
+    const client = new UnixSocketHostClient(sockPath, 5000);
+
+    // Pre-dispatch abort
+    const controller1 = new AbortController();
+    controller1.abort();
+    const resp1 = await client.request("click", { x: 500, y: 500, capture_id: "cap-1", topology_version: "top-v1", intent: "Click" }, controller1.signal);
+    assert.equal(resp1.success, false);
+    assert.equal(resp1.error?.code, "CANCELLED");
+
+    // Post-dispatch mutation abort
+    const controller2 = new AbortController();
+    const reqPromise = client.request("click", { x: 500, y: 500, capture_id: "cap-1", topology_version: "top-v1", intent: "Click" }, controller2.signal);
+
+    setTimeout(() => {
+      controller2.abort();
+    }, 50);
+
+    const resp2 = await reqPromise;
+    assert.equal(resp2.success, false);
+    assert.equal(resp2.error?.code, "ACTION_OUTCOME_UNKNOWN");
+
+    server.close();
+    if (fs.existsSync(sockPath)) fs.unlinkSync(sockPath);
   });
 });

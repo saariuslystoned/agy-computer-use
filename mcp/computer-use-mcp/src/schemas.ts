@@ -11,7 +11,7 @@ export const AXTreeSchema = z.object({
   app_id: z.string().optional().describe("Optional target application bundle identifier or name")
 }).strict();
 
-export const IntentSchema = z.string().min(1).max(200).describe("Non-empty, bounded description of action intent");
+export const IntentSchema = z.string().trim().min(1, "Intent must contain non-whitespace characters").max(200).describe("Non-empty, bounded description of action intent (max 200 chars)");
 export const TopologyVersionSchema = z.string().min(1).default("top-v1").describe("Display topology version token");
 
 export const ClickSchema = z.object({

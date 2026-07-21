@@ -2,13 +2,16 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "ComputerUseIPCProtocol",
   "description": "IPC Request and Response Schemas between MCP Server and ComputerUseHost Native App",
-  "type": "object",
+  "oneOf": [
+    { "$ref": "#/definitions/IPCRequest" },
+    { "$ref": "#/definitions/IPCResponse" }
+  ],
   "definitions": {
     "IPCRequest": {
       "type": "object",
       "required": ["id", "method"],
       "properties": {
-        "id": { "type": "string" },
+        "id": { "type": "string", "minLength": 1 },
         "method": {
           "type": "string",
           "enum": ["status", "observe", "ax_tree", "click", "move", "drag", "type", "shortcut", "scroll"]
@@ -24,15 +27,15 @@
             "end_y": { "type": "integer", "minimum": 0, "maximum": 999 },
             "button": { "type": "string", "enum": ["left", "right", "middle"] },
             "click_count": { "type": "integer", "minimum": 1, "maximum": 3 },
-            "text": { "type": "string" },
+            "text": { "type": "string", "minLength": 1, "maxLength": 1000 },
             "press_enter": { "type": "boolean" },
-            "keys": { "type": "array", "items": { "type": "string" } },
+            "keys": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
             "delta_x": { "type": "integer" },
             "delta_y": { "type": "integer" },
             "direction": { "type": "string", "enum": ["up", "down", "left", "right"] },
-            "capture_id": { "type": "string" },
-            "topology_version": { "type": "string" },
-            "intent": { "type": "string" }
+            "capture_id": { "type": "string", "minLength": 1 },
+            "topology_version": { "type": "string", "minLength": 1 },
+            "intent": { "type": "string", "minLength": 1, "maxLength": 200 }
           }
         }
       }
@@ -41,15 +44,15 @@
       "type": "object",
       "required": ["id", "success"],
       "properties": {
-        "id": { "type": "string" },
+        "id": { "type": "string", "minLength": 1 },
         "success": { "type": "boolean" },
         "data": { "type": "object" },
         "error": {
           "type": "object",
           "required": ["code", "message"],
           "properties": {
-            "code": { "type": "string" },
-            "message": { "type": "string" },
+            "code": { "type": "string", "minLength": 1 },
+            "message": { "type": "string", "minLength": 1 },
             "details": { "type": "object" }
           }
         }
