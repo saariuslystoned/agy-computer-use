@@ -18,6 +18,7 @@ export interface PeekabooMcpRawClient {
 export const VALID_DUMMY_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 export const VALID_DUMMY_JPEG_BASE64 = "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=";
 
+const MAX_ENCODED_CHARS = 22369624; // ceil(16MiB * 4 / 3)
 const MAX_DECODED_BYTES = 16 * 1024 * 1024; // 16 MiB cap
 
 export function validateImageMagicBytes(buffer: Buffer, mimeType: string): boolean {
@@ -65,13 +66,27 @@ export function parseAndValidateRawImageResponse(raw: unknown): PeekabooCanaryRe
     throw new Error("CANARY_EMPTY_BASE64");
   }
 
-  const cleanData = data.replace(/[\r\n\s]/g, "");
-  const base64Regex = /^[A-Za-z0-9+/=]+$/;
-  if (!base64Regex.test(cleanData)) {
+  // Pre-allocation size guard BEFORE Buffer.from
+  if (data.length > MAX_ENCODED_CHARS) {
+    throw new Error("CANARY_SIZE_EXCEEDED");
+  }
+
+  // Strict canonical base64 check: length must be multiple of 4
+  if (data.length % 4 !== 0) {
     throw new Error("CANARY_MALFORMED_BASE64");
   }
 
-  const decodedBuf = Buffer.from(cleanData, "base64");
+  const base64Regex = /^[A-Za-z0-9+/]+={0,2}$/;
+  if (!base64Regex.test(data)) {
+    throw new Error("CANARY_MALFORMED_BASE64");
+  }
+
+  // Canonical round-trip test: must equal exact string after decode -> re-encode
+  const decodedBuf = Buffer.from(data, "base64");
+  if (decodedBuf.toString("base64") !== data) {
+    throw new Error("CANARY_MALFORMED_BASE64");
+  }
+
   if (decodedBuf.length === 0) {
     throw new Error("CANARY_EMPTY_DECODED_BUFFER");
   }
@@ -80,18 +95,19 @@ export function parseAndValidateRawImageResponse(raw: unknown): PeekabooCanaryRe
     throw new Error("CANARY_SIZE_EXCEEDED");
   }
 
-  if (!validateImageMagicBytes(decodedBuf, mimeType)) {
+  if (!validateImageMagicBytes(decodedBuf, mimeType as string)) {
     throw new Error("CANARY_MAGIC_MISMATCH");
   }
 
   return {
-    imageBase64: cleanData,
+    imageBase64: data,
     mimeType: mimeType as "image/png" | "image/jpeg"
   };
 }
 
 export class MockPeekabooMcpRawClient implements PeekabooMcpRawClient {
   private rawResponse: unknown;
+  public closeAttempted = false;
 
   constructor(rawResponse?: unknown) {
     this.rawResponse = rawResponse ?? {
@@ -106,12 +122,22 @@ export class MockPeekabooMcpRawClient implements PeekabooMcpRawClient {
   }
 
   public async callImageTool(): Promise<unknown> {
-    return this.rawResponse;
+    try {
+      if (this.rawResponse === "TIMEOUT_SIMULATION") {
+        await new Promise((_, reject) => setTimeout(() => reject(new Error("CANARY_TIMEOUT")), 50));
+      }
+      if (this.rawResponse instanceof Error) {
+        throw this.rawResponse;
+      }
+      return this.rawResponse;
+    } finally {
+      this.closeAttempted = true;
+    }
   }
 }
 
 export class MockPeekabooImageClient implements PeekabooImageClient {
-  private rawClient: PeekabooMcpRawClient;
+  public rawClient: MockPeekabooMcpRawClient;
 
   constructor(rawResponse?: unknown) {
     this.rawClient = new MockPeekabooMcpRawClient(rawResponse);
@@ -125,6 +151,7 @@ export class MockPeekabooImageClient implements PeekabooImageClient {
 
 export class StdioPeekabooMcpRawClient implements PeekabooMcpRawClient {
   private peekabooBin: string;
+  public lastCleanupPerformed = false;
 
   constructor(peekabooBin = "/opt/homebrew/bin/peekaboo") {
     this.peekabooBin = fs.existsSync(peekabooBin) ? peekabooBin : "peekaboo";
@@ -148,6 +175,7 @@ export class StdioPeekabooMcpRawClient implements PeekabooMcpRawClient {
     );
 
     let timeoutId: NodeJS.Timeout | undefined;
+    this.lastCleanupPerformed = false;
 
     try {
       const connectAndCall = async () => {
@@ -175,6 +203,7 @@ export class StdioPeekabooMcpRawClient implements PeekabooMcpRawClient {
       if (timeoutId) clearTimeout(timeoutId);
       try { await client.close(); } catch {}
       try { await transport.close(); } catch {}
+      this.lastCleanupPerformed = true;
     }
   }
 }

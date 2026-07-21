@@ -90,6 +90,45 @@ function checkPeekabooPermissions() {
   return true;
 }
 
+function checkPeekabooExactVersion() {
+  const peekabooBin = fs.existsSync("/opt/homebrew/bin/peekaboo") ? "/opt/homebrew/bin/peekaboo" : "peekaboo";
+  const verOut = execSync(`${peekabooBin} --version`, { encoding: "utf-8" }).trim();
+  if (!/3\.9\.1\b/.test(verOut)) {
+    throw new Error(`Peekaboo version must be EXACTLY 3.9.1, observed: '${verOut}'`);
+  }
+  return verOut;
+}
+
+function validateMcpConfigStruct() {
+  const mcpConfigPath = path.join(rootDir, ".agents/mcp_config.json");
+  if (!fs.existsSync(mcpConfigPath)) {
+    throw new Error(`.agents/mcp_config.json missing at ${mcpConfigPath}`);
+  }
+
+  const mcpConfig = JSON.parse(fs.readFileSync(mcpConfigPath, "utf-8"));
+  const canaryServer = mcpConfig?.mcpServers?.["computer-use-canary"];
+  if (!canaryServer) {
+    throw new Error(`.agents/mcp_config.json must register 'computer-use-canary'`);
+  }
+
+  if (canaryServer.command !== "node") {
+    throw new Error(`Config command must be 'node', got '${canaryServer.command}'`);
+  }
+
+  if (!Array.isArray(canaryServer.args) || canaryServer.args[0] !== "./mcp/computer-use-mcp/dist/src/canary.js") {
+    throw new Error(`Config args[0] must be './mcp/computer-use-mcp/dist/src/canary.js'`);
+  }
+
+  if (canaryServer.cwd !== "${workspaceRoot}") {
+    throw new Error(`Config cwd must be '\${workspaceRoot}', got '${canaryServer.cwd}'`);
+  }
+
+  const targetPath = path.join(rootDir, canaryServer.args[0]);
+  if (!fs.existsSync(targetPath)) {
+    throw new Error(`Target dist file specified in config does not exist at ${targetPath}`);
+  }
+}
+
 async function main() {
   if (subcommand === "build") {
     log("Building mcp/computer-use-mcp package...");
@@ -118,6 +157,13 @@ async function main() {
     }
 
     try {
+      const verOut = checkPeekabooExactVersion();
+      log(`Peekaboo Binary Version: ${verOut}`);
+    } catch (err) {
+      log(`Warning: Peekaboo version check: ${err.message}`);
+    }
+
+    try {
       checkPeekabooPermissions();
       log("Peekaboo Bridge Screen Recording Permission: GRANTED");
     } catch (err) {
@@ -139,25 +185,19 @@ async function main() {
       fail("Node.js missing in environment.");
     }
 
-    // 2. Build Check
+    // 2. Build & Target Existence Check
     const canaryDistPath = path.join(mcpPkgDir, "dist/src/canary.js");
     if (!fs.existsSync(canaryDistPath)) {
       log("Building MCP package for canary-ready check...");
       execSync("pnpm build", { cwd: mcpPkgDir, stdio: "inherit" });
     }
-    if (!fs.existsSync(canaryDistPath)) {
-      fail(`Canary dist file missing at ${canaryDistPath}`);
-    }
 
-    // 3. MCP Config Verification
-    const mcpConfigPath = path.join(rootDir, ".agents/mcp_config.json");
-    if (!fs.existsSync(mcpConfigPath)) {
-      fail(`.agents/mcp_config.json missing at ${mcpConfigPath}`);
-    }
-
-    const mcpConfig = JSON.parse(fs.readFileSync(mcpConfigPath, "utf-8"));
-    if (!mcpConfig.mcpServers || !mcpConfig.mcpServers["computer-use-canary"]) {
-      fail(`.agents/mcp_config.json must register 'computer-use-canary'`);
+    // 3. Config Validation (command, args, cwd, target existence from workspace root)
+    try {
+      validateMcpConfigStruct();
+      log("Verified .agents/mcp_config.json command, args, cwd, and target existence.");
+    } catch (err) {
+      fail(`MCP Config validation failed: ${err.message}`);
     }
 
     // 4. Public MCP Client Tool Inventory Check
@@ -168,13 +208,12 @@ async function main() {
       fail(`Public MCP Client tool inventory check failed: ${err.message}`);
     }
 
-    // 5. Peekaboo 3.9.1 Binary & Screen Recording Permission Check
+    // 5. Peekaboo EXACTLY 3.9.1 Binary & Screen Recording Permission Check
     try {
-      const peekabooBin = fs.existsSync("/opt/homebrew/bin/peekaboo") ? "/opt/homebrew/bin/peekaboo" : "peekaboo";
-      const verOut = execSync(`${peekabooBin} --version`, { encoding: "utf-8" }).trim();
-      log(`Verified Peekaboo binary: ${verOut}`);
-    } catch {
-      fail("Peekaboo binary is not available or executable.");
+      const verOut = checkPeekabooExactVersion();
+      log(`Verified Peekaboo binary exact version: ${verOut}`);
+    } catch (err) {
+      fail(err.message);
     }
 
     try {
