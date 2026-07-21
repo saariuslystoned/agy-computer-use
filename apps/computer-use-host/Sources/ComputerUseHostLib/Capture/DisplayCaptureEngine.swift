@@ -158,6 +158,8 @@ public actor SCScreenshotCaptureEngine: DisplayCaptureEngine {
         var foundSOF = false
         var foundSOS = false
         var dimensions: (width: Int, height: Int)? = nil
+        var frameNumComponents = 0
+        var sofComponentIds = Set<UInt8>()
         var eoiOffset = -1
 
         while offset < data.count - 1 {
@@ -207,8 +209,12 @@ public actor SCScreenshotCaptureEngine: DisplayCaptureEngine {
                 if offset + 4 >= data.count { return nil }
                 let segLen = (Int(data[offset + 2]) << 8) | Int(data[offset + 3])
                 let numScanComponents = Int(data[offset + 4])
-                if numScanComponents < 1 || numScanComponents > 4 { return nil }
+                if numScanComponents < 1 || numScanComponents > frameNumComponents { return nil }
                 if segLen != 6 + 2 * numScanComponents || offset + 2 + segLen > data.count { return nil }
+                for j in 0..<numScanComponents {
+                    let selector = data[offset + 5 + 2 * j]
+                    if !sofComponentIds.contains(selector) { return nil }
+                }
                 foundSOS = true
                 offset += 2 + segLen
                 continue
@@ -228,6 +234,12 @@ public actor SCScreenshotCaptureEngine: DisplayCaptureEngine {
                 if segLen != 8 + 3 * numComponents || offset + 2 + segLen > data.count { return nil }
                 if width <= 0 || height <= 0 { return nil }
                 if numComponents != 1 && numComponents != 3 && numComponents != 4 { return nil }
+
+                for i in 0..<numComponents {
+                    let compId = data[offset + 10 + 3 * i]
+                    sofComponentIds.insert(compId)
+                }
+                frameNumComponents = numComponents
 
                 dimensions = (width, height)
                 foundSOF = true

@@ -401,10 +401,19 @@ public actor HostServer {
                     }
                     arbiter.installCaptureTask(captureTask)
 
-                    let timeoutNano = UInt64(timeoutSec * 1_000_000_000)
                     let timerTask = Task.detached {
                         do {
-                            try await sleeper.sleep(nanoseconds: timeoutNano)
+                            let now = clock.now
+                            if now < absoluteDeadline {
+                                let duration = absoluteDeadline - now
+                                let (seconds, attoseconds) = duration.components
+                                let nanoFromSeconds = seconds >= 0 ? UInt64(seconds) * 1_000_000_000 : 0
+                                let nanoFromAttoseconds = attoseconds > 0 ? UInt64(attoseconds / 1_000_000_000) : 0
+                                let totalNano = nanoFromSeconds + nanoFromAttoseconds
+                                if totalNano > 0 {
+                                    try await sleeper.sleep(nanoseconds: totalNano)
+                                }
+                            }
                             arbiter.resolve(with: .failure(ComputerUseError.timeout(operation: "observe", seconds: timeoutSec)))
                         } catch {
                             // Sleeper cancelled or threw

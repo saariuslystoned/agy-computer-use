@@ -22,6 +22,8 @@ export function parseJPEGDimensions(buf: Buffer): JPEGDimensions | null {
   let foundSOF = false;
   let foundSOS = false;
   let dimensions: JPEGDimensions | null = null;
+  let frameNumComponents = 0;
+  const sofComponentIds = new Set<number>();
   let eoiOffset = -1;
 
   while (offset < buf.length - 1) {
@@ -78,8 +80,12 @@ export function parseJPEGDimensions(buf: Buffer): JPEGDimensions | null {
       if (offset + 4 >= buf.length) return null;
       const segLen = (buf[offset + 2] << 8) | buf[offset + 3];
       const numScanComponents = buf[offset + 4];
-      if (numScanComponents < 1 || numScanComponents > 4) return null;
+      if (numScanComponents < 1 || numScanComponents > frameNumComponents) return null;
       if (segLen !== 6 + 2 * numScanComponents || offset + 2 + segLen > buf.length) return null;
+      for (let j = 0; j < numScanComponents; j++) {
+        const selector = buf[offset + 5 + 2 * j];
+        if (!sofComponentIds.has(selector)) return null;
+      }
       foundSOS = true;
       offset += 2 + segLen;
       continue;
@@ -100,6 +106,12 @@ export function parseJPEGDimensions(buf: Buffer): JPEGDimensions | null {
       if (segLen !== 8 + 3 * numComponents || offset + 2 + segLen > buf.length) return null;
       if (width <= 0 || height <= 0) return null;
       if (numComponents !== 1 && numComponents !== 3 && numComponents !== 4) return null;
+
+      for (let i = 0; i < numComponents; i++) {
+        const compId = buf[offset + 10 + 3 * i];
+        sofComponentIds.add(compId);
+      }
+      frameNumComponents = numComponents;
 
       dimensions = { width, height };
       foundSOF = true;

@@ -149,7 +149,14 @@ public final class ScriptedPOSIXSyscalls: POSIXSyscallProviding, @unchecked Send
         underlying.setErrno(value)
     }
 
+    public func clearErrno() {
+        lock.lock(); defer { lock.unlock() }
+        customErrno = 0
+        underlying.setErrno(0)
+    }
+
     public func accept(_ socket: Int32, _ address: UnsafeMutablePointer<sockaddr>?, _ addressLen: UnsafeMutablePointer<socklen_t>?) -> Int32 {
+        clearErrno()
         lock.lock()
         acceptCallCount += 1
         let hook = acceptHook
@@ -159,6 +166,7 @@ public final class ScriptedPOSIXSyscalls: POSIXSyscallProviding, @unchecked Send
     }
 
     public func read(_ fd: Int32, _ buf: UnsafeMutableRawPointer?, _ count: Int) -> Int {
+        clearErrno()
         lock.lock()
         readCallCount += 1
         let hook = readHook
@@ -168,6 +176,7 @@ public final class ScriptedPOSIXSyscalls: POSIXSyscallProviding, @unchecked Send
     }
 
     public func write(_ fd: Int32, _ buf: UnsafeRawPointer?, _ count: Int) -> Int {
+        clearErrno()
         lock.lock()
         writeCallCount += 1
         let hook = writeHook
@@ -177,6 +186,7 @@ public final class ScriptedPOSIXSyscalls: POSIXSyscallProviding, @unchecked Send
     }
 
     public func listen(_ socket: Int32, _ backlog: Int32) -> Int32 {
+        clearErrno()
         if let res = listenHook?(socket, backlog) { return res }
         return underlying.listen(socket, backlog)
     }
@@ -1679,15 +1689,14 @@ public struct ComputerUseHostTestRunner {
         let handled = try await listener.acceptAndHandleOneConnection()
         assertTrue(handled)
 
-        assertTrue(headerReadAttempts >= 2, "Header read must retry after EINTR")
-        assertTrue(bodyReadAttempts >= 2, "Body read must retry after EINTR")
+        assertEqual(headerReadAttempts, 2, "Header read must retry exactly once after single EINTR")
+        assertEqual(bodyReadAttempts, 2, "Body read must retry exactly once after single EINTR")
     }
 
     public static func run33_WriteResponseEAGAINDeadlineAndSingleAttempt() async throws {
         let parentDir = "/tmp/agy-test-c33-\(UUID().uuidString)"
         let sockPath = "\(parentDir)/host.sock"
-        try SocketListener.prepareDirectory(at: sockPath)
-
+        let manualClock = TestManualClock()
         let scriptedSyscalls = ScriptedPOSIXSyscalls()
         var writeCallSequence = 0
 
@@ -1696,6 +1705,7 @@ public struct ComputerUseHostTestRunner {
             if writeCallSequence == 1 {
                 return 2
             }
+            manualClock.advance(by: .seconds(1))
             scriptedSyscalls.setErrno(EAGAIN)
             return -1
         }
@@ -1704,7 +1714,8 @@ public struct ComputerUseHostTestRunner {
             socketPath: sockPath,
             server: HostServer(authorizer: FakeScreenRecordingAuthorizer(), topologyProvider: FakeDisplayTopologyProvider(), captureEngine: FakeCaptureEngine(), axEngine: DisabledAXInspector(), inputEngine: DisabledInputInjector()),
             perFrameTimeoutSec: 0.1,
-            syscalls: scriptedSyscalls
+            syscalls: scriptedSyscalls,
+            clock: manualClock
         )
         try listener.start()
         defer { listener.stop() }
@@ -1756,7 +1767,6 @@ public struct ComputerUseHostTestRunner {
         let parentDir = "/tmp/agy-test-c35-\(UUID().uuidString)"
         let sockPath = "\(parentDir)/host.sock"
         let lockPath = "\(parentDir)/host.lock"
-        try SocketListener.prepareDirectory(at: sockPath)
 
         let scriptedSyscalls = ScriptedPOSIXSyscalls()
         var listenAttempt = 0
@@ -1782,6 +1792,7 @@ public struct ComputerUseHostTestRunner {
             if case .ipcError = err { threwListenError = true }
         }
         assertTrue(threwListenError, "start() must fail when listen returns non-zero")
+        assertEqual(listenAttempt, 1, "Initial start attempt must execute listen exactly once")
 
         var statBuf = stat()
         assertTrue(lstat(sockPath, &statBuf) != 0, "Bound socket file must be unlinked on listen rollback")
@@ -1792,6 +1803,7 @@ public struct ComputerUseHostTestRunner {
         try listener.start()
         defer { listener.stop() }
 
+        assertEqual(listenAttempt, 2, "Second start attempt must execute listen a second time successfully")
         assertTrue(lstat(lockPath, &statBuf) == 0)
         assertEqual(statBuf.st_ino, initialLockInode, "host.lock inode must remain unchanged")
 

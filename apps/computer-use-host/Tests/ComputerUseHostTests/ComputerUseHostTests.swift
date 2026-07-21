@@ -180,7 +180,7 @@ public final class ComputerUseHostTests: XCTestCase {
         try runSync { try await ComputerUseHostTestRunner.run35_InjectedListenFailurePostBindRollback() }
     }
 
-    public static let __allTests = [
+    nonisolated(unsafe) public static let __allTests = [
         ("test01_LengthPrefixedFraming", test01_LengthPrefixedFraming),
         ("test02_OversizedFramingHeaderRejection", test02_OversizedFramingHeaderRejection),
         ("test03_DirectoryPreparation", test03_DirectoryPreparation),

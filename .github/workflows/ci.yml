@@ -81,14 +81,32 @@ jobs:
           check_no_match "recordCase(" 'apps/computer-use-host/Tests/'
 
           # Self-probes proving guards fail closed independently
-          # 1. Positive match probe
-          ! check_no_match "import" 'apps/computer-use-host/Sources/'
-          # 2. Clean no-match probe
+          # 1. Positive match probe (must fail with status 1 because 'import' exists)
+          probe1_status=0
+          check_no_match "import" 'apps/computer-use-host/Sources/' || probe1_status=$?
+          if [ "$probe1_status" -ne 1 ]; then
+            echo "Self-probe 1 failed: expected check_no_match to exit 1 for positive match 'import', got $probe1_status" >&2
+            exit 1
+          fi
+
+          # 2. Clean no-match probe (must succeed with status 0)
           check_no_match "NONEXISTENT_SECURITY_FORBIDDEN_PATTERN_98765" 'apps/computer-use-host/Sources/'
-          # 3. Missing/renamed scope probe
-          ! check_no_match "import" 'nonexistent/scope/path/'
-          # 4. Forced command failure probe (invalid regex returns exit status 2)
-          ! check_no_match "[invalid-regex-unclosed-bracket" 'apps/computer-use-host/Sources/'
+
+          # 3. Missing/renamed scope probe (must fail with non-zero status for missing scope)
+          probe3_status=0
+          check_no_match "import" 'nonexistent/scope/path/' || probe3_status=$?
+          if [ "$probe3_status" -eq 0 ]; then
+            echo "Self-probe 3 failed: expected check_no_match to exit non-zero for missing scope, got $probe3_status" >&2
+            exit 1
+          fi
+
+          # 4. Forced command failure probe (invalid regex must fail with status >1)
+          probe4_status=0
+          check_no_match "[invalid-regex-unclosed-bracket" 'apps/computer-use-host/Sources/' || probe4_status=$?
+          if [ "$probe4_status" -le 1 ]; then
+            echo "Self-probe 4 failed: expected check_no_match to exit >1 for invalid regex, got $probe4_status" >&2
+            exit 1
+          fi
 
       - name: Build & Run Native Swift Test Authority
         run: |

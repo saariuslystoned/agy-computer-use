@@ -43,10 +43,10 @@ public final class SocketListener: @unchecked Sendable {
             canonicalPath = "/private" + canonicalPath
         }
 
-        var isDir: ObjCBool = false
+        var statBuf = stat()
         let targetDir: String
-        if FileManager.default.fileExists(atPath: canonicalPath, isDirectory: &isDir) {
-            targetDir = isDir.boolValue ? canonicalPath : (canonicalPath as NSString).deletingLastPathComponent
+        if syscalls.lstat(canonicalPath, &statBuf) == 0 {
+            targetDir = (statBuf.st_mode & S_IFMT) == S_IFDIR ? canonicalPath : (canonicalPath as NSString).deletingLastPathComponent
         } else {
             targetDir = (canonicalPath as NSString).pathExtension.isEmpty ? canonicalPath : (canonicalPath as NSString).deletingLastPathComponent
         }
@@ -69,18 +69,18 @@ public final class SocketListener: @unchecked Sendable {
             }
             defer { _ = syscalls.close(dirFd) }
 
-            var statBuf = stat()
-            guard syscalls.fstat(dirFd, &statBuf) == 0 else {
+            var openStatBuf = stat()
+            guard syscalls.fstat(dirFd, &openStatBuf) == 0 else {
                 throw ComputerUseError.ipcError(reason: "Failed to fstat open descriptor for runtime directory: \(targetDir)")
             }
-            guard (statBuf.st_mode & S_IFMT) == S_IFDIR else {
+            guard (openStatBuf.st_mode & S_IFMT) == S_IFDIR else {
                 throw ComputerUseError.ipcError(reason: "Refusing to use non-directory descriptor at runtime path: \(targetDir)")
             }
-            guard statBuf.st_uid == syscalls.getuid() else {
-                throw ComputerUseError.ipcError(reason: "Directory owner UID \(statBuf.st_uid) does not match current user UID \(syscalls.getuid())")
+            guard openStatBuf.st_uid == syscalls.getuid() else {
+                throw ComputerUseError.ipcError(reason: "Directory owner UID \(openStatBuf.st_uid) does not match current user UID \(syscalls.getuid())")
             }
-            guard (statBuf.st_mode & 0o777) == 0o700 else {
-                throw ComputerUseError.ipcError(reason: "Insecure directory permissions for path: \(targetDir) (mode 0o\(String(statBuf.st_mode & 0o777, radix: 8)), expected 0o700)")
+            guard (openStatBuf.st_mode & 0o777) == 0o700 else {
+                throw ComputerUseError.ipcError(reason: "Insecure directory permissions for path: \(targetDir) (mode 0o\(String(openStatBuf.st_mode & 0o777, radix: 8)), expected 0o700)")
             }
         } else {
             let err = syscalls.lastErrno
@@ -100,7 +100,7 @@ public final class SocketListener: @unchecked Sendable {
 
         do {
             let parentDir = (socketPath as NSString).deletingLastPathComponent
-            try SocketListener.prepareDirectory(at: socketPath)
+            try SocketListener.prepareDirectory(at: socketPath, syscalls: self.syscalls)
 
             let lockPath = (parentDir as NSString).appendingPathComponent("host.lock")
             lockFd = syscalls.open(lockPath, O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0o600)
