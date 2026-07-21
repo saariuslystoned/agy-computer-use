@@ -10,6 +10,7 @@ public final class SocketListener: @unchecked Sendable {
     private var serverFd: Int32 = -1
     private var lockFd: Int32 = -1
     private var isRunning: Bool = false
+    public private(set) var responseAttemptCount = 0
     private var boundDev: dev_t = 0
     private var boundInode: ino_t = 0
     private let lock = NSLock()
@@ -102,8 +103,19 @@ public final class SocketListener: @unchecked Sendable {
             let parentDir = (socketPath as NSString).deletingLastPathComponent
             try SocketListener.prepareDirectory(at: socketPath, syscalls: self.syscalls)
 
+            let dirFd = syscalls.open(parentDir, O_RDONLY | O_NOFOLLOW | O_CLOEXEC, 0)
+            guard dirFd >= 0 else {
+                throw ComputerUseError.ipcError(reason: "Failed to open descriptor for runtime directory: \(parentDir)")
+            }
+            defer { _ = syscalls.close(dirFd) }
+
+            var dirStat = stat()
+            guard syscalls.fstat(dirFd, &dirStat) == 0 else {
+                throw ComputerUseError.ipcError(reason: "Failed to fstat runtime directory descriptor: \(parentDir)")
+            }
+
             let lockPath = (parentDir as NSString).appendingPathComponent("host.lock")
-            lockFd = syscalls.open(lockPath, O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0o600)
+            lockFd = syscalls.openat(dirFd, "host.lock", O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0o600)
             guard lockFd >= 0 else {
                 throw ComputerUseError.ipcError(reason: "Failed to open or create host.lock file at \(lockPath)")
             }
@@ -436,6 +448,7 @@ public final class SocketListener: @unchecked Sendable {
     }
 
     private func writeResponse(_ response: IPCResponse, to fd: Int32, clock: HostClock, deadline: ContinuousClock.Instant, phaseBudgetSec: Double) async throws {
+        responseAttemptCount += 1
         let respData = try JSONEncoder().encode(response)
         let framedResp = try LengthPrefixedFramer.encode(payload: respData)
 

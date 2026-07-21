@@ -211,9 +211,11 @@ public actor SCScreenshotCaptureEngine: DisplayCaptureEngine {
                 let numScanComponents = Int(data[offset + 4])
                 if numScanComponents < 1 || numScanComponents > frameNumComponents { return nil }
                 if segLen != 6 + 2 * numScanComponents || offset + 2 + segLen > data.count { return nil }
+                var sosSelectors = Set<UInt8>()
                 for j in 0..<numScanComponents {
                     let selector = data[offset + 5 + 2 * j]
-                    if !sofComponentIds.contains(selector) { return nil }
+                    if !sofComponentIds.contains(selector) || sosSelectors.contains(selector) { return nil }
+                    sosSelectors.insert(selector)
                 }
                 foundSOS = true
                 offset += 2 + segLen
@@ -237,6 +239,7 @@ public actor SCScreenshotCaptureEngine: DisplayCaptureEngine {
 
                 for i in 0..<numComponents {
                     let compId = data[offset + 10 + 3 * i]
+                    if sofComponentIds.contains(compId) { return nil }
                     sofComponentIds.insert(compId)
                 }
                 frameNumComponents = numComponents

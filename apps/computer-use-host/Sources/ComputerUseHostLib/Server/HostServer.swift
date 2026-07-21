@@ -403,16 +403,14 @@ public actor HostServer {
 
                     let timerTask = Task.detached {
                         do {
-                            let now = clock.now
-                            if now < absoluteDeadline {
+                            while clock.now < absoluteDeadline {
+                                let now = clock.now
                                 let duration = absoluteDeadline - now
                                 let (seconds, attoseconds) = duration.components
                                 let nanoFromSeconds = seconds >= 0 ? UInt64(seconds) * 1_000_000_000 : 0
                                 let nanoFromAttoseconds = attoseconds > 0 ? UInt64(attoseconds / 1_000_000_000) : 0
-                                let totalNano = nanoFromSeconds + nanoFromAttoseconds
-                                if totalNano > 0 {
-                                    try await sleeper.sleep(nanoseconds: totalNano)
-                                }
+                                let totalNano = max(1, nanoFromSeconds + nanoFromAttoseconds)
+                                try await sleeper.sleep(nanoseconds: totalNano)
                             }
                             arbiter.resolve(with: .failure(ComputerUseError.timeout(operation: "observe", seconds: timeoutSec)))
                         } catch {

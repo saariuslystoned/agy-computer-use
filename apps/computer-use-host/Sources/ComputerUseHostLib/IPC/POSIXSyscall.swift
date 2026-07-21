@@ -12,6 +12,7 @@ public protocol POSIXSyscallProviding: Sendable {
     func bind(_ socket: Int32, _ address: UnsafePointer<sockaddr>?, _ addressLen: socklen_t) -> Int32
     func socket(_ domain: Int32, _ type: Int32, _ protocol: Int32) -> Int32
     func open(_ path: UnsafePointer<CChar>, _ oflag: Int32, _ mode: mode_t) -> Int32
+    func openat(_ dirFd: Int32, _ path: UnsafePointer<CChar>, _ oflag: Int32, _ mode: mode_t) -> Int32
     func fcntl(_ fd: Int32, _ cmd: Int32, _ arg: Int32) -> Int32
     func getsockopt(_ socket: Int32, _ level: Int32, _ optionName: Int32, _ optionValue: UnsafeMutableRawPointer?, _ optionLen: UnsafeMutablePointer<socklen_t>?) -> Int32
     func lstat(_ path: UnsafePointer<CChar>, _ buf: UnsafeMutablePointer<stat>?) -> Int32
@@ -31,6 +32,9 @@ public protocol POSIXSyscallProviding: Sendable {
 extension POSIXSyscallProviding {
     public func open(_ path: String, _ oflag: Int32, _ mode: mode_t = 0) -> Int32 {
         path.withCString { open($0, oflag, mode) }
+    }
+    public func openat(_ dirFd: Int32, _ path: String, _ oflag: Int32, _ mode: mode_t = 0) -> Int32 {
+        path.withCString { openat(dirFd, $0, oflag, mode) }
     }
     public func lstat(_ path: String, _ buf: UnsafeMutablePointer<stat>?) -> Int32 {
         path.withCString { lstat($0, buf) }
@@ -73,6 +77,9 @@ public final class DarwinPOSIXSyscalls: POSIXSyscallProviding, @unchecked Sendab
     }
     public func open(_ path: UnsafePointer<CChar>, _ oflag: Int32, _ mode: mode_t) -> Int32 {
         Darwin.open(path, oflag, mode)
+    }
+    public func openat(_ dirFd: Int32, _ path: UnsafePointer<CChar>, _ oflag: Int32, _ mode: mode_t) -> Int32 {
+        Darwin.openat(dirFd, path, oflag, mode)
     }
     public func fcntl(_ fd: Int32, _ cmd: Int32, _ arg: Int32) -> Int32 {
         Darwin.fcntl(fd, cmd, arg)

@@ -82,9 +82,11 @@ export function parseJPEGDimensions(buf: Buffer): JPEGDimensions | null {
       const numScanComponents = buf[offset + 4];
       if (numScanComponents < 1 || numScanComponents > frameNumComponents) return null;
       if (segLen !== 6 + 2 * numScanComponents || offset + 2 + segLen > buf.length) return null;
+      const sosSelectors = new Set<number>();
       for (let j = 0; j < numScanComponents; j++) {
         const selector = buf[offset + 5 + 2 * j];
-        if (!sofComponentIds.has(selector)) return null;
+        if (!sofComponentIds.has(selector) || sosSelectors.has(selector)) return null;
+        sosSelectors.add(selector);
       }
       foundSOS = true;
       offset += 2 + segLen;
@@ -104,11 +106,12 @@ export function parseJPEGDimensions(buf: Buffer): JPEGDimensions | null {
       const numComponents = buf[offset + 9];
 
       if (segLen !== 8 + 3 * numComponents || offset + 2 + segLen > buf.length) return null;
-      if (width <= 0 || height <= 0) return null;
+      if (width <= 0 || height <= 0 || width * height > 64_000_000) return null;
       if (numComponents !== 1 && numComponents !== 3 && numComponents !== 4) return null;
 
       for (let i = 0; i < numComponents; i++) {
         const compId = buf[offset + 10 + 3 * i];
+        if (sofComponentIds.has(compId)) return null;
         sofComponentIds.add(compId);
       }
       frameNumComponents = numComponents;
