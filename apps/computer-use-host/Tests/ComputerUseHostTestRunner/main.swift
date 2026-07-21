@@ -191,23 +191,23 @@ public final class ScriptedPOSIXSyscalls: POSIXSyscallProviding, @unchecked Send
         return underlying.listen(socket, backlog)
     }
 
-    public func bind(_ socket: Int32, _ address: UnsafePointer<sockaddr>?, _ addressLen: socklen_t) -> Int32 { underlying.bind(socket, address, addressLen) }
-    public func socket(_ domain: Int32, _ type: Int32, _ protocol: Int32) -> Int32 { underlying.socket(domain, type, `protocol`) }
-    public func open(_ path: UnsafePointer<CChar>, _ oflag: Int32, _ mode: mode_t) -> Int32 { underlying.open(path, oflag, mode) }
-    public func fcntl(_ fd: Int32, _ cmd: Int32, _ arg: Int32) -> Int32 { underlying.fcntl(fd, cmd, arg) }
-    public func getsockopt(_ socket: Int32, _ level: Int32, _ optionName: Int32, _ optionValue: UnsafeMutableRawPointer?, _ optionLen: UnsafeMutablePointer<socklen_t>?) -> Int32 { underlying.getsockopt(socket, level, optionName, optionValue, optionLen) }
-    public func lstat(_ path: UnsafePointer<CChar>, _ buf: UnsafeMutablePointer<stat>?) -> Int32 { underlying.lstat(path, buf) }
-    public func fstat(_ fd: Int32, _ buf: UnsafeMutablePointer<stat>?) -> Int32 { underlying.fstat(fd, buf) }
-    public func flock(_ fd: Int32, _ operation: Int32) -> Int32 { underlying.flock(fd, operation) }
-    public func unlink(_ path: UnsafePointer<CChar>) -> Int32 { underlying.unlink(path) }
-    public func rmdir(_ path: UnsafePointer<CChar>) -> Int32 { underlying.rmdir(path) }
-    public func mkdir(_ path: UnsafePointer<CChar>, _ mode: mode_t) -> Int32 { underlying.mkdir(path, mode) }
-    public func close(_ fd: Int32) -> Int32 { underlying.close(fd) }
+    public func bind(_ socket: Int32, _ address: UnsafePointer<sockaddr>?, _ addressLen: socklen_t) -> Int32 { clearErrno(); return underlying.bind(socket, address, addressLen) }
+    public func socket(_ domain: Int32, _ type: Int32, _ protocol: Int32) -> Int32 { clearErrno(); return underlying.socket(domain, type, `protocol`) }
+    public func open(_ path: UnsafePointer<CChar>, _ oflag: Int32, _ mode: mode_t) -> Int32 { clearErrno(); return underlying.open(path, oflag, mode) }
+    public func fcntl(_ fd: Int32, _ cmd: Int32, _ arg: Int32) -> Int32 { clearErrno(); return underlying.fcntl(fd, cmd, arg) }
+    public func getsockopt(_ socket: Int32, _ level: Int32, _ optionName: Int32, _ optionValue: UnsafeMutableRawPointer?, _ optionLen: UnsafeMutablePointer<socklen_t>?) -> Int32 { clearErrno(); return underlying.getsockopt(socket, level, optionName, optionValue, optionLen) }
+    public func lstat(_ path: UnsafePointer<CChar>, _ buf: UnsafeMutablePointer<stat>?) -> Int32 { clearErrno(); return underlying.lstat(path, buf) }
+    public func fstat(_ fd: Int32, _ buf: UnsafeMutablePointer<stat>?) -> Int32 { clearErrno(); return underlying.fstat(fd, buf) }
+    public func flock(_ fd: Int32, _ operation: Int32) -> Int32 { clearErrno(); return underlying.flock(fd, operation) }
+    public func unlink(_ path: UnsafePointer<CChar>) -> Int32 { clearErrno(); return underlying.unlink(path) }
+    public func rmdir(_ path: UnsafePointer<CChar>) -> Int32 { clearErrno(); return underlying.rmdir(path) }
+    public func mkdir(_ path: UnsafePointer<CChar>, _ mode: mode_t) -> Int32 { clearErrno(); return underlying.mkdir(path, mode) }
+    public func close(_ fd: Int32) -> Int32 { clearErrno(); return underlying.close(fd) }
     public func getuid() -> uid_t { underlying.getuid() }
-    public func setsockopt(_ socket: Int32, _ level: Int32, _ optionName: Int32, _ optionValue: UnsafeRawPointer?, _ optionLen: socklen_t) -> Int32 { underlying.setsockopt(socket, level, optionName, optionValue, optionLen) }
-    public func connect(_ socket: Int32, _ address: UnsafePointer<sockaddr>?, _ addressLen: socklen_t) -> Int32 { underlying.connect(socket, address, addressLen) }
-    public func poll(_ fds: UnsafeMutablePointer<pollfd>?, _ nfds: nfds_t, _ timeout: Int32) -> Int32 { underlying.poll(fds, nfds, timeout) }
-    public func getpeereid(_ socket: Int32, _ uid: UnsafeMutablePointer<uid_t>?, _ gid: UnsafeMutablePointer<gid_t>?) -> Int32 { underlying.getpeereid(socket, uid, gid) }
+    public func setsockopt(_ socket: Int32, _ level: Int32, _ optionName: Int32, _ optionValue: UnsafeRawPointer?, _ optionLen: socklen_t) -> Int32 { clearErrno(); return underlying.setsockopt(socket, level, optionName, optionValue, optionLen) }
+    public func connect(_ socket: Int32, _ address: UnsafePointer<sockaddr>?, _ addressLen: socklen_t) -> Int32 { clearErrno(); return underlying.connect(socket, address, addressLen) }
+    public func poll(_ fds: UnsafeMutablePointer<pollfd>?, _ nfds: nfds_t, _ timeout: Int32) -> Int32 { clearErrno(); return underlying.poll(fds, nfds, timeout) }
+    public func getpeereid(_ socket: Int32, _ uid: UnsafeMutablePointer<uid_t>?, _ gid: UnsafeMutablePointer<gid_t>?) -> Int32 { clearErrno(); return underlying.getpeereid(socket, uid, gid) }
 }
 
 public final class FakeScreenRecordingAuthorizer: ScreenRecordingAuthorizing, @unchecked Sendable {
