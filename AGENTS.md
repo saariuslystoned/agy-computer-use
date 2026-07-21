@@ -6,7 +6,7 @@ This repository defines the production architecture, protocol specifications, Sw
 ## Depth & Quality Standards
 - **Production Architecture & Bounded Contracts**: Screen capture, AX DOM extraction, coordinate normalization, and input synthesis are bound by strict schemas, error handling, depth limits, and security redaction rules.
 - **Native OS Integration & Security Principal**: A signed menu-bar macOS app (`ComputerUseHost.app`) serves as the single TCC principal for Screen Recording and Accessibility permissions. The MCP server connects to the host over a local Unix domain socket in an owner-only runtime directory (`chmod 0700`).
-- **Antigravity Tooling**: Exposes clean MCP server tools (`computer_use_status`, `computer_use_observe`, `computer_use_ax_tree`, `computer_use_click`, `computer_use_move`, `computer_use_drag`, `computer_use_type`, `computer_use_shortcut`, `computer_use_scroll`) alongside skill definitions compatible with Google Antigravity / Gemini 3.6 Flash.
+- **Antigravity Tooling**: Exposes clean MCP server tools (`computer_use_status`, `computer_use_observe`) alongside skill definitions compatible with Google Antigravity / Gemini 3.6 Flash in Milestone D2.
 
 ## Execution Rules & Safety Policy
 - **Proof Policy**: Every feature milestone requires verifiable empirical proof (unit/integration test run outputs, deterministic test host validation, schema validation, and tracked verification reports in `proof/`).
@@ -31,7 +31,7 @@ This repository defines the production architecture, protocol specifications, Sw
 ```
 
 ## Agent Build & Verification Workflow
-1. Build native host Swift package (`swift build` in `apps/computer-use-host`).
-2. Run Swift unit tests (`swift test` in `apps/computer-use-host`).
-3. Run TypeScript MCP server checks and unit/integration tests (`pnpm check` and `pnpm test` in `mcp/computer-use-mcp`).
-4. Document test output and verification summary in `proof/`.
+1. Run authoritative native Swift test authority (`./bin/agy-computer-use test-native`).
+2. Run TypeScript MCP server checks and unit/integration tests (`pnpm check` and `pnpm test` in `mcp/computer-use-mcp`).
+3. Run offline readiness validation (`./bin/agy-computer-use canary-ready`).
+4. Document test output and verification summary in `proof/d2_verification.md`.

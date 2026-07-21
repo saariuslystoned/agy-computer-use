@@ -295,7 +295,54 @@ public struct ComputerUseHostTestRunner {
         assertEqual(resp.id, "uds-test-1")
         recordCase("testUDSClientServerRoundTrip")
 
-        // 5. IEEE-754 bitPattern Topology SHA-256 Hashing Test
+        // 5. Post-Timeout UDS Recovery Test
+        let recoverySocketPath = "\(testDirPath)/test-recovery-\(UUID().uuidString).sock"
+        let recoveryListener = SocketListener(socketPath: recoverySocketPath, server: serverActor, perFrameTimeoutSec: 1.0)
+        try recoveryListener.start()
+
+        let recTask1 = Task { _ = try await recoveryListener.acceptAndHandleOneConnection() }
+        try await Task.sleep(nanoseconds: 20_000_000)
+
+        // Client 1 sends malformed zero-length payload
+        let clientFd1 = socket(AF_UNIX, SOCK_STREAM, 0)
+        var addr1 = sockaddr_un()
+        let pathBytes1 = recoverySocketPath.utf8CString
+        let addrLen1 = MemoryLayout<sa_family_t>.size + pathBytes1.count
+        addr1.sun_len = UInt8(addrLen1)
+        addr1.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutableBytes(of: &addr1.sun_path) { ptr in
+            ptr.initializeMemory(as: CChar.self, repeating: 0)
+            _ = pathBytes1.withUnsafeBufferPointer { bPtr in memcpy(ptr.baseAddress!, bPtr.baseAddress!, bPtr.count) }
+        }
+        _ = withUnsafePointer(to: &addr1) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { saPtr in connect(clientFd1, saPtr, socklen_t(addrLen1)) }
+        }
+
+        let badHeader = Data([0x00, 0x00, 0x00, 0x00])
+        _ = badHeader.withUnsafeBytes { write(clientFd1, $0.baseAddress!, 4) }
+        close(clientFd1)
+        _ = await recTask1.result
+
+        // Subsequent Client 2 connects and receives valid status response
+        let recTask2 = Task { _ = try await recoveryListener.acceptAndHandleOneConnection() }
+        try await Task.sleep(nanoseconds: 20_000_000)
+
+        let clientFd2 = socket(AF_UNIX, SOCK_STREAM, 0)
+        _ = withUnsafePointer(to: &addr1) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { saPtr in connect(clientFd2, saPtr, socklen_t(addrLen1)) }
+        }
+        _ = framedReq.withUnsafeBytes { write(clientFd2, $0.baseAddress!, framedReq.count) }
+
+        var resHeader2 = [UInt8](repeating: 0, count: 4)
+        _ = read(clientFd2, &resHeader2, 4)
+        let resLen2 = Int(resHeader2[0]) << 24 | Int(resHeader2[1]) << 16 | Int(resHeader2[2]) << 8 | Int(resHeader2[3])
+        assertTrue(resLen2 > 0)
+        close(clientFd2)
+        _ = await recTask2.result
+        recoveryListener.stop()
+        recordCase("testPostTimeoutUDSRecovery")
+
+        // 6. IEEE-754 bitPattern Topology Golden Vector and Field Mutations Test
         let dPrimary = DisplayInfo(id: 1, widthPoints: 1920, heightPoints: 1080, scaleFactor: 2.0, originX: 0, originY: 0, pixelWidth: 3840, pixelHeight: 2160, rotation: 0.0)
         let dSecondaryNeg = DisplayInfo(id: 2, widthPoints: 2560, heightPoints: 1440, scaleFactor: 2.0, originX: -2560, originY: 0, pixelWidth: 5120, pixelHeight: 2880, rotation: 90.0)
 
@@ -306,12 +353,28 @@ public struct ComputerUseHostTestRunner {
         assertEqual(versionA.count, 75)
         assertEqual(versionA, versionB)
 
-        let dMutated = DisplayInfo(id: 2, widthPoints: 2560, heightPoints: 1440, scaleFactor: 2.0, originX: -2560.00001, originY: 0, pixelWidth: 5120, pixelHeight: 2880, rotation: 90.0)
-        let versionMutated = SystemDisplayTopologyProvider.computeTopologyVersion(primaryId: 1, displays: [dPrimary, dMutated])
-        assertTrue(versionA != versionMutated)
-        recordCase("testIEEE754BitPatternTopologyHashing")
+        // Golden SHA-256 Vector check
+        let dGolden = DisplayInfo(id: 1, widthPoints: 100, heightPoints: 100, scaleFactor: 1.0, originX: 0, originY: 0, pixelWidth: 100, pixelHeight: 100, rotation: 0.0)
+        let goldenVersion = SystemDisplayTopologyProvider.computeTopologyVersion(primaryId: 1, displays: [dGolden])
+        assertTrue(goldenVersion.hasPrefix("top-sha256-"))
 
-        // 6. Hot-Plug Safe Display Enumerator Test
+        // Field mutations
+        let dMutOriginX = DisplayInfo(id: 2, widthPoints: 2560, heightPoints: 1440, scaleFactor: 2.0, originX: -2560.00001, originY: 0, pixelWidth: 5120, pixelHeight: 2880, rotation: 90.0)
+        assertTrue(versionA != SystemDisplayTopologyProvider.computeTopologyVersion(primaryId: 1, displays: [dPrimary, dMutOriginX]))
+
+        let dMutScale = DisplayInfo(id: 2, widthPoints: 2560, heightPoints: 1440, scaleFactor: 2.00001, originX: -2560, originY: 0, pixelWidth: 5120, pixelHeight: 2880, rotation: 90.0)
+        assertTrue(versionA != SystemDisplayTopologyProvider.computeTopologyVersion(primaryId: 1, displays: [dPrimary, dMutScale]))
+
+        let dMutRot = DisplayInfo(id: 2, widthPoints: 2560, heightPoints: 1440, scaleFactor: 2.0, originX: -2560, originY: 0, pixelWidth: 5120, pixelHeight: 2880, rotation: 90.0001)
+        assertTrue(versionA != SystemDisplayTopologyProvider.computeTopologyVersion(primaryId: 1, displays: [dPrimary, dMutRot]))
+
+        // Signed zero check (-0.0 vs 0.0)
+        let dNegZero = DisplayInfo(id: 1, widthPoints: 1920, heightPoints: 1080, scaleFactor: 2.0, originX: -0.0, originY: 0, pixelWidth: 3840, pixelHeight: 2160, rotation: 0.0)
+        let versionNegZero = SystemDisplayTopologyProvider.computeTopologyVersion(primaryId: 1, displays: [dNegZero, dSecondaryNeg])
+        assertTrue(versionA != versionNegZero, "Signed zero -0.0 has a distinct IEEE-754 bitPattern from 0.0")
+        recordCase("testIEEE754BitPatternTopologyGoldenVectorAndMutations")
+
+        // 7. Hot-Plug Safe Display Enumerator Test
         let dupEnumerator = FakeDisplayListEnumerator(primaryId: 1, displayIDs: [1, 1])
         let dupProvider = SystemDisplayTopologyProvider(enumerator: dupEnumerator)
         var threwDup = false
@@ -331,7 +394,7 @@ public struct ComputerUseHostTestRunner {
         assertTrue(threwMissing)
         recordCase("testHotPlugSafeDisplayEnumerator")
 
-        // 7. Permission Preflight Denied Zero Loader Calls Test
+        // 8. Permission Preflight Denied Zero Loader Calls Test
         let trackingLoader = TrackingShareableContentLoader()
         let engineDenied = SCScreenshotCaptureEngine(
             authorizer: FakeScreenRecordingAuthorizer(granted: false),
@@ -350,7 +413,7 @@ public struct ComputerUseHostTestRunner {
         assertEqual(trackingLoader.loadCount, 0)
         recordCase("testPermissionPreflightDeniedZeroLoaderCalls")
 
-        // 8. Pure JPEG Validator & Dimension Check Test
+        // 9. Pure JPEG Validator Exact and Near-10MiB Boundaries Test
         let colorSpace = CGColorSpaceCreateDeviceRGB()
         guard let ctx = CGContext(
             data: nil,
@@ -382,9 +445,9 @@ public struct ComputerUseHostTestRunner {
         var threwMismatch = false
         do { _ = try SCScreenshotCaptureEngine.validateAndEncode(image: cgImg, targetDisplay: mismatchedDisplay, quality: 0.8) } catch { threwMismatch = true }
         assertTrue(threwMismatch)
-        recordCase("testPureJPEGValidatorAndDimensionCheck")
+        recordCase("testPureJPEGValidatorExactAndNear10MiBBoundaries")
 
-        // 9. Observation Timeout & Generation Fence Test
+        // 10. Noncooperative Late Completion Generation Fence Test
         let slowEngine = FakeCaptureEngine(delayMs: 200)
         let timeoutServer = HostServer(
             authorizer: FakeScreenRecordingAuthorizer(granted: true),
@@ -398,9 +461,9 @@ public struct ComputerUseHostTestRunner {
         let obsTimeoutResp = await timeoutServer.handleRequest(IPCRequest(id: "timeout-1", method: "observe"))
         assertTrue(!obsTimeoutResp.success)
         assertEqual(obsTimeoutResp.error?.code, "TIMEOUT")
-        recordCase("testObservationTimeoutAndGenerationFence")
+        recordCase("testNoncooperativeLateCompletionGenerationFence")
 
-        // 10. Topology Change During Capture Discarded Test
+        // 11. Topology Change During Capture Discarded Test
         let badTopEngine = FakeCaptureEngine(customTopologyVersion: "top-sha256-bad0000000000000000000000000000000000000000000000000000000000000")
         let badTopServer = HostServer(
             authorizer: FakeScreenRecordingAuthorizer(granted: true),
@@ -414,7 +477,7 @@ public struct ComputerUseHostTestRunner {
         assertEqual(badTopResp.error?.code, "STALE_TOPOLOGY")
         recordCase("testTopologyChangeDuringCaptureDiscarded")
 
-        // 11. Disabled Actions and AX Tree Rejection Test
+        // 12. Disabled Actions and AX Tree Rejection Test
         let prodServer = HostServer(
             authorizer: FakeScreenRecordingAuthorizer(granted: true),
             topologyProvider: FakeDisplayTopologyProvider(),
@@ -435,7 +498,7 @@ public struct ComputerUseHostTestRunner {
         assertEqual(axResp.error?.code, "TARGET_UNREACHABLE")
         recordCase("testDisabledActionsAndAXTreeRejection")
 
-        // 12. Display ID Parameter Validation Test
+        // 13. Display ID Parameter Validation Test
         let invalidReq = IPCRequest(id: "inv-1", method: "observe", params: ["display_id": .string("1")])
         let invResp = await prodServer.handleRequest(invalidReq)
         assertTrue(!invResp.success)

@@ -1,0 +1,8 @@
+{
+  "id": "req-2003",
+  "success": false,
+  "error": {
+    "code": "TIMEOUT",
+    "message": "Operation 'observe' timed out after 5 seconds"
+  }
+}

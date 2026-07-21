@@ -72,15 +72,15 @@ The MCP server exposes the following active tools to Gemini 3.6 Flash / Antigrav
 
 ### Running Tests
 
-- **Swift Host Unit & Integration Tests (Strict Concurrency & Warnings as Errors)**:
+- **Authoritative Native Swift Test Authority**:
   ```bash
-  cd apps/computer-use-host && swift test -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors
+  ./bin/agy-computer-use test-native
   ```
 - **TypeScript MCP Server Tests & TypeScript Check**:
   ```bash
   cd mcp/computer-use-mcp && pnpm check && pnpm test
   ```
-- **Canary Readiness Check**:
+- **Offline D2 Canary Readiness Check**:
   ```bash
   ./bin/agy-computer-use canary-ready
   ```

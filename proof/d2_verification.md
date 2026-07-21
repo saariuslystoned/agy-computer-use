@@ -1,58 +1,93 @@
-# Milestone D2 Verification Report (Test-Authority & Runtime-Semantics Closure)
+# Milestone D2 Execution Verification & Proof Packet
 
-## Executive Summary
-This document records the exact verification results for Milestone D2 (Test-Authority and Runtime-Semantics Closure Slice). All required architectural repairs, strict concurrency compilation fixes, actor isolation, portable native test authority (`ComputerUseHostTestRunner`), IEEE-754 bitPattern topology SHA-256 tokens, pure JPEG validation with raw SOF byte parsing, absolute UDS monotonic deadlines, method-specific Zod schema validation, and skill package synchronization have been completed and verified deterministically.
+- **Date**: 2026-07-21
+- **Branch**: `codex/bobby-computer-use-v0-20260721t174022z-a9ab71173113`
+- **Scope**: Milestone D2 Production-Bounded Native Observation Slice (Closure Slice)
 
 ---
 
-## Verification Commands & Execution Log
+## 1. Native Swift Test Authority Execution
 
-### 1. Checkout-Rooted Source Guards & Strict Concurrency Compilation
-- **Command**: `! git grep -n "CGRequestScreenCaptureAccess" -- 'apps/computer-use-host/Sources/' && ! git grep -n "CGEvent" -- 'apps/computer-use-host/Sources/' && ! git grep -n "Fake" -- 'apps/computer-use-host/Sources/'`
-- **Result**: `SUCCESS` (0 occurrences found in production Swift sources).
+Executed via `./bin/agy-computer-use test-native` (Swift 5.10 strict concurrency complete, `-warnings-as-errors`):
 
-### 2. Portable Swift Native Test Authority (`ComputerUseHostTestRunner`)
-- **Commands**:
-  - `cd apps/computer-use-host && swift build -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors`
-  - `swift run ComputerUseHostTestRunner`
-- **Result**: `SUCCESS` (Exit code 0, 0 compilation warnings, 0 errors, 12/12 named native test cases executed).
-- **Executed Native Test Case Inventory**:
-  1. `testLengthPrefixedFraming` - PASSED
-  2. `testOversizedFramingHeaderRejection` - PASSED
-  3. `testDirectoryPreparation` - PASSED
-  4. `testUDSClientServerRoundTrip` - PASSED
-  5. `testIEEE754BitPatternTopologyHashing` - PASSED
-  6. `testHotPlugSafeDisplayEnumerator` - PASSED
-  7. `testPermissionPreflightDeniedZeroLoaderCalls` - PASSED
-  8. `testPureJPEGValidatorAndDimensionCheck` - PASSED
-  9. `testObservationTimeoutAndGenerationFence` - PASSED
-  10. `testTopologyChangeDuringCaptureDiscarded` - PASSED
-  11. `testDisabledActionsAndAXTreeRejection` - PASSED
-  12. `testDisplayIdParameterValidation` - PASSED
+```text
+[ComputerUseHostTestRunner] Starting Portable Native Execution Test Authority...
+[TEST CASE 1] testLengthPrefixedFraming - PASSED
+[TEST CASE 2] testOversizedFramingHeaderRejection - PASSED
+[TEST CASE 3] testDirectoryPreparation - PASSED
+[TEST CASE 4] testUDSClientServerRoundTrip - PASSED
+[TEST CASE 5] testPostTimeoutUDSRecovery - PASSED
+[TEST CASE 6] testIEEE754BitPatternTopologyGoldenVectorAndMutations - PASSED
+[TEST CASE 7] testHotPlugSafeDisplayEnumerator - PASSED
+[TEST CASE 8] testPermissionPreflightDeniedZeroLoaderCalls - PASSED
+[TEST CASE 9] testPureJPEGValidatorExactAndNear10MiBBoundaries - PASSED
+[TEST CASE 10] testNoncooperativeLateCompletionGenerationFence - PASSED
+[TEST CASE 11] testTopologyChangeDuringCaptureDiscarded - PASSED
+[TEST CASE 12] testDisabledActionsAndAXTreeRejection - PASSED
+[TEST CASE 13] testDisplayIdParameterValidation - PASSED
+[ComputerUseHostTestRunner] Executed 13 native test cases successfully. ALL PASSED.
+```
 
-### 3. Release Executable Build & Symbol Guard
-- **Command**: `swift build -c release -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors && ! nm .build/release/ComputerUseHost | grep -i "Fake"`
-- **Result**: `SUCCESS` (`ZERO_FAKE_SYMBOLS` verified in production release executable binary).
+---
 
-### 4. TypeScript MCP Server Test Suite & TypeScript Check
-- **Commands**: `pnpm check && pnpm test`
-- **Working Directory**: `mcp/computer-use-mcp`
-- **Result**: `SUCCESS` (Exit code 0, 23/23 TAP tests passed).
-- **Coverage**:
-  - `listTools`: D2 MCP inventory returns `length === 2` (`computer_use_status` and `computer_use_observe`).
-  - `callTool`: `computer_use_status` validates method-specific `StatusDataSchema` and `computer_use_observe` validates `ObserveDataSchema` with raw JPEG SOF marker dimension matching.
-  - `Adversarial Tests`: Stale `top-v1` tokens, non-hex topology versions, invalid Base64 padding, non-JPEG magic bytes, and malformed DTOs fail closed.
-  - `UnixSocketHostClient`: UDS socket connection, synchronous `isDispatched` uncertainty flag setting before write, request timeout (100ms), >16MB frame rejection, EOF on close, cancellation handling (`ACTION_OUTCOME_UNKNOWN`).
-  - `Skill Parity`: 100% file hierarchy and byte-for-byte content parity verified between `.agents/skills/computer-use` and `skills/computer-use`.
-  - `Golden Fixtures`: 5 golden JSON fixtures validated against `docs/protocol_schema.json` via Ajv and Zod schemas.
+## 2. Production Source & Demangled Binary Symbol Safety Guards
 
-### 5. Offline D2 Readiness Check
-- **Command**: `./bin/agy-computer-use canary-ready`
-- **Result**: `ALL OFFLINE D2 READINESS CHECKS PASSED!` (Verified `.agents/mcp_config.json` `computer-use` & `computer-use-canary` server registrations and 2-tool D2 MCP inventory).
+1. **Production Host Code Source Guard**:
+   - `! git grep -n "CGRequestScreenCaptureAccess" -- 'apps/computer-use-host/Sources/'`: **0 matches** (Passed)
+   - `! git grep -n "CGEvent" -- 'apps/computer-use-host/Sources/'`: **0 matches** (Passed)
+   - `! git grep -n "Fake" -- 'apps/computer-use-host/Sources/'`: **0 matches** (Passed)
+2. **Release Binary Symbol Guard**:
+   - `BIN_PATH=$(swift build -c release --show-bin-path)/ComputerUseHost`
+   - `! nm "$BIN_PATH" | swift demangle | grep -iE "Fake|Spy|Scripted|Mock|TestDouble|TestRunner|TestHelper"`: **0 matches** (`ZERO_TEST_DOUBLE_SYMBOLS` in shipped binary).
+
+---
+
+## 3. Protocol Schema, Golden Fixtures & SOF Image Verification
+
+1. **Protocol Schema Definition**:
+   - `docs/protocol_schema.json` defines strict D2 status and observe request/response/error contracts with `additionalProperties: false`.
+2. **Golden JSON Fixture Suite**:
+   - `status_response.json`: Validated against Ajv protocol schema and Zod `StatusDataSchema`.
+   - `observe_response.json`: Validated against Ajv protocol schema, Zod `ObserveDataSchema`, and `validateAndDecodeBase64JPEG` asserting embedded JPEG SOF0 markers match `100x100` declared pixel dimensions.
+   - `permission_denied_response.json`, `stale_topology_response.json`, `timeout_response.json`: Validated as error response fixtures.
+   - Quarantined disabled action/AX fixtures (`click_request_disabled.json`, `ax_tree_response_quarantined.json`, `invalid_click_request_negative.json`) verified to fail active D2 protocol schema validation.
+
+---
+
+## 4. MCP Server & TypeScript Test Suite
+
+Executed via `cd mcp/computer-use-mcp && pnpm check && pnpm test`:
+
+```text
+# tests 23
+# suites 2
+# pass 23
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+```
+
+- **Tool Inventory**: `computer_use_status` and `computer_use_observe` (Exactly 2 tools).
+- **Skill Sync**: 100% byte-for-byte identity verified between `.agents/skills/computer-use/` and `skills/computer-use/`.
+
+---
+
+## 5. Offline D2 Canary Readiness Validation
+
+Executed via `./bin/agy-computer-use canary-ready`:
+
+```text
+[bin/agy-computer-use] Validating offline readiness for Milestone D2 (building TypeScript sources)...
+[bin/agy-computer-use] Node.js version: v22.23.1
+[bin/agy-computer-use] Verified .agents/mcp_config.json computer-use & computer-use-canary server registrations.
+[bin/agy-computer-use] Verified D2 public MCP tool inventory: Exactly 2 tools (computer_use_observe, computer_use_status)
+[bin/agy-computer-use] ALL OFFLINE D2 READINESS CHECKS PASSED!
+```
 
 ---
 
 ## Honesty & Boundary Declarations
-- **Live Native Screen Capture**: Not executed during this closure slice (simulated via synthetic JPEG encoding and deterministic test runner fakes).
-- **TCC Ownership / Signing**: App bundle signing and TCC prompt handling are scheduled for later integration milestones.
-- **CI Success**: Pending GitHub Actions workflow run on pushed exact head commit.
+
+- **Screen Recording Access**: Tested deterministically using `FakeScreenRecordingAuthorizer` and `SCScreenshotCaptureEngine` test double in `Tests/ComputerUseHostTestRunner`. No prompting `CGRequestScreenCaptureAccess` call or live screen capture was triggered.
+- **Input Synthesis & AX Tree Inspection**: All action dispatch methods (`click`, `move`, `drag`, `type`, `shortcut`, `scroll`) return `MUTATION_DISABLED`. Accessibility tree inspection returns `TARGET_UNREACHABLE`. Real `CGEvent` synthesis is deferred to M9.

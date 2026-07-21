@@ -99,6 +99,9 @@ function validateMcpConfigStruct() {
   if (canaryServer.command !== "node" || canaryServer.args[0] !== "./mcp/computer-use-mcp/dist/src/canary.js") {
     throw new Error(`computer-use-canary server config must point to './mcp/computer-use-mcp/dist/src/canary.js'`);
   }
+  if (!fs.existsSync(path.join(rootDir, canaryServer.args[0]))) {
+    throw new Error(`Target dist file for computer-use-canary does not exist at ${canaryServer.args[0]}`);
+  }
 }
 
 async function main() {
@@ -118,19 +121,16 @@ async function main() {
   }
 
   if (subcommand === "doctor" || subcommand === "canary-ready") {
-    log("Validating offline readiness for Milestone D2...");
+    log("Validating offline readiness for Milestone D2 (building TypeScript sources)...");
+
+    // ALWAYS build current TypeScript sources before verification
+    execSync("pnpm build", { cwd: mcpPkgDir, stdio: "ignore" });
 
     try {
       const nodeVer = process.version;
       log(`Node.js version: ${nodeVer}`);
     } catch {
       fail("Node.js missing in environment.");
-    }
-
-    const indexDistPath = path.join(mcpPkgDir, "dist/src/index.js");
-    if (!fs.existsSync(indexDistPath)) {
-      log("Building MCP package for offline readiness check...");
-      execSync("pnpm build", { cwd: mcpPkgDir, stdio: "inherit" });
     }
 
     try {

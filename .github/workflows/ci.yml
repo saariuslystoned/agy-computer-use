@@ -33,10 +33,8 @@ jobs:
       - name: Build & Run Native Swift Test Authority
         run: |
           set -euo pipefail
-          cd apps/computer-use-host
-          swift build -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors
-          TEST_OUT=$(swift run ComputerUseHostTestRunner 2>&1 | tee /dev/stderr)
-          echo "$TEST_OUT" | grep -E "Executed [1-9][0-9]* native test cases successfully"
+          TEST_OUT=$(./bin/agy-computer-use test-native 2>&1 | tee /dev/stderr)
+          echo "$TEST_OUT" | grep -E "Executed 13 native test cases successfully"
 
       - name: Build Release Executable & Guard Binary Symbols
         run: |
@@ -44,7 +42,7 @@ jobs:
           cd apps/computer-use-host
           swift build -c release -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors
           BIN_PATH=$(swift build -c release --show-bin-path)/ComputerUseHost
-          ! nm "$BIN_PATH" | grep -i "Fake"
+          ! nm "$BIN_PATH" | swift demangle | grep -iE "Fake|Spy|Scripted|Mock|TestDouble|TestRunner|TestHelper"
 
       - name: Build & Test TypeScript MCP Server
         run: |

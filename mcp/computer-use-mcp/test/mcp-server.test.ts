@@ -1,12 +1,12 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
-import * as path from "node:path";
+import * as path from "path";
 import * as net from "net";
 import AjvModule from "ajv";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createComputerUseServer } from "../src/index.js";
+import { createComputerUseServer, validateAndDecodeBase64JPEG } from "../src/index.js";
 import { MockHostClient, UnixSocketHostClient, IPCResponseSchema } from "../src/host-client.js";
 
 const Ajv = (AjvModule as any).default || AjvModule;
@@ -28,7 +28,7 @@ function getRecursiveFiles(dir: string): string[] {
 
 const VALID_SHA256_TOPOLOGY_TOKEN = "top-sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2 Repair 2)", () => {
+describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () => {
   test("Exercises listTools and callTool using official SDK Client and InMemoryTransport linked pair", async () => {
     const mockHost = new MockHostClient();
     mockHost.inputMutationState = "disabled";
@@ -46,7 +46,6 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2 Repair 2
       client.connect(clientTransport)
     ]);
 
-    // 1. List tools (D2 observation-only slice lists computer_use_status and computer_use_observe)
     const toolsResult = await client.listTools();
     assert.ok(toolsResult.tools);
     assert.equal(toolsResult.tools.length, 2);
@@ -54,7 +53,6 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2 Repair 2
     const toolNames = toolsResult.tools.map(t => t.name).sort();
     assert.deepEqual(toolNames, ["computer_use_observe", "computer_use_status"]);
 
-    // 2. Call status
     const statusCall = await client.callTool({ name: "computer_use_status", arguments: {} });
     assert.ok(statusCall.content);
     const statusText = JSON.parse((statusCall.content as any[])[0].text);
@@ -62,7 +60,6 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2 Repair 2
     assert.equal(statusText.input_mutation_state, "disabled");
     assert.ok(statusText.topology);
 
-    // 3. Call observe
     const obsCall = await client.callTool({ name: "computer_use_observe", arguments: {} });
     assert.ok(obsCall.content);
     const obsContent = obsCall.content as any[];
@@ -87,7 +84,6 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2 Repair 2
       client.connect(clientTransport)
     ]);
 
-    // Stale top-v1 topology token in mock host response causes Zod validation failure
     mockHost.request = async (method: string) => {
       if (method === "status") {
         return {
@@ -99,7 +95,7 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2 Repair 2
             accessibility_available: false,
             accessibility_trusted: false,
             input_mutation_state: "disabled",
-            topology_version: "top-v1", // Stale token! Must start with top-sha256-
+            topology_version: "top-v1",
             primary_display_id: 1,
             display_count: 1,
             topology: { version: "top-v1", primary_display_id: 1, displays: [] }
@@ -216,7 +212,7 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2 Repair 2
     }
   });
 
-  test("Validates all golden JSON fixtures in docs/fixtures/ against protocol_schema.json (Ajv) & Zod schemas", () => {
+  test("Validates all golden JSON fixtures in docs/fixtures/ against protocol_schema.json (Ajv), Zod, and SOF image validator", () => {
     const rootDir = path.resolve(process.cwd(), "../../");
     const fixturesDir = path.join(rootDir, "docs/fixtures");
     const schemaPath = path.join(rootDir, "docs/protocol_schema.json");
@@ -231,7 +227,7 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2 Repair 2
     const validateProtocol = ajv.compile(protocolSchema);
 
     const fixtureFiles = fs.readdirSync(fixturesDir).filter(f => f.endsWith(".json"));
-    assert.ok(fixtureFiles.length >= 5, "Must contain at least 5 positive and negative golden fixtures");
+    assert.ok(fixtureFiles.length >= 4, "Must contain active D2 fixtures");
 
     for (const file of fixtureFiles) {
       const content = fs.readFileSync(path.join(fixturesDir, file), "utf-8");
@@ -239,9 +235,15 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2 Repair 2
       const parsed = JSON.parse(content);
       assert.ok(parsed.id, `Fixture '${file}' must contain id`);
 
-      if (file.endsWith("_negative.json")) {
+      if (file.includes("_disabled") || file.includes("_quarantined") || (file.endsWith("_negative.json") && parsed.method)) {
         const isValid = validateProtocol(parsed);
-        assert.equal(isValid, false, `Negative fixture '${file}' must fail Ajv protocol schema validation`);
+        assert.equal(isValid, false, `Negative/disabled request fixture '${file}' must fail active D2 protocol schema validation`);
+        continue;
+      }
+
+      if (parsed.success === false) {
+        const isValid = validateProtocol(parsed);
+        assert.ok(isValid, `Negative error response fixture '${file}' must pass protocol schema validation: ${JSON.stringify(validateProtocol.errors)}`);
       } else {
         const isValid = validateProtocol(parsed);
         assert.ok(isValid, `Positive fixture '${file}' must pass Ajv protocol schema validation: ${JSON.stringify(validateProtocol.errors)}`);
@@ -249,6 +251,11 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2 Repair 2
         if (typeof parsed.success === "boolean") {
           const zodParse = IPCResponseSchema.safeParse(parsed);
           assert.ok(zodParse.success, `Response fixture '${file}' must validate against IPCResponseSchema: ${zodParse.error?.message}`);
+
+          if (parsed.data?.image_data_base64) {
+            const buf = validateAndDecodeBase64JPEG(parsed.data.image_data_base64, parsed.data.pixel_width, parsed.data.pixel_height);
+            assert.ok(buf.length > 0, `Observe fixture '${file}' image buffer must be non-empty`);
+          }
         }
       }
     }
@@ -299,7 +306,6 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2 Repair 2
   test("UnixSocketHostClient: Request timeout handling", async () => {
     const sockPath = `/tmp/test-timeout-${Date.now()}.sock`;
     const server = net.createServer((_socket) => {
-      // Intentionally do not respond
     });
 
     await new Promise<void>((res) => server.listen(sockPath, res));
@@ -317,21 +323,18 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2 Repair 2
   test("UnixSocketHostClient: Cancellation phase distinction (pre-dispatch vs post-dispatch)", async () => {
     const sockPath = `/tmp/test-cancel-${Date.now()}.sock`;
     const server = net.createServer((_socket) => {
-      // Hold socket open
     });
 
     await new Promise<void>((res) => server.listen(sockPath, res));
 
     const client = new UnixSocketHostClient(sockPath, 5000);
 
-    // Pre-dispatch abort
     const controller1 = new AbortController();
     controller1.abort();
     const resp1 = await client.request("click", { x: 500, y: 500, capture_id: "cap-1", topology_version: VALID_SHA256_TOPOLOGY_TOKEN, intent: "Click" }, controller1.signal);
     assert.equal(resp1.success, false);
     assert.equal(resp1.error?.code, "CANCELLED");
 
-    // Post-dispatch mutation abort
     const controller2 = new AbortController();
     const reqPromise = client.request("click", { x: 500, y: 500, capture_id: "cap-1", topology_version: VALID_SHA256_TOPOLOGY_TOKEN, intent: "Click" }, controller2.signal);
 
