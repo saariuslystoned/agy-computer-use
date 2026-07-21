@@ -2,69 +2,59 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, "codex/**" ]
   pull_request:
     branches: [ main ]
 
 jobs:
-  swift-tests:
-    name: Swift Host Tests (macOS 14)
+  macos-build-and-test:
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-      - name: Set up Swift
-        run: swift --version
-
-      - name: Checkout-Rooted Source Guards
-        run: |
-          ! git grep -n "CGRequestScreenCaptureAccess" -- 'apps/computer-use-host/Sources/'
-          ! git grep -n "CGEvent" -- 'apps/computer-use-host/Sources/'
-          ! git grep -n "Fake" -- 'apps/computer-use-host/Sources/'
-          echo "Checkout-rooted source guards PASSED."
-
-      - name: Build and Run Swift Host Unit & Integration Tests (Strict Concurrency & Warnings as Errors)
-        run: |
-          cd apps/computer-use-host
-          swift test -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors | tee swift_test.log
-          grep -E "Test Suite.*passed|Executed [1-9]" swift_test.log
-
-      - name: Build Release Executable & Guard Release Symbols
-        run: |
-          cd apps/computer-use-host
-          swift build -c release -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors
-          ! nm .build/release/ComputerUseHost | grep -i "Fake"
-          echo "Release executable build and symbol guard PASSED."
-
-  node-tests:
-    name: TypeScript MCP Server Tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.23.1"
 
       - name: Install pnpm
         uses: pnpm/action-setup@v3
         with:
-          version: 10.33.0
+          version: "10.33.0"
 
-      - name: Set up Node.js 22
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22.23.1"
-          cache: "pnpm"
-          cache-dependency-path: mcp/computer-use-mcp/pnpm-lock.yaml
-
-      - name: Install dependencies
+      - name: Run Source & Privacy Safety Guards
         run: |
+          set -euo pipefail
+          ! git grep -n "CGRequestScreenCaptureAccess" -- 'apps/computer-use-host/Sources/'
+          ! git grep -n "CGEvent" -- 'apps/computer-use-host/Sources/'
+          ! git grep -n "Fake" -- 'apps/computer-use-host/Sources/'
+
+      - name: Build & Run Native Swift Test Authority
+        run: |
+          set -euo pipefail
+          cd apps/computer-use-host
+          swift build -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors
+          TEST_OUT=$(swift run ComputerUseHostTestRunner 2>&1 | tee /dev/stderr)
+          echo "$TEST_OUT" | grep -E "Executed [1-9][0-9]* native test cases successfully"
+
+      - name: Build Release Executable & Guard Binary Symbols
+        run: |
+          set -euo pipefail
+          cd apps/computer-use-host
+          swift build -c release -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors
+          BIN_PATH=$(swift build -c release --show-bin-path)/ComputerUseHost
+          ! nm "$BIN_PATH" | grep -i "Fake"
+
+      - name: Build & Test TypeScript MCP Server
+        run: |
+          set -euo pipefail
           cd mcp/computer-use-mcp
           pnpm install --frozen-lockfile
-
-      - name: TypeScript Check
-        run: |
-          cd mcp/computer-use-mcp
           pnpm check
-
-      - name: Run MCP Server Unit & Integration Tests
-        run: |
-          cd mcp/computer-use-mcp
           pnpm test
+
+      - name: Validate Offline D2 Canary Readiness
+        run: |
+          set -euo pipefail
+          ./bin/agy-computer-use canary-ready

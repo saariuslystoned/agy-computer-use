@@ -29,26 +29,8 @@ public struct CGDisplayListEnumerator: DisplayListEnumerating {
         }
 
         let slice = activeDisplays.prefix(validCount)
-        var seen = Set<Int>()
-        var validIDs: [Int] = []
-
-        for rawId in slice {
-            let id = Int(rawId)
-            guard id != 0 else {
-                throw ComputerUseError.targetUnreachable(reason: "Display list contained invalid zero ID")
-            }
-            guard !seen.contains(id) else {
-                throw ComputerUseError.targetUnreachable(reason: "Display list contained duplicate display ID \(id)")
-            }
-            seen.insert(id)
-            validIDs.append(id)
-        }
-
-        let primaryCGId = CGMainDisplayID()
-        let primaryId = Int(primaryCGId)
-        guard primaryId != 0, validIDs.contains(primaryId) else {
-            throw ComputerUseError.targetUnreachable(reason: "Primary display ID \(primaryId) missing from active display list")
-        }
+        let validIDs = slice.map { Int($0) }
+        let primaryId = Int(CGMainDisplayID())
 
         return (primaryId, validIDs)
     }
@@ -67,6 +49,26 @@ public struct SystemDisplayTopologyProvider: DisplayTopologyProviding {
 
     public func getTopology() throws -> DisplayTopology {
         let (primaryId, validIDs) = try enumerator.getActiveDisplays()
+
+        guard !validIDs.isEmpty else {
+            throw ComputerUseError.targetUnreachable(reason: "Display list is empty")
+        }
+
+        var seen = Set<Int>()
+        for id in validIDs {
+            guard id != 0 else {
+                throw ComputerUseError.targetUnreachable(reason: "Display list contained invalid zero ID")
+            }
+            guard !seen.contains(id) else {
+                throw ComputerUseError.targetUnreachable(reason: "Display list contained duplicate display ID \(id)")
+            }
+            seen.insert(id)
+        }
+
+        guard primaryId != 0, validIDs.contains(primaryId) else {
+            throw ComputerUseError.targetUnreachable(reason: "Primary display ID \(primaryId) missing from active display list")
+        }
+
         var displayInfos: [DisplayInfo] = []
 
         for id in validIDs {
@@ -123,16 +125,21 @@ public struct SystemDisplayTopologyProvider: DisplayTopologyProviding {
         )
     }
 
+    public static func hexUInt64(_ val: UInt64) -> String {
+        let hex = String(val, radix: 16, uppercase: false)
+        return String(repeating: "0", count: max(0, 16 - hex.count)) + hex
+    }
+
     public static func computeTopologyVersion(primaryId: Int, displays: [DisplayInfo]) -> String {
         let sorted = displays.sorted { $0.id < $1.id }
         var canonicalString = "primary:\(primaryId);"
         for d in sorted {
-            let oxHex = String(format: "%016x", d.originX.bitPattern)
-            let oyHex = String(format: "%016x", d.originY.bitPattern)
-            let wHex = String(format: "%016x", d.widthPoints.bitPattern)
-            let hHex = String(format: "%016x", d.heightPoints.bitPattern)
-            let sHex = String(format: "%016x", d.scaleFactor.bitPattern)
-            let rHex = String(format: "%016x", d.rotation.bitPattern)
+            let oxHex = hexUInt64(d.originX.bitPattern)
+            let oyHex = hexUInt64(d.originY.bitPattern)
+            let wHex = hexUInt64(d.widthPoints.bitPattern)
+            let hHex = hexUInt64(d.heightPoints.bitPattern)
+            let sHex = hexUInt64(d.scaleFactor.bitPattern)
+            let rHex = hexUInt64(d.rotation.bitPattern)
             canonicalString += "id:\(d.id),ox:\(oxHex),oy:\(oyHex),w:\(wHex),h:\(hHex),s:\(sHex),pw:\(d.pixelWidth),ph:\(d.pixelHeight),r:\(rHex);"
         }
         let digest = SHA256.hash(data: Data(canonicalString.utf8))

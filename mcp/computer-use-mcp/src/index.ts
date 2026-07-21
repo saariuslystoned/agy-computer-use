@@ -1,129 +1,209 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { HostClient, UnixSocketHostClient, IPCResponsePayload } from "./host-client.js";
-import { Logger } from "./logger.js";
 import {
-  ObserveSchema,
-  StatusDataSchema,
-  ObserveDataSchema
-} from "./schemas.js";
+  CallToolRequestSchema,
+  ListToolsRequestSchema,
+  Tool
+} from "@modelcontextprotocol/sdk/types.js";
+import { HostClient, UnixSocketHostClient } from "./host-client.js";
+import { StatusDataSchema, ObserveDataSchema } from "./schemas.js";
 
-const MAX_DECODED_BYTES = 10 * 1024 * 1024; // 10 MiB limit
-
-function validateAndDecodeBase64JPEG(base64Str: string): Buffer {
-  if (!base64Str || typeof base64Str !== "string") {
-    throw new Error("CANARY_RESPONSE_INVALID: Missing base64 image payload");
-  }
-
-  if (base64Str.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(base64Str)) {
-    throw new Error("CANARY_RESPONSE_INVALID: Invalid canonical base64 format");
-  }
-
-  const buf = Buffer.from(base64Str, "base64");
-  if (buf.length === 0) {
-    throw new Error("CANARY_EMPTY_DECODED_BUFFER: Decoded image buffer is empty");
-  }
-  if (buf.length > MAX_DECODED_BYTES) {
-    throw new Error("CANARY_SIZE_EXCEEDED: Decoded image exceeds 10 MiB limit");
-  }
-
-  // Validate JPEG magic bytes 0xFF, 0xD8, 0xFF
-  if (buf.length < 3 || buf[0] !== 0xff || buf[1] !== 0xd8 || buf[2] !== 0xff) {
-    throw new Error("CANARY_MAGIC_MISMATCH: Image payload magic bytes do not match image/jpeg header");
-  }
-
-  return buf;
+export interface JPEGDimensions {
+  width: number;
+  height: number;
 }
 
-function formatToolResponse(resp: IPCResponsePayload, method: string) {
-  if (!resp.success) {
+export function parseJPEGDimensions(buf: Buffer): JPEGDimensions | null {
+  if (buf.length < 4 || buf[0] !== 0xff || buf[1] !== 0xd8) {
+    return null;
+  }
+
+  let offset = 2;
+  while (offset < buf.length - 8) {
+    if (buf[offset] !== 0xff) {
+      offset++;
+      continue;
+    }
+
+    const marker = buf[offset + 1];
+
+    // SOF0 (0xC0), SOF1 (0xC1), SOF2 (0xC2)
+    if (marker === 0xc0 || marker === 0xc1 || marker === 0xc2) {
+      const height = (buf[offset + 5] << 8) | buf[offset + 6];
+      const width = (buf[offset + 7] << 8) | buf[offset + 8];
+      return { width, height };
+    }
+
+    // Stop at SOS (0xDA) or EOI (0xD9)
+    if (marker === 0xda || marker === 0xd9) {
+      break;
+    }
+
+    // Skip segment payload
+    if (offset + 3 < buf.length) {
+      const segLen = (buf[offset + 2] << 8) | buf[offset + 3];
+      offset += 2 + segLen;
+    } else {
+      break;
+    }
+  }
+
+  return null;
+}
+
+export function validateAndDecodeBase64JPEG(base64Data: string, expectedPixelWidth?: number, expectedPixelHeight?: number): Buffer {
+  if (!base64Data || typeof base64Data !== "string") {
+    throw new Error("Base64 image data is empty or invalid");
+  }
+
+  if (base64Data.length % 4 !== 0) {
+    throw new Error("Base64 string length must be a multiple of 4");
+  }
+
+  const maxEncodedChars = Math.ceil((10 * 1024 * 1024 * 4) / 3);
+  if (base64Data.length > maxEncodedChars) {
+    throw new Error(`Base64 payload length ${base64Data.length} exceeds maximum encoded limit ${maxEncodedChars}`);
+  }
+
+  const imageBuffer = Buffer.from(base64Data, "base64");
+
+  if (imageBuffer.toString("base64") !== base64Data) {
+    throw new Error("Base64 string is not canonically encoded");
+  }
+
+  if (imageBuffer.length === 0) {
+    throw new Error("Decoded image buffer is empty");
+  }
+
+  if (imageBuffer.length > 10 * 1024 * 1024) {
+    throw new Error(`Decoded image buffer size ${imageBuffer.length} bytes exceeds 10 MiB limit`);
+  }
+
+  if (imageBuffer.length < 3 || imageBuffer[0] !== 0xff || imageBuffer[1] !== 0xd8 || imageBuffer[2] !== 0xff) {
+    throw new Error("Invalid JPEG magic bytes: buffer must start with 0xFF 0xD8 0xFF");
+  }
+
+  if (expectedPixelWidth !== undefined && expectedPixelHeight !== undefined) {
+    const dims = parseJPEGDimensions(imageBuffer);
+    if (dims) {
+      if (dims.width !== expectedPixelWidth || dims.height !== expectedPixelHeight) {
+        throw new Error(`JPEG dimensions (${dims.width}x${dims.height}) do not match declared pixel dimensions (${expectedPixelWidth}x${expectedPixelHeight})`);
+      }
+    }
+  }
+
+  return imageBuffer;
+}
+
+function formatToolResponse(ipcResp: any, toolName: string) {
+  if (!ipcResp.success) {
     return {
       isError: true,
       content: [
         {
-          type: "text" as const,
-          text: JSON.stringify({ error: resp.error ?? { code: "HOST_ERROR", message: "Host request failed" } }, null, 2)
+          type: "text",
+          text: JSON.stringify({
+            error: ipcResp.error || { code: "HOST_ERROR", message: "Unknown host error" }
+          }, null, 2)
         }
       ]
     };
   }
 
-  const data = resp.data ?? {};
-
-  // Method-specific DTO Zod schema validation
-  if (method === "status") {
-    const parsedStatus = StatusDataSchema.safeParse(data);
-    if (!parsedStatus.success) {
+  if (toolName === "computer_use_status") {
+    const parsedData = StatusDataSchema.safeParse(ipcResp.data);
+    if (!parsedData.success) {
       return {
         isError: true,
         content: [
           {
-            type: "text" as const,
-            text: JSON.stringify({ error: { code: "INVALID_RESPONSE_DATA", message: `Status payload schema validation failed: ${parsedStatus.error.message}` } }, null, 2)
+            type: "text",
+            text: JSON.stringify({
+              error: {
+                code: "INVALID_RESPONSE_DATA",
+                message: `Status response data failed Zod schema validation: ${parsedData.error.message}`
+              }
+            }, null, 2)
           }
         ]
       };
     }
-  } else if (method === "observe") {
-    const parsedObserve = ObserveDataSchema.safeParse(data);
-    if (!parsedObserve.success) {
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(parsedData.data, null, 2)
+        }
+      ]
+    };
+  }
+
+  if (toolName === "computer_use_observe") {
+    const parsedData = ObserveDataSchema.safeParse(ipcResp.data);
+    if (!parsedData.success) {
       return {
         isError: true,
         content: [
           {
-            type: "text" as const,
-            text: JSON.stringify({ error: { code: "INVALID_RESPONSE_DATA", message: `Observe payload schema validation failed: ${parsedObserve.error.message}` } }, null, 2)
+            type: "text",
+            text: JSON.stringify({
+              error: {
+                code: "INVALID_RESPONSE_DATA",
+                message: `Observe response data failed Zod schema validation: ${parsedData.error.message}`
+              }
+            }, null, 2)
           }
         ]
       };
     }
-  }
 
-  let imageBase64: string | undefined;
-
-  if (typeof data.image_data_base64 === "string") {
-    imageBase64 = data.image_data_base64;
-  }
-
-  const cleanData = JSON.parse(JSON.stringify(data));
-  delete cleanData.image_data_base64;
-
-  const content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [
-    {
-      type: "text" as const,
-      text: JSON.stringify(cleanData, null, 2)
-    }
-  ];
-
-  if (imageBase64) {
     try {
-      validateAndDecodeBase64JPEG(imageBase64);
-      content.push({
-        type: "image" as const,
-        data: imageBase64,
-        mimeType: "image/jpeg"
-      });
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
+      validateAndDecodeBase64JPEG(parsedData.data.image_data_base64, parsedData.data.pixel_width, parsedData.data.pixel_height);
+    } catch (valErr: any) {
       return {
         isError: true,
         content: [
           {
-            type: "text" as const,
-            text: JSON.stringify({ error: { code: "INVALID_IMAGE_PAYLOAD", message: errMsg } }, null, 2)
+            type: "text",
+            text: JSON.stringify({
+              error: {
+                code: "INVALID_IMAGE_PAYLOAD",
+                message: `JPEG image payload validation failed: ${valErr.message}`
+              }
+            }, null, 2)
           }
         ]
       };
     }
+
+    const { image_data_base64, ...metaData } = parsedData.data;
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(metaData, null, 2)
+        },
+        {
+          type: "image",
+          data: image_data_base64,
+          mimeType: "image/jpeg"
+        }
+      ]
+    };
   }
 
-  return { content };
+  return {
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify(ipcResp.data, null, 2)
+      }
+    ]
+  };
 }
 
-export function createComputerUseServer(hostClient?: HostClient): Server {
-  const client = hostClient ?? new UnixSocketHostClient();
-
+export function createComputerUseServer(hostClient: HostClient): Server {
   const server = new Server(
     {
       name: "computer-use-mcp",
@@ -136,73 +216,82 @@ export function createComputerUseServer(hostClient?: HostClient): Server {
     }
   );
 
+  const STATUS_TOOL: Tool = {
+    name: "computer_use_status",
+    description: "Returns host connectivity, active display topology, TCC permission state, and mutation lockout state.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      additionalProperties: false
+    }
+  };
+
+  const OBSERVE_TOOL: Tool = {
+    name: "computer_use_observe",
+    description: "Captures primary or target display screenshot, returning capture_id, topology_version (top-sha256-...), and JPEG image payload.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        display_id: {
+          type: "integer",
+          description: "Optional display ID to capture. Defaults to primary display."
+        }
+      },
+      additionalProperties: false
+    }
+  };
+
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     return {
-      tools: [
+      tools: [STATUS_TOOL, OBSERVE_TOOL]
+    };
+  });
+
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const { name, arguments: args } = request.params;
+
+    if (name === "computer_use_status") {
+      const ipcResp = await hostClient.request("status");
+      return formatToolResponse(ipcResp, name);
+    }
+
+    if (name === "computer_use_observe") {
+      const displayId = args?.display_id as number | undefined;
+      const params = displayId !== undefined ? { display_id: displayId } : undefined;
+      const ipcResp = await hostClient.request("observe", params);
+      return formatToolResponse(ipcResp, name);
+    }
+
+    return {
+      isError: true,
+      content: [
         {
-          name: "computer_use_status",
-          description: "Gets active display topology, host connection status, TCC permission state, and mutation state.",
-          inputSchema: {
-            type: "object",
-            properties: {},
-            additionalProperties: false
-          }
-        },
-        {
-          name: "computer_use_observe",
-          description: "Captures primary or target display snapshot and yields fresh capture_id and topology_version.",
-          inputSchema: {
-            type: "object",
-            properties: {
-              display_id: { type: "integer" }
-            },
-            additionalProperties: false
-          }
+          type: "text",
+          text: JSON.stringify({
+            error: {
+              code: "UNKNOWN_TOOL",
+              message: `Tool '${name}' is not recognized`
+            }
+          }, null, 2)
         }
       ]
     };
   });
 
-  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
-    const { name, arguments: args } = request.params;
-    const signal = extra.signal;
-
-    try {
-      switch (name) {
-        case "computer_use_status": {
-          const resp = await client.request("status", {}, signal);
-          return formatToolResponse(resp, "status");
-        }
-
-        case "computer_use_observe": {
-          const parsed = ObserveSchema.parse(args ?? {});
-          const resp = await client.request("observe", parsed as Record<string, unknown>, signal);
-          return formatToolResponse(resp, "observe");
-        }
-
-        default:
-          return {
-            isError: true,
-            content: [{ type: "text", text: `Unknown tool name: ${name}` }]
-          };
-      }
-    } catch (err: unknown) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      Logger.error(`Tool execution error for ${name}: ${errMsg}`);
-      return {
-        isError: true,
-        content: [{ type: "text", text: `Tool error: ${errMsg}` }]
-      };
-    }
-  });
-
   return server;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
-  Logger.info("Starting Computer Use MCP Server over stdio...");
-  const server = createComputerUseServer();
+export async function main() {
+  const socketPath = process.env.COMPUTER_USE_SOCKET_PATH || "/tmp/agy-computer-use/host.sock";
+  const hostClient = new UnixSocketHostClient(socketPath);
+  const server = createComputerUseServer(hostClient);
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  Logger.info("Computer Use MCP Server connected to stdio.");
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch((err) => {
+    console.error("[computer-use-mcp] Fatal server error:", err);
+    process.exit(1);
+  });
 }

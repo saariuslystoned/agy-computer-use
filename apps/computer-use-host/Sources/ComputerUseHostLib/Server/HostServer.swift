@@ -97,24 +97,13 @@ public actor HostServer {
                 let generation = latestIssuedGeneration
                 self.latestCapture = nil
 
-                // Execute capture with strict observation deadline
-                let timeout = UInt64(observationTimeoutSec * 1_000_000_000)
-                let frame: CaptureFrameDTO = try await withThrowingTaskGroup(of: CaptureFrameDTO.self) { group in
-                    group.addTask { [captureEngine] in
-                        try await captureEngine.captureDisplay(displayId: targetDisplayId, topology: initialTopology)
-                    }
-
-                    group.addTask {
-                        try await Task.sleep(nanoseconds: timeout)
-                        throw ComputerUseError.timeout(operation: "observe", seconds: self.observationTimeoutSec)
-                    }
-
-                    guard let result = try await group.next() else {
-                        throw ComputerUseError.ipcError(reason: "Observation group produced no result")
-                    }
-                    group.cancelAll()
-                    return result
-                }
+                // Nonisolated actor-safe deadline execution
+                let frame = try await HostServer.executeObservationWithDeadline(
+                    captureEngine: captureEngine,
+                    targetDisplayId: targetDisplayId,
+                    initialTopology: initialTopology,
+                    timeoutSec: self.observationTimeoutSec
+                )
 
                 if Task.isCancelled {
                     throw ComputerUseError.cancelled(reason: "Observation request cancelled")
@@ -186,6 +175,29 @@ public actor HostServer {
                 success: false,
                 error: IPCErrorPayload(code: "HOST_ERROR", message: error.localizedDescription)
             )
+        }
+    }
+
+    nonisolated public static func executeObservationWithDeadline(
+        captureEngine: DisplayCaptureEngine,
+        targetDisplayId: Int,
+        initialTopology: DisplayTopology,
+        timeoutSec: Double
+    ) async throws -> CaptureFrameDTO {
+        let timeoutNano = UInt64(timeoutSec * 1_000_000_000)
+        return try await withThrowingTaskGroup(of: CaptureFrameDTO.self) { group in
+            group.addTask {
+                try await captureEngine.captureDisplay(displayId: targetDisplayId, topology: initialTopology)
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: timeoutNano)
+                throw ComputerUseError.timeout(operation: "observe", seconds: timeoutSec)
+            }
+            guard let firstResult = try await group.next() else {
+                throw ComputerUseError.ipcError(reason: "Observation task group produced no result")
+            }
+            group.cancelAll()
+            return firstResult
         }
     }
 

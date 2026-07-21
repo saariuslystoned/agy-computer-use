@@ -11,6 +11,10 @@ let package = Package(
             name: "ComputerUseHost",
             targets: ["ComputerUseHost"]
         ),
+        .executable(
+            name: "ComputerUseHostTestRunner",
+            targets: ["ComputerUseHostTestRunner"]
+        ),
         .library(
             name: "ComputerUseHostLib",
             targets: ["ComputerUseHostLib"]
@@ -25,9 +29,13 @@ let package = Package(
             name: "ComputerUseHost",
             dependencies: ["ComputerUseHostLib"]
         ),
+        .executableTarget(
+            name: "ComputerUseHostTestRunner",
+            dependencies: ["ComputerUseHostLib"]
+        ),
         .testTarget(
             name: "ComputerUseHostTests",
-            dependencies: ["ComputerUseHostLib"]
+            dependencies: ["ComputerUseHostLib", "ComputerUseHostTestRunner"]
         )
     ]
 )

@@ -1,87 +1,64 @@
 import * as net from "net";
+import * as fs from "fs";
 import { z } from "zod";
-import { Logger } from "./logger.js";
 
-export interface IPCRequestPayload {
-  id: string;
-  method: string;
-  params?: Record<string, unknown>;
-}
-
-export interface IPCResponsePayload {
-  id: string;
-  success: boolean;
-  data?: Record<string, unknown>;
-  error?: {
-    code: string;
-    message: string;
-    details?: Record<string, string>;
-  };
-}
+export const IPCErrorPayloadSchema = z.object({
+  code: z.string().min(1),
+  message: z.string().min(1),
+  details: z.record(z.unknown()).optional()
+});
 
 export const IPCResponseSchema = z.object({
   id: z.string().min(1),
   success: z.boolean(),
   data: z.record(z.unknown()).optional(),
-  error: z.object({
-    code: z.string().min(1),
-    message: z.string().min(1),
-    details: z.record(z.string()).optional()
-  }).optional()
-}).refine(res => {
-  if (res.success) {
-    return res.data !== undefined && res.error === undefined;
-  } else {
-    return res.data === undefined && res.error !== undefined;
-  }
-}, {
-  message: "IPCResponse must contain data XOR error consistent with success boolean"
-});
+  error: IPCErrorPayloadSchema.optional()
+}).refine(
+  (data) => {
+    if (data.success) {
+      return data.data !== undefined && data.error === undefined;
+    } else {
+      return data.error !== undefined && data.data === undefined;
+    }
+  },
+  { message: "IPCResponse must have 'data' when success=true, and 'error' when success=false" }
+);
+
+export type IPCResponse = z.infer<typeof IPCResponseSchema>;
 
 export interface HostClient {
-  request(method: string, params?: Record<string, unknown>, signal?: AbortSignal): Promise<IPCResponsePayload>;
+  request(method: string, params?: Record<string, unknown>, signal?: AbortSignal): Promise<IPCResponse>;
 }
 
-const MAX_FRAME_SIZE = 16 * 1024 * 1024; // 16 MB max payload limit
-const MUTATION_METHODS = new Set(["click", "move", "drag", "type", "shortcut", "scroll"]);
-const VALID_DUMMY_JPEG_BASE64 = "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=";
-const MOCK_TOPOLOGY_VERSION = "top-sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-
 export class MockHostClient implements HostClient {
-  private latestCaptureId: string | null = null;
-  private reqCounter = 1;
+  public connected: boolean = true;
+  public tccState: "granted" | "denied" = "granted";
+  public axAvailable: boolean = false;
+  public axTrusted: boolean = false;
   public inputMutationState: "enabled" | "disabled" = "disabled";
-  public axAvailable = false;
+  public mockDisplayId: number = 1;
 
-  public async request(method: string, params?: Record<string, unknown>, signal?: AbortSignal): Promise<IPCResponsePayload> {
-    const id = `req-${this.reqCounter++}`;
-    if (signal?.aborted) {
-      return {
-        id,
-        success: false,
-        error: { code: "CANCELLED", message: "IPC request cancelled before execution" }
-      };
-    }
-
+  public request: (method: string, params?: Record<string, unknown>, signal?: AbortSignal) => Promise<IPCResponse> = async (method, params) => {
     if (method === "status") {
+      const topVer = "top-sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
       return {
-        id,
+        id: "mock-req",
         success: true,
         data: {
-          connected: true,
-          tcc_permission_state: "granted",
+          connected: this.connected,
+          tcc_permission_state: this.tccState,
           accessibility_available: this.axAvailable,
-          accessibility_trusted: false,
+          accessibility_trusted: this.axTrusted,
           input_mutation_state: this.inputMutationState,
-          topology_version: MOCK_TOPOLOGY_VERSION,
-          primary_display_id: 1,
+          topology_version: topVer,
+          primary_display_id: this.mockDisplayId,
           display_count: 1,
           topology: {
-            version: MOCK_TOPOLOGY_VERSION,
-            primary_display_id: 1,
+            version: topVer,
+            primary_display_id: this.mockDisplayId,
             displays: [
               {
-                id: 1,
+                id: this.mockDisplayId,
                 width_points: 1920,
                 height_points: 1080,
                 scale_factor: 2.0,
@@ -98,242 +75,262 @@ export class MockHostClient implements HostClient {
     }
 
     if (method === "observe") {
-      if (params?.display_id !== undefined && (typeof params.display_id !== "number" || !Number.isInteger(params.display_id))) {
-        return { id, success: false, error: { code: "IPC_ERROR", message: "display_id parameter must be an integer" } };
-      }
+      const targetId = (params?.display_id as number) ?? this.mockDisplayId;
+      const topVer = "top-sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+      const dummyJpegBase64 = "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=";
 
-      const capId = `cap-mock-${Date.now()}`;
-      this.latestCaptureId = capId;
       return {
-        id,
+        id: "mock-obs",
         success: true,
         data: {
-          capture_id: capId,
+          capture_id: "cap-mock-001",
           timestamp: Date.now(),
-          topology_version: MOCK_TOPOLOGY_VERSION,
-          display_id: 1,
+          topology_version: topVer,
+          display_id: targetId,
           width_points: 1920,
           height_points: 1080,
           scale_factor: 2.0,
-          pixel_width: 3840,
-          pixel_height: 2160,
+          pixel_width: 1,
+          pixel_height: 1,
           image_format: "jpeg",
-          image_data_base64: VALID_DUMMY_JPEG_BASE64,
-          normalized_bounds: { min_x: 0, min_y: 0, max_x: 999, max_y: 999 }
+          image_data_base64: dummyJpegBase64,
+          normalized_bounds: {
+            min_x: 0,
+            min_y: 0,
+            max_x: 999,
+            max_y: 999
+          }
         }
       };
+    }
+
+    if (["click", "move", "drag", "type", "shortcut", "scroll"].includes(method)) {
+      if (this.inputMutationState === "disabled") {
+        return {
+          id: "mock-dis",
+          success: false,
+          error: {
+            code: "MUTATION_DISABLED",
+            message: "Input mutation is disabled in Milestone D2"
+          }
+        };
+      }
     }
 
     if (method === "ax_tree") {
       return {
-        id,
+        id: "mock-ax",
         success: false,
-        error: { code: "TARGET_UNREACHABLE", message: "AX tree inspection is unavailable in this build phase" }
-      };
-    }
-
-    if (MUTATION_METHODS.has(method)) {
-      return {
-        id,
-        success: false,
-        error: { code: "MUTATION_DISABLED", message: "Input mutations are disabled in this build phase." }
+        error: {
+          code: "TARGET_UNREACHABLE",
+          message: "AX tree inspection is disabled in Milestone D2"
+        }
       };
     }
 
     return {
-      id,
+      id: "mock-unk",
       success: false,
-      error: { code: "UNKNOWN_METHOD", message: `Method '${method}' not supported` }
+      error: {
+        code: "UNKNOWN_METHOD",
+        message: `Method '${method}' is not supported`
+      }
     };
-  }
+  };
 }
+
+const MUTATION_METHODS = new Set(["click", "move", "drag", "type", "shortcut", "scroll"]);
 
 export class UnixSocketHostClient implements HostClient {
   private socketPath: string;
-  private reqCounter = 1;
   private timeoutMs: number;
 
-  constructor(socketPath?: string, timeoutMs = 10000) {
-    const uid = process.getuid ? process.getuid() : 501;
-    this.socketPath = socketPath ?? `/tmp/agy-computer-use-${uid}/agy-computer-use.sock`;
+  constructor(socketPath: string = "/tmp/agy-computer-use/host.sock", timeoutMs: number = 5000) {
+    this.socketPath = socketPath;
     this.timeoutMs = timeoutMs;
   }
 
-  public request(method: string, params?: Record<string, unknown>, signal?: AbortSignal): Promise<IPCResponsePayload> {
-    return new Promise((resolve) => {
-      const id = `req-${this.reqCounter++}`;
-      let settled = false;
-      let isDispatched = false;
-      let timer: NodeJS.Timeout | undefined;
-      let onAbort: (() => void) | undefined;
-      let client: net.Socket | undefined;
+  public async request(method: string, params?: Record<string, unknown>, signal?: AbortSignal): Promise<IPCResponse> {
+    if (signal?.aborted) {
+      return {
+        id: "cancelled",
+        success: false,
+        error: { code: "CANCELLED", message: "Request was cancelled before dispatch" }
+      };
+    }
 
-      const settle = (response: IPCResponsePayload) => {
-        if (settled) return;
-        settled = true;
-        if (timer) clearTimeout(timer);
-        if (signal && onAbort) signal.removeEventListener("abort", onAbort);
-        if (client) client.destroy();
+    if (!fs.existsSync(this.socketPath)) {
+      return {
+        id: "no-socket",
+        success: false,
+        error: {
+          code: "TARGET_UNREACHABLE",
+          message: `Unix domain socket not found at ${this.socketPath}`
+        }
+      };
+    }
+
+    return new Promise<IPCResponse>((resolve) => {
+      const reqId = `req-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+      let client: net.Socket | null = null;
+      let isDispatched = false;
+      let isSettled = false;
+
+      const finish = (response: IPCResponse) => {
+        if (isSettled) return;
+        isSettled = true;
+        if (client) {
+          client.destroy();
+          client = null;
+        }
         resolve(response);
       };
 
-      onAbort = () => {
+      const timer = setTimeout(() => {
         if (isDispatched && MUTATION_METHODS.has(method)) {
-          settle({
-            id,
+          finish({
+            id: reqId,
             success: false,
             error: {
               code: "ACTION_OUTCOME_UNKNOWN",
-              message: `Client IPC socket for '${method}' was destroyed during cancellation. Native host state is unconfirmed; a fresh computer_use_observe snapshot is required.`
+              message: `Mutation request '${method}' timed out after socket write; action outcome is unknown. A fresh computer_use_observe snapshot is required.`
             }
           });
         } else {
-          settle({
-            id,
+          finish({
+            id: reqId,
             success: false,
-            error: { code: "CANCELLED", message: "IPC request cancelled before completion" }
+            error: {
+              code: "TIMEOUT",
+              message: `IPC request '${method}' timed out after ${this.timeoutMs}ms`
+            }
+          });
+        }
+      }, this.timeoutMs);
+
+      const abortHandler = () => {
+        clearTimeout(timer);
+        if (isDispatched && MUTATION_METHODS.has(method)) {
+          finish({
+            id: reqId,
+            success: false,
+            error: {
+              code: "ACTION_OUTCOME_UNKNOWN",
+              message: `Mutation request '${method}' aborted after socket write; action outcome is unknown. A fresh computer_use_observe snapshot is required.`
+            }
+          });
+        } else {
+          finish({
+            id: reqId,
+            success: false,
+            error: {
+              code: "CANCELLED",
+              message: `IPC request '${method}' was cancelled`
+            }
           });
         }
       };
 
-      if (signal?.aborted) {
-        settle({
-          id,
-          success: false,
-          error: { code: "CANCELLED", message: "IPC request cancelled before execution" }
-        });
-        return;
+      if (signal) {
+        signal.addEventListener("abort", abortHandler, { once: true });
       }
 
-      if (signal && onAbort) {
-        signal.addEventListener("abort", onAbort, { once: true });
-      }
+      client = net.createConnection(this.socketPath, () => {
+        const payloadObj = {
+          id: reqId,
+          method,
+          ...(params ? { params } : {})
+        };
+        const payloadJson = JSON.stringify(payloadObj);
+        const payloadBuf = Buffer.from(payloadJson, "utf-8");
 
-      timer = setTimeout(() => {
-        settle({
-          id,
-          success: false,
-          error: { code: "TIMEOUT", message: `IPC request '${method}' timed out after ${this.timeoutMs}ms` }
-        });
-      }, this.timeoutMs);
-
-      client = net.createConnection({ path: this.socketPath }, () => {
-        const payloadObj: IPCRequestPayload = { id, method, params };
-        const jsonStr = JSON.stringify(payloadObj);
-        const payloadBuf = Buffer.from(jsonStr, "utf-8");
-
-        if (payloadBuf.length > MAX_FRAME_SIZE) {
-          settle({
-            id,
+        if (payloadBuf.length > 16 * 1024 * 1024) {
+          clearTimeout(timer);
+          finish({
+            id: reqId,
             success: false,
-            error: { code: "PAYLOAD_TOO_LARGE", message: `Request payload size ${payloadBuf.length} exceeds 16MB limit` }
+            error: { code: "REQUEST_TOO_LARGE", message: "Request payload exceeds 16MB" }
           });
           return;
         }
 
-        const msgBuf = Buffer.alloc(4 + payloadBuf.length);
-        msgBuf.writeUInt32BE(payloadBuf.length, 0);
-        payloadBuf.copy(msgBuf, 4);
+        const headerBuf = Buffer.alloc(4);
+        headerBuf.writeUInt32BE(payloadBuf.length, 0);
+        const msgBuf = Buffer.concat([headerBuf, payloadBuf]);
 
-        client?.write(msgBuf, () => {
+        // Set uncertainty flag synchronously BEFORE socket write
+        if (MUTATION_METHODS.has(method)) {
           isDispatched = true;
+        }
+
+        client?.write(msgBuf, (err) => {
+          if (err) {
+            clearTimeout(timer);
+            finish({
+              id: reqId,
+              success: false,
+              error: { code: "IPC_ERROR", message: `Socket write error: ${err.message}` }
+            });
+          }
         });
       });
 
-      let incoming = Buffer.alloc(0);
+      let responseBuffer = Buffer.alloc(0);
+      let expectedLen: number | null = null;
 
-      client.on("data", (chunk) => {
-        incoming = Buffer.concat([incoming, chunk]);
+      client.on("data", (chunk: Buffer) => {
+        responseBuffer = Buffer.concat([responseBuffer, chunk]);
 
-        if (incoming.length > MAX_FRAME_SIZE + 4) {
-          settle({
-            id,
-            success: false,
-            error: { code: "RESPONSE_TOO_LARGE", message: `Incoming frame size exceeds maximum 16MB limit` }
-          });
-          return;
-        }
-
-        if (incoming.length >= 4) {
-          const bodyLen = incoming.readUInt32BE(0);
-
-          if (bodyLen > MAX_FRAME_SIZE) {
-            settle({
-              id,
-              success: false,
-              error: { code: "RESPONSE_TOO_LARGE", message: `Incoming frame header bodyLen ${bodyLen} exceeds 16MB limit` }
-            });
-            return;
-          }
-
-          if (incoming.length >= 4 + bodyLen) {
-            const bodyBuf = incoming.subarray(4, 4 + bodyLen);
-
-            try {
-              const rawJson = JSON.parse(bodyBuf.toString("utf-8"));
-              const parseResult = IPCResponseSchema.safeParse(rawJson);
-
-              if (!parseResult.success) {
-                settle({
-                  id,
-                  success: false,
-                  error: { code: "MALFORMED_RESPONSE", message: `Invalid response schema from host: ${parseResult.error.message}` }
-                });
-                return;
-              }
-
-              const response = parseResult.data as IPCResponsePayload;
-
-              if (response.id !== id) {
-                settle({
-                  id,
-                  success: false,
-                  error: { code: "INVALID_RESPONSE_ID", message: `Response ID mismatch. Expected ${id}, got ${response.id}` }
-                });
-                return;
-              }
-
-              settle(response);
-            } catch (err) {
-              settle({
-                id,
+        if (expectedLen === null) {
+          if (responseBuffer.length >= 4) {
+            expectedLen = responseBuffer.readUInt32BE(0);
+            if (expectedLen > 16 * 1024 * 1024) {
+              clearTimeout(timer);
+              finish({
+                id: reqId,
                 success: false,
-                error: { code: "MALFORMED_RESPONSE", message: `Malformed JSON response from host: ${err}` }
+                error: { code: "RESPONSE_TOO_LARGE", message: `Response payload length ${expectedLen} exceeds 16MB limit` }
               });
+              return;
             }
           }
         }
-      });
 
-      client.on("end", () => {
-        if (!settled) {
-          settle({
-            id,
-            success: false,
-            error: { code: "EOF", message: "Socket closed (EOF) before complete frame was received" }
-          });
-        }
-      });
-
-      client.on("close", () => {
-        if (!settled) {
-          settle({
-            id,
-            success: false,
-            error: { code: "EOF", message: "Socket connection closed unexpectedly" }
-          });
+        if (expectedLen !== null && responseBuffer.length >= 4 + expectedLen) {
+          clearTimeout(timer);
+          const jsonBuf = responseBuffer.subarray(4, 4 + expectedLen);
+          try {
+            const rawObj = JSON.parse(jsonBuf.toString("utf-8"));
+            const parsedResp = IPCResponseSchema.parse(rawObj);
+            finish(parsedResp);
+          } catch (parseErr: any) {
+            finish({
+              id: reqId,
+              success: false,
+              error: { code: "INVALID_RESPONSE", message: `Failed to parse IPC response JSON: ${parseErr.message}` }
+            });
+          }
         }
       });
 
       client.on("error", (err) => {
-        settle({
-          id,
+        clearTimeout(timer);
+        finish({
+          id: reqId,
           success: false,
-          error: {
-            code: "HOST_UNAVAILABLE",
-            message: `Native host unavailable at ${this.socketPath}. Details: ${err.message}`
-          }
+          error: { code: "IPC_ERROR", message: `IPC socket error: ${err.message}` }
         });
+      });
+
+      client.on("end", () => {
+        if (!isSettled && (expectedLen === null || responseBuffer.length < 4 + expectedLen)) {
+          clearTimeout(timer);
+          finish({
+            id: reqId,
+            success: false,
+            error: { code: "EOF", message: "IPC socket closed before complete response payload was received" }
+          });
+        }
       });
     });
   }

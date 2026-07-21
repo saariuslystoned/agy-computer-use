@@ -20,31 +20,31 @@ function fail(msg) {
 }
 
 const subcommand = process.argv[2] || "doctor";
-const validSubcommands = ["build", "doctor", "canary-ready"];
+const validSubcommands = ["build", "doctor", "canary-ready", "test-native"];
 
 if (!validSubcommands.includes(subcommand)) {
   console.error(`[FAIL] Unknown subcommand '${subcommand}'. Valid subcommands are: ${validSubcommands.join(", ")}`);
   process.exit(1);
 }
 
-async function verifyPublicMcpToolInventory() {
-  const canaryModulePath = path.join(mcpPkgDir, "dist/src/canary.js");
-  const mockClientModulePath = path.join(mcpPkgDir, "dist/src/peekaboo-client.js");
+async function verifyD2McpToolInventory() {
+  const indexModulePath = path.join(mcpPkgDir, "dist/src/index.js");
+  const hostClientModulePath = path.join(mcpPkgDir, "dist/src/host-client.js");
 
   const clientSdkPath = path.join(mcpPkgDir, "node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js");
   const memorySdkPath = path.join(mcpPkgDir, "node_modules/@modelcontextprotocol/sdk/dist/esm/inMemory.js");
 
-  if (!fs.existsSync(canaryModulePath)) {
-    throw new Error(`Canary dist module missing at ${canaryModulePath}`);
+  if (!fs.existsSync(indexModulePath)) {
+    throw new Error(`D2 Server dist module missing at ${indexModulePath}`);
   }
 
   const { Client } = await import(`file://${clientSdkPath}`);
   const { InMemoryTransport } = await import(`file://${memorySdkPath}`);
-  const { createCanaryServer } = await import(`file://${canaryModulePath}`);
-  const { MockPeekabooImageClient } = await import(`file://${mockClientModulePath}`);
+  const { createComputerUseServer } = await import(`file://${indexModulePath}`);
+  const { MockHostClient } = await import(`file://${hostClientModulePath}`);
 
-  const mockClient = new MockPeekabooImageClient();
-  const server = createCanaryServer(mockClient);
+  const mockClient = new MockHostClient();
+  const server = createComputerUseServer(mockClient);
 
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client(
@@ -61,42 +61,16 @@ async function verifyPublicMcpToolInventory() {
   await client.close();
   await server.close();
 
-  if (!toolsResult || !toolsResult.tools || toolsResult.tools.length !== 1) {
-    throw new Error(`Canary server tool inventory count must be EXACTLY 1, got ${toolsResult?.tools?.length ?? 0}`);
+  if (!toolsResult || !toolsResult.tools || toolsResult.tools.length !== 2) {
+    throw new Error(`D2 MCP server tool inventory count must be EXACTLY 2, got ${toolsResult?.tools?.length ?? 0}`);
   }
 
-  if (toolsResult.tools[0].name !== "computer_use_canary_screenshot") {
-    throw new Error(`Canary tool name must be 'computer_use_canary_screenshot', got '${toolsResult.tools[0].name}'`);
+  const toolNames = toolsResult.tools.map(t => t.name).sort();
+  if (toolNames[0] !== "computer_use_observe" || toolNames[1] !== "computer_use_status") {
+    throw new Error(`D2 tool names must be ['computer_use_observe', 'computer_use_status'], got ${JSON.stringify(toolNames)}`);
   }
 
-  return toolsResult.tools[0].name;
-}
-
-function checkPeekabooPermissions() {
-  const peekabooBin = fs.existsSync("/opt/homebrew/bin/peekaboo") ? "/opt/homebrew/bin/peekaboo" : "peekaboo";
-  const permRaw = execSync(`${peekabooBin} permissions --json`, { encoding: "utf-8" }).trim();
-  const permJson = JSON.parse(permRaw);
-
-  if (!permJson || permJson.success !== true) {
-    throw new Error("Peekaboo permissions check returned success != true");
-  }
-
-  const perms = permJson.data?.permissions || [];
-  const screenRec = perms.find((p) => p.name === "Screen Recording");
-  if (!screenRec || screenRec.isGranted !== true) {
-    throw new Error("Peekaboo Screen Recording permission is NOT granted");
-  }
-
-  return true;
-}
-
-function checkPeekabooExactVersion() {
-  const peekabooBin = fs.existsSync("/opt/homebrew/bin/peekaboo") ? "/opt/homebrew/bin/peekaboo" : "peekaboo";
-  const verOut = execSync(`${peekabooBin} --version`, { encoding: "utf-8" }).trim();
-  if (!/3\.9\.1\b/.test(verOut)) {
-    throw new Error(`Peekaboo version must be EXACTLY 3.9.1, observed: '${verOut}'`);
-  }
-  return verOut;
+  return toolNames;
 }
 
 function validateMcpConfigStruct() {
@@ -107,7 +81,6 @@ function validateMcpConfigStruct() {
 
   const mcpConfig = JSON.parse(fs.readFileSync(mcpConfigPath, "utf-8"));
 
-  // Validate real D2 server entry
   const prodServer = mcpConfig?.mcpServers?.["computer-use"];
   if (!prodServer) {
     throw new Error(`.agents/mcp_config.json must register 'computer-use'`);
@@ -119,7 +92,6 @@ function validateMcpConfigStruct() {
     throw new Error(`Target dist file for computer-use does not exist at ${prodServer.args[0]}`);
   }
 
-  // Validate canary server entry
   const canaryServer = mcpConfig?.mcpServers?.["computer-use-canary"];
   if (!canaryServer) {
     throw new Error(`.agents/mcp_config.json must register 'computer-use-canary'`);
@@ -137,47 +109,17 @@ async function main() {
     process.exit(0);
   }
 
-  if (subcommand === "doctor") {
-    log("Running agy-computer-use doctor report...");
-
-    try {
-      const nodeVer = process.version;
-      const pnpmVer = execSync("pnpm --version", { encoding: "utf-8" }).trim();
-      log(`Toolchain: Node.js ${nodeVer}, pnpm ${pnpmVer}`);
-    } catch {
-      log("Warning: Toolchain check failed.");
-    }
-
-    try {
-      execSync("pnpm build", { cwd: mcpPkgDir, stdio: "ignore" });
-      const toolName = await verifyPublicMcpToolInventory();
-      log(`Public MCP Server Inventory: 1 tool ('${toolName}')`);
-    } catch (err) {
-      log(`Warning: MCP tool inventory check failed: ${err.message}`);
-    }
-
-    try {
-      const verOut = checkPeekabooExactVersion();
-      log(`Peekaboo Binary Version: ${verOut}`);
-    } catch (err) {
-      log(`Warning: Peekaboo version check: ${err.message}`);
-    }
-
-    try {
-      checkPeekabooPermissions();
-      log("Peekaboo Bridge Screen Recording Permission: GRANTED");
-    } catch (err) {
-      log(`Peekaboo Bridge Permission Status: NOT READY (${err.message})`);
-    }
-
-    log("Doctor report complete.");
+  if (subcommand === "test-native") {
+    log("Building and running portable native test runner...");
+    const hostDir = path.join(rootDir, "apps/computer-use-host");
+    execSync("swift run ComputerUseHostTestRunner", { cwd: hostDir, stdio: "inherit" });
+    log("Portable native test suite execution complete.");
     process.exit(0);
   }
 
-  if (subcommand === "canary-ready") {
-    log("Validating canary readiness for Dogfood D1 & D2...");
+  if (subcommand === "doctor" || subcommand === "canary-ready") {
+    log("Validating offline readiness for Milestone D2...");
 
-    // 1. Toolchain Check
     try {
       const nodeVer = process.version;
       log(`Node.js version: ${nodeVer}`);
@@ -185,15 +127,12 @@ async function main() {
       fail("Node.js missing in environment.");
     }
 
-    // 2. Build & Target Existence Check
-    const canaryDistPath = path.join(mcpPkgDir, "dist/src/canary.js");
     const indexDistPath = path.join(mcpPkgDir, "dist/src/index.js");
-    if (!fs.existsSync(canaryDistPath) || !fs.existsSync(indexDistPath)) {
-      log("Building MCP package for canary-ready check...");
+    if (!fs.existsSync(indexDistPath)) {
+      log("Building MCP package for offline readiness check...");
       execSync("pnpm build", { cwd: mcpPkgDir, stdio: "inherit" });
     }
 
-    // 3. Config Validation
     try {
       validateMcpConfigStruct();
       log("Verified .agents/mcp_config.json computer-use & computer-use-canary server registrations.");
@@ -201,30 +140,14 @@ async function main() {
       fail(`MCP Config validation failed: ${err.message}`);
     }
 
-    // 4. Public MCP Client Tool Inventory Check
     try {
-      const toolName = await verifyPublicMcpToolInventory();
-      log(`Verified public MCP tool inventory: Exactly 1 tool ('${toolName}')`);
+      const toolNames = await verifyD2McpToolInventory();
+      log(`Verified D2 public MCP tool inventory: Exactly 2 tools (${toolNames.join(", ")})`);
     } catch (err) {
       fail(`Public MCP Client tool inventory check failed: ${err.message}`);
     }
 
-    // 5. Peekaboo EXACTLY 3.9.1 Binary & Screen Recording Permission Check
-    try {
-      const verOut = checkPeekabooExactVersion();
-      log(`Verified Peekaboo binary exact version: ${verOut}`);
-    } catch (err) {
-      fail(err.message);
-    }
-
-    try {
-      checkPeekabooPermissions();
-      log("Verified Peekaboo Screen Recording permission: GRANTED");
-    } catch (err) {
-      fail(`Peekaboo permissions check failed: ${err.message}`);
-    }
-
-    log("ALL CANARY READINESS CHECKS PASSED!");
+    log("ALL OFFLINE D2 READINESS CHECKS PASSED!");
     process.exit(0);
   }
 }
