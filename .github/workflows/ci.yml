@@ -113,7 +113,7 @@ jobs:
       - name: Build & Run Native Swift Test Authority
         run: |
           set -euo pipefail
-          DISCOVERED=$(cd apps/computer-use-host && swift test list 2>&1 | grep -F "ComputerUseHostTests." | sort)
+          DISCOVERED=$(cd apps/computer-use-host && swift test list 2>&1 | grep -E "^ComputerUseHostTests\." | sort)
           if [ -z "$DISCOVERED" ]; then
             echo "Error: 'swift test list' returned 0 discovered tests in CI" >&2
             exit 1
