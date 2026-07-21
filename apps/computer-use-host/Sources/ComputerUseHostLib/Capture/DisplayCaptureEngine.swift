@@ -64,10 +64,20 @@ public protocol DisplayCaptureEngine: Sendable {
 }
 
 public actor SCScreenshotCaptureEngine: DisplayCaptureEngine {
-    private let authorizer: ScreenRecordingAuthorizing
+    public typealias ImageCapturer = @Sendable (SCContentFilter, SCStreamConfiguration) async throws -> CGImage
 
-    public init(authorizer: ScreenRecordingAuthorizing = CGScreenRecordingAuthorizer()) {
+    private let authorizer: ScreenRecordingAuthorizing
+    private let imageCapturer: ImageCapturer
+    public private(set) var frameworkInvocationCount: Int = 0
+
+    public init(
+        authorizer: ScreenRecordingAuthorizing = CGScreenRecordingAuthorizer(),
+        imageCapturer: ImageCapturer? = nil
+    ) {
         self.authorizer = authorizer
+        self.imageCapturer = imageCapturer ?? { filter, config in
+            try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+        }
     }
 
     public func captureDisplay(displayId: Int? = nil, topology: DisplayTopology) async throws -> CaptureFrameDTO {
@@ -87,7 +97,10 @@ public actor SCScreenshotCaptureEngine: DisplayCaptureEngine {
             throw ComputerUseError.targetUnreachable(reason: "Display ID \(targetDisplayId) pixel dimensions (\(targetDisplay.pixelWidth)x\(targetDisplay.pixelHeight)) exceed 64-megapixel safety limit")
         }
 
-        // 3. Perform SCShareableContent discovery and filter creation entirely inside actor scope
+        // 3. Increment framework invocation counter to track real framework calls
+        frameworkInvocationCount += 1
+
+        // 4. Perform SCShareableContent discovery and filter creation entirely inside actor scope
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         guard let scDisplay = content.displays.first(where: { Int($0.displayID) == targetDisplayId }) else {
             throw ComputerUseError.targetUnreachable(reason: "Display ID \(targetDisplayId) not found in SCShareableContent")
@@ -102,10 +115,10 @@ public actor SCScreenshotCaptureEngine: DisplayCaptureEngine {
         streamConfig.height = targetDisplay.pixelHeight
         streamConfig.showsCursor = false
 
-        // 4. Capture image
-        let cgImage = try await SCScreenshotManager.captureImage(contentFilter: contentFilter, configuration: streamConfig)
+        // 5. Capture image via injected imageCapturer
+        let cgImage = try await imageCapturer(contentFilter, streamConfig)
 
-        // 5. Validate and encode image via pure validator
+        // 6. Validate and encode image via pure validator
         let (_, base64Str) = try SCScreenshotCaptureEngine.validateAndEncode(image: cgImage, targetDisplay: targetDisplay, quality: 0.8)
 
         let capId = "cap-\(UUID().uuidString)"

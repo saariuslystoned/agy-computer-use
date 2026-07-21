@@ -36,30 +36,18 @@ public final class CaptureBudget: @unchecked Sendable {
 
 private final class OneShotArbiter<T: Sendable>: @unchecked Sendable {
     private enum State {
-        case pending(CheckedContinuation<T, Error>?, Task<Void, Never>?)
+        case pending(CheckedContinuation<T, Error>?, captureTask: Task<Void, Never>?, timerTask: Task<Void, Never>?)
         case resolved(Result<T, Error>)
     }
 
     private let lock = NSLock()
-    private var state: State = .pending(nil, nil)
-
-    func installTaskHandle(_ task: Task<Void, Never>) {
-        lock.lock()
-        switch state {
-        case .pending(let cont, _):
-            state = .pending(cont, task)
-            lock.unlock()
-        case .resolved:
-            lock.unlock()
-            task.cancel()
-        }
-    }
+    private var state: State = .pending(nil, captureTask: nil, timerTask: nil)
 
     func installContinuation(_ continuation: CheckedContinuation<T, Error>) {
         lock.lock()
         switch state {
-        case .pending(_, let task):
-            state = .pending(continuation, task)
+        case .pending(_, let cTask, let tTask):
+            state = .pending(continuation, captureTask: cTask, timerTask: tTask)
             lock.unlock()
         case .resolved(let result):
             lock.unlock()
@@ -67,29 +55,68 @@ private final class OneShotArbiter<T: Sendable>: @unchecked Sendable {
         }
     }
 
+    func installCaptureTask(_ task: Task<Void, Never>) {
+        lock.lock()
+        switch state {
+        case .pending(let cont, _, let tTask):
+            state = .pending(cont, captureTask: task, timerTask: tTask)
+            lock.unlock()
+        case .resolved:
+            lock.unlock()
+            task.cancel()
+        }
+    }
+
+    func installTimerTask(_ task: Task<Void, Never>) {
+        lock.lock()
+        switch state {
+        case .pending(let cont, let cTask, _):
+            state = .pending(cont, captureTask: cTask, timerTask: task)
+            lock.unlock()
+        case .resolved:
+            lock.unlock()
+            task.cancel()
+        }
+    }
+
     func resolve(with result: Result<T, Error>) {
         var contToResume: CheckedContinuation<T, Error>? = nil
-        var taskToCancel: Task<Void, Never>? = nil
+        var captureToCancel: Task<Void, Never>? = nil
+        var timerToCancel: Task<Void, Never>? = nil
 
         lock.lock()
         switch state {
-        case .pending(let cont, let task):
+        case .pending(let cont, let cTask, let tTask):
             contToResume = cont
-            taskToCancel = task
             state = .resolved(result)
+            
+            switch result {
+            case .success:
+                timerToCancel = tTask
+            case .failure(let err as ComputerUseError):
+                if case .timeout = err {
+                    captureToCancel = cTask
+                } else if case .cancelled = err {
+                    captureToCancel = cTask
+                    timerToCancel = tTask
+                } else {
+                    timerToCancel = tTask
+                }
+            case .failure:
+                timerToCancel = tTask
+                captureToCancel = cTask
+            }
             lock.unlock()
         case .resolved:
             lock.unlock()
             return
         }
 
-        // Resume continuation outside lock
         if let cont = contToResume {
             cont.resume(with: result)
         }
-        if let task = taskToCancel {
-            task.cancel()
-        }
+        captureToCancel?.cancel()
+        timerToCancel?.cancel()
     }
 }
 
@@ -106,6 +133,14 @@ public actor HostServer {
     private var latestCapture: CaptureFrameDTO?
     private var activeTopology: DisplayTopology?
     private var latestIssuedGeneration: UInt64 = 0
+
+    public var latestCaptureSnapshot: CaptureFrameDTO? {
+        return self.latestCapture
+    }
+
+    public var latestIssuedGenerationSnapshot: UInt64 {
+        return self.latestIssuedGeneration
+    }
 
     public init(
         authorizer: ScreenRecordingAuthorizing = CGScreenRecordingAuthorizer(),
@@ -169,6 +204,10 @@ public actor HostServer {
                 )
 
             case "observe":
+                guard authorizer.isScreenCaptureAccessGranted else {
+                    throw ComputerUseError.permissionDenied(permission: "screen_recording")
+                }
+
                 let initialTopology = try topologyProvider.getTopology()
 
                 let targetDisplayId: Int
@@ -189,7 +228,7 @@ public actor HostServer {
 
                 // Acquire physical capture capacity BEFORE incrementing generation or clearing lease
                 guard budget.acquire() else {
-                    throw ComputerUseError.targetUnreachable(reason: "Physical capture capacity limit (\(budget.maxConcurrent)) reached; fast failing observe request")
+                    throw ComputerUseError.captureBusy(reason: "Physical capture capacity limit (\(budget.maxConcurrent)) reached; fast failing observe request")
                 }
 
                 self.activeTopology = initialTopology
@@ -318,14 +357,14 @@ public actor HostServer {
                             arbiter.resolve(with: .failure(error))
                         }
                     }
-                    arbiter.installTaskHandle(captureTask)
+                    arbiter.installCaptureTask(captureTask)
 
                     let timeoutNano = UInt64(timeoutSec * 1_000_000_000)
                     let timerTask = Task.detached {
                         try? await Task.sleep(nanoseconds: timeoutNano)
                         arbiter.resolve(with: .failure(ComputerUseError.timeout(operation: "observe", seconds: timeoutSec)))
                     }
-                    arbiter.installTaskHandle(timerTask)
+                    arbiter.installTimerTask(timerTask)
                 }
             },
             onCancel: {

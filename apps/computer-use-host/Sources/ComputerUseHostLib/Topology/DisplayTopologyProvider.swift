@@ -91,8 +91,51 @@ public struct SystemDisplayTopologyProvider: DisplayTopologyProviding {
     }
 
     public func getTopology() throws -> DisplayTopology {
-        let (primaryId, validIDs) = try enumerator.getActiveDisplays()
+        var attempts = 0
+        while attempts < 3 {
+            attempts += 1
+            do {
+                // Pass 1: Count & fill list 1
+                let (primary1, list1) = try enumerator.getActiveDisplays()
+                let infosA = try fetchDescriptors(validIDs: list1, primaryId: primary1)
 
+                // Pass 2: Count & fill list 2
+                let (primary2, list2) = try enumerator.getActiveDisplays()
+                guard primary1 == primary2 && list1 == list2 else {
+                    if attempts < 3 { continue }
+                    throw ComputerUseError.targetUnreachable(reason: "Topology unstable: display list changed between pass 1 and pass 2")
+                }
+
+                let infosB = try fetchDescriptors(validIDs: list2, primaryId: primary2)
+                guard fingerprintsMatch(infosA, infosB) else {
+                    if attempts < 3 { continue }
+                    throw ComputerUseError.targetUnreachable(reason: "Topology unstable: display descriptors changed between set A and set B")
+                }
+
+                // Pass 3: Final list pass 3
+                let (primary3, list3) = try enumerator.getActiveDisplays()
+                guard primary1 == primary3 && list1 == list3 else {
+                    if attempts < 3 { continue }
+                    throw ComputerUseError.targetUnreachable(reason: "Topology unstable: display list changed on final pass 3")
+                }
+
+                let sortedDisplays = infosB.sorted { $0.id < $1.id }
+                let version = SystemDisplayTopologyProvider.computeTopologyVersion(primaryId: primary1, displays: sortedDisplays)
+
+                return DisplayTopology(
+                    version: version,
+                    primaryDisplayId: primary1,
+                    displays: sortedDisplays
+                )
+            } catch {
+                if attempts < 3 { continue }
+                throw error
+            }
+        }
+        throw ComputerUseError.targetUnreachable(reason: "Exhausted retries due to topology instability")
+    }
+
+    private func fetchDescriptors(validIDs: [Int], primaryId: Int) throws -> [DisplayInfo] {
         guard !validIDs.isEmpty else {
             throw ComputerUseError.targetUnreachable(reason: "Display list is empty")
         }
@@ -113,7 +156,6 @@ public struct SystemDisplayTopologyProvider: DisplayTopologyProviding {
         }
 
         var displayInfos: [DisplayInfo] = []
-
         for id in validIDs {
             let (bounds, rotation, pixelW, pixelH, scale) = try descriptorProvider.getDisplayDescriptor(id: id)
 
@@ -141,15 +183,26 @@ public struct SystemDisplayTopologyProvider: DisplayTopologyProviding {
             )
             displayInfos.append(info)
         }
+        return displayInfos
+    }
 
-        let sortedDisplays = displayInfos.sorted { $0.id < $1.id }
-        let version = SystemDisplayTopologyProvider.computeTopologyVersion(primaryId: primaryId, displays: sortedDisplays)
-
-        return DisplayTopology(
-            version: version,
-            primaryDisplayId: primaryId,
-            displays: sortedDisplays
-        )
+    private func fingerprintsMatch(_ setA: [DisplayInfo], _ setB: [DisplayInfo]) -> Bool {
+        guard setA.count == setB.count else { return false }
+        let mapA = Dictionary(uniqueKeysWithValues: setA.map { ($0.id, $0) })
+        for b in setB {
+            guard let a = mapA[b.id] else { return false }
+            if a.originX.bitPattern != b.originX.bitPattern ||
+               a.originY.bitPattern != b.originY.bitPattern ||
+               a.widthPoints.bitPattern != b.widthPoints.bitPattern ||
+               a.heightPoints.bitPattern != b.heightPoints.bitPattern ||
+               a.scaleFactor.bitPattern != b.scaleFactor.bitPattern ||
+               a.rotation.bitPattern != b.rotation.bitPattern ||
+               a.pixelWidth != b.pixelWidth ||
+               a.pixelHeight != b.pixelHeight {
+                return false
+            }
+        }
+        return true
     }
 
     public static func hexUInt64(_ val: UInt64) -> String {
@@ -157,16 +210,21 @@ public struct SystemDisplayTopologyProvider: DisplayTopologyProviding {
         return String(repeating: "0", count: max(0, 16 - hex.count)) + hex
     }
 
+    public static func normalizeZero(_ val: Double) -> Double {
+        if val == 0.0 { return 0.0 }
+        return val
+    }
+
     public static func computeTopologyVersion(primaryId: Int, displays: [DisplayInfo]) -> String {
         let sorted = displays.sorted { $0.id < $1.id }
         var canonicalString = "primary:\(primaryId);"
         for d in sorted {
-            let oxHex = hexUInt64(d.originX.bitPattern)
-            let oyHex = hexUInt64(d.originY.bitPattern)
-            let wHex = hexUInt64(d.widthPoints.bitPattern)
-            let hHex = hexUInt64(d.heightPoints.bitPattern)
-            let sHex = hexUInt64(d.scaleFactor.bitPattern)
-            let rHex = hexUInt64(d.rotation.bitPattern)
+            let oxHex = hexUInt64(normalizeZero(d.originX).bitPattern)
+            let oyHex = hexUInt64(normalizeZero(d.originY).bitPattern)
+            let wHex = hexUInt64(normalizeZero(d.widthPoints).bitPattern)
+            let hHex = hexUInt64(normalizeZero(d.heightPoints).bitPattern)
+            let sHex = hexUInt64(normalizeZero(d.scaleFactor).bitPattern)
+            let rHex = hexUInt64(normalizeZero(d.rotation).bitPattern)
             canonicalString += "id:\(d.id),ox:\(oxHex),oy:\(oyHex),w:\(wHex),h:\(hHex),s:\(sHex),pw:\(d.pixelWidth),ph:\(d.pixelHeight),r:\(rHex);"
         }
         let digest = SHA256.hash(data: Data(canonicalString.utf8))

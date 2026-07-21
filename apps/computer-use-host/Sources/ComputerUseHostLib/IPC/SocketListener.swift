@@ -2,66 +2,72 @@ import Foundation
 
 public final class SocketListener: @unchecked Sendable {
     public static var defaultSocketPath: String {
-        return "/tmp/agy-computer-use-\(getuid())/host.sock"
+        return "/private/tmp/agy-computer-use-\(getuid())/host.sock"
     }
 
     public let socketPath: String
     private let server: HostServer
     private var serverFd: Int32 = -1
+    private var lockFd: Int32 = -1
     private var isRunning: Bool = false
     private var boundInode: ino_t = 0
     private let lock = NSLock()
     private let perFrameTimeoutSec: Double
 
     public init(socketPath: String? = nil, server: HostServer, perFrameTimeoutSec: Double = 5.0) {
-        self.socketPath = socketPath ?? SocketListener.defaultSocketPath
+        let path = socketPath ?? SocketListener.defaultSocketPath
+        // Resolve /tmp symlink prefix to canonical /private/tmp if needed
+        if path.hasPrefix("/tmp/") {
+            self.socketPath = "/private" + path
+        } else {
+            self.socketPath = path
+        }
         self.server = server
         self.perFrameTimeoutSec = perFrameTimeoutSec
     }
 
     public static func prepareDirectory(at path: String) throws {
-        let fileManager = FileManager.default
-
-        if fileManager.fileExists(atPath: path) {
-            var isDir: ObjCBool = false
-            if fileManager.fileExists(atPath: path, isDirectory: &isDir) {
-                if !isDir.boolValue {
-                    throw ComputerUseError.ipcError(reason: "Refusing to remove pre-existing non-directory file at runtime path: \(path)")
-                } else {
-                    try setOwnerOnlyPermissions(at: path)
-                }
+        var canonicalPath = path
+        if canonicalPath.hasPrefix("/tmp/") {
+            canonicalPath = "/private" + canonicalPath
+        }
+        
+        var isDir: ObjCBool = false
+        let targetDir: String
+        if FileManager.default.fileExists(atPath: canonicalPath, isDirectory: &isDir) {
+            if isDir.boolValue {
+                targetDir = canonicalPath
+            } else {
+                targetDir = (canonicalPath as NSString).deletingLastPathComponent
             }
         } else {
-            try createOwnerOnlyDir(at: path)
+            if (canonicalPath as NSString).pathExtension.isEmpty {
+                targetDir = canonicalPath
+            } else {
+                targetDir = (canonicalPath as NSString).deletingLastPathComponent
+            }
         }
-    }
 
-    private static func createOwnerOnlyDir(at path: String) throws {
-        try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true, attributes: nil)
-        try setOwnerOnlyPermissions(at: path)
-    }
-
-    private static func setOwnerOnlyPermissions(at path: String) throws {
-        let res = chmod(path, S_IRWXU) // 0700: Owner rwx only
-        guard res == 0 else {
-            throw ComputerUseError.ipcError(reason: "Failed to set 0700 permissions on directory: \(path)")
+        if targetDir == "/private/tmp" || targetDir == "/tmp" {
+            return
         }
 
         var statBuf = stat()
-        guard lstat(path, &statBuf) == 0 else {
-            throw ComputerUseError.ipcError(reason: "Failed to lstat directory: \(path)")
-        }
-
-        guard statBuf.st_uid == getuid() else {
-            throw ComputerUseError.ipcError(reason: "Directory owner UID \(statBuf.st_uid) does not match current user UID \(getuid())")
-        }
-
-        guard (statBuf.st_mode & S_IFMT) == S_IFDIR else {
-            throw ComputerUseError.ipcError(reason: "Path is not a directory: \(path)")
-        }
-
-        guard (statBuf.st_mode & 0o777) == 0o700 else {
-            throw ComputerUseError.ipcError(reason: "Insecure directory permissions (\(String(format: "%o", statBuf.st_mode & 0o777))) for path: \(path)")
+        if lstat(targetDir, &statBuf) == 0 {
+            guard (statBuf.st_mode & S_IFMT) == S_IFDIR else {
+                throw ComputerUseError.ipcError(reason: "Refusing to remove pre-existing non-directory file at runtime path: \(targetDir)")
+            }
+            guard statBuf.st_uid == getuid() else {
+                throw ComputerUseError.ipcError(reason: "Directory owner UID \(statBuf.st_uid) does not match current user UID \(getuid())")
+            }
+            guard (statBuf.st_mode & 0o777) == 0o700 else {
+                throw ComputerUseError.ipcError(reason: "Insecure directory permissions for path: \(targetDir)")
+            }
+        } else {
+            let res = mkdir(targetDir, 0o700)
+            guard res == 0 || errno == EEXIST else {
+                throw ComputerUseError.ipcError(reason: "Failed to create 0700 runtime directory: \(targetDir)")
+            }
         }
     }
 
@@ -72,7 +78,21 @@ public final class SocketListener: @unchecked Sendable {
         guard !isRunning else { return }
 
         let parentDir = (socketPath as NSString).deletingLastPathComponent
-        try SocketListener.prepareDirectory(at: parentDir)
+        try SocketListener.prepareDirectory(at: socketPath)
+
+        // Hold owner-only lifecycle lock file via flock LOCK_EX|LOCK_NB
+        let lockPath = (parentDir as NSString).appendingPathComponent("host.lock")
+        lockFd = open(lockPath, O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard lockFd >= 0 else {
+            throw ComputerUseError.ipcError(reason: "Failed to open or create host.lock file at \(lockPath)")
+        }
+
+        let flockRes = flock(lockFd, LOCK_EX | LOCK_NB)
+        guard flockRes == 0 else {
+            close(lockFd)
+            lockFd = -1
+            throw ComputerUseError.ipcError(reason: "Refusing to start: another active host instance holds flock on \(lockPath)")
+        }
 
         var statBuf = stat()
         if lstat(socketPath, &statBuf) == 0 {
@@ -83,10 +103,13 @@ public final class SocketListener: @unchecked Sendable {
                 throw ComputerUseError.ipcError(reason: "Refusing to unlink non-socket file at \(socketPath)")
             }
 
-            // Probe with short connect deadline to refuse live listener
+            // Monotonic nonblocking connect & poll probe to refuse active listener
             let probeFd = socket(AF_UNIX, SOCK_STREAM, 0)
             if probeFd >= 0 {
                 defer { close(probeFd) }
+                let flags = fcntl(probeFd, F_GETFL, 0)
+                _ = fcntl(probeFd, F_SETFL, flags | O_NONBLOCK)
+
                 var probeAddr = sockaddr_un()
                 let pathBytes = socketPath.utf8CString
                 let addrLen = MemoryLayout<sa_family_t>.size + pathBytes.count
@@ -102,11 +125,34 @@ public final class SocketListener: @unchecked Sendable {
                         connect(probeFd, saPtr, socklen_t(addrLen))
                     }
                 }
+
                 if connRes == 0 {
                     throw ComputerUseError.ipcError(reason: "Refusing to unlink active socket with live listener at \(socketPath)")
+                } else if errno == EINPROGRESS {
+                    var pfd = pollfd(fd: probeFd, events: Int16(POLLOUT), revents: 0)
+                    let pollRes = poll(&pfd, 1, 100) // 100ms deadline
+                    if pollRes > 0 {
+                        var err: Int32 = 0
+                        var errLen = socklen_t(MemoryLayout<Int32>.size)
+                        getsockopt(probeFd, SOL_SOCKET, SO_ERROR, &err, &errLen)
+                        if err == 0 {
+                            throw ComputerUseError.ipcError(reason: "Refusing to unlink active socket with live listener at \(socketPath)")
+                        } else if err != ECONNREFUSED {
+                            throw ComputerUseError.ipcError(reason: "Socket connect returned error \(err), failing closed")
+                        }
+                    } else {
+                        throw ComputerUseError.ipcError(reason: "Socket connect probe timed out, failing closed")
+                    }
+                } else if errno != ECONNREFUSED {
+                    throw ComputerUseError.ipcError(reason: "Socket probe failed with errno \(errno), failing closed")
                 }
             }
 
+            // Re-read stat right before unlinking
+            var preUnlinkStat = stat()
+            guard lstat(socketPath, &preUnlinkStat) == 0, preUnlinkStat.st_uid == getuid(), (preUnlinkStat.st_mode & S_IFMT) == S_IFSOCK else {
+                throw ComputerUseError.ipcError(reason: "Socket state changed before unlink, failing closed")
+            }
             _ = unlink(socketPath)
         }
 
@@ -151,9 +197,12 @@ public final class SocketListener: @unchecked Sendable {
         }
 
         var boundStat = stat()
-        if lstat(socketPath, &boundStat) == 0 {
-            self.boundInode = boundStat.st_ino
+        guard lstat(socketPath, &boundStat) == 0, boundStat.st_uid == getuid(), (boundStat.st_mode & S_IFMT) == S_IFSOCK else {
+            close(serverFd)
+            serverFd = -1
+            throw ComputerUseError.ipcError(reason: "Bound socket state revalidation failed")
         }
+        self.boundInode = boundStat.st_ino
 
         let listenRes = listen(serverFd, 5)
         guard listenRes == 0 else {
@@ -279,9 +328,12 @@ public final class SocketListener: @unchecked Sendable {
             }
 
             let tvSec = Int(remainingSec)
-            var tvUsec = __darwin_suseconds_t((remainingSec - floor(remainingSec)) * 1_000_000)
+            var tvUsec = __darwin_suseconds_t(ceil((remainingSec - floor(remainingSec)) * 1_000_000))
             if remainingSec > 0 && tvSec == 0 && tvUsec == 0 {
                 tvUsec = 1
+            }
+            if tvUsec >= 1_000_000 {
+                tvUsec = 999_999
             }
             var tv = timeval(tv_sec: tvSec, tv_usec: tvUsec)
             let optRes = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
@@ -334,9 +386,12 @@ public final class SocketListener: @unchecked Sendable {
                 }
 
                 let tvSec = Int(remainingSec)
-                var tvUsec = __darwin_suseconds_t((remainingSec - floor(remainingSec)) * 1_000_000)
+                var tvUsec = __darwin_suseconds_t(ceil((remainingSec - floor(remainingSec)) * 1_000_000))
                 if remainingSec > 0 && tvSec == 0 && tvUsec == 0 {
                     tvUsec = 1
+                }
+                if tvUsec >= 1_000_000 {
+                    tvUsec = 999_999
                 }
                 var tv = timeval(tv_sec: tvSec, tv_usec: tvUsec)
                 let optRes = setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
@@ -373,9 +428,15 @@ public final class SocketListener: @unchecked Sendable {
 
         var statBuf = stat()
         if lstat(socketPath, &statBuf) == 0 {
-            if statBuf.st_ino == self.boundInode && statBuf.st_uid == getuid() {
+            if statBuf.st_ino == self.boundInode && statBuf.st_uid == getuid() && (statBuf.st_mode & S_IFMT) == S_IFSOCK {
                 _ = unlink(socketPath)
             }
+        }
+
+        if lockFd >= 0 {
+            _ = flock(lockFd, LOCK_UN)
+            close(lockFd)
+            lockFd = -1
         }
     }
 }

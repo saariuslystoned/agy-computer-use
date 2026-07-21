@@ -7,6 +7,7 @@ public enum ComputerUseError: Error, Equatable, Codable, Sendable {
     case outOfBounds(x: Int, y: Int, limitX: Int, limitY: Int)
     case velocityExceeded(requestedSpeed: Double, maxSpeed: Double)
     case targetUnreachable(reason: String)
+    case captureBusy(reason: String)
     case permissionDenied(permission: String)
     case mutationDisabled
     case timeout(operation: String, seconds: Double)
@@ -21,6 +22,7 @@ public enum ComputerUseError: Error, Equatable, Codable, Sendable {
         case .outOfBounds: return "OUT_OF_BOUNDS"
         case .velocityExceeded: return "VELOCITY_EXCEEDED"
         case .targetUnreachable: return "TARGET_UNREACHABLE"
+        case .captureBusy: return "CAPTURE_BUSY"
         case .permissionDenied: return "PERMISSION_DENIED"
         case .mutationDisabled: return "MUTATION_DISABLED"
         case .timeout: return "TIMEOUT"
@@ -43,6 +45,8 @@ public enum ComputerUseError: Error, Equatable, Codable, Sendable {
             return "Mouse movement velocity \(speed) exceeds safety threshold \(maxSpeed)."
         case .targetUnreachable(let reason):
             return "Target element or coordinate unreachable: \(reason)."
+        case .captureBusy(let reason):
+            return "Physical capture engine busy: \(reason)."
         case .permissionDenied(let permission):
             return "Required macOS TCC permission missing: \(permission)."
         case .mutationDisabled:
