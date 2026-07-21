@@ -1309,7 +1309,10 @@ public struct ComputerUseHostTestRunner {
         let frame = try FakeCaptureEngine().generateDTO(topology: FakeDisplayTopologyProvider().getTopology())
         try await controlledEngine.complete(index: 0, with: .success(frame))
         await controlledEngine.waitUntilExited(count: 1)
-
+        for _ in 0..<100 {
+            if budget.count == 0 { break }
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
         assertEqual(budget.count, 0, "Budget must be released on physical capture exit")
         assertEqual(await server.latestCaptureSnapshot, nil, "Cancelled request must never promote capture frame")
     }
