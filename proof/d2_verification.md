@@ -2,8 +2,8 @@
 
 - **Date**: 2026-07-21
 - **Branch**: `codex/bobby-computer-use-v0-20260721t174022z-a9ab71173113`
-- **Parent Source Commit**: `681aaab9f1b71da024313188aa5f34dde13f4925`
-- **Scope**: Milestone D2 Production-Bounded Native Observation Slice (Exact-Head 9a1 Architecture & Test-Authority Closure)
+- **Parent Source Commit**: `e06527716c2280550a2760a9b9359b0117ee5ae2`
+- **Scope**: Milestone D2 Production-Bounded Native Observation Slice (Exact-Head 9a1 Architecture & Research Addendum Closure)
 
 ---
 
@@ -65,10 +65,10 @@ Executed via `./bin/agy-computer-use test-native` (Swift 5.10 strict concurrency
 1. **Protocol Schema Definition**:
    - `docs/protocol_schema.json` defines method-specific strict status, observe, and error request/response subschemas with `additionalProperties: false`.
 2. **Golden JSON Fixture Suite**:
+   - Explicit fixture-to-schema mapping (`FIXTURE_MAPPINGS`) validates active D2 request, response, and error fixtures against Ajv and Zod.
    - `status_request.json` & `status_response.json`: Validated against Ajv protocol schema and Zod `StatusDataSchema`.
    - `observe_request.json` & `observe_response.json`: Validated against Ajv protocol schema, Zod `ObserveDataSchema`, and `validateAndDecodeBase64JPEG` asserting embedded JPEG SOF0 markers match `100x100` declared pixel dimensions.
    - `permission_denied_response.json`, `stale_topology_response.json`, `timeout_response.json`: Validated as error response fixtures.
-   - Quarantined disabled action/AX fixtures (`click_request_disabled.json`, `invalid_click_request_negative.json`) verified.
 
 ---
 
@@ -77,9 +77,9 @@ Executed via `./bin/agy-computer-use test-native` (Swift 5.10 strict concurrency
 Executed via `cd mcp/computer-use-mcp && pnpm check && pnpm test`:
 
 ```text
-# tests 30
+# tests 31
 # suites 2
-# pass 30
+# pass 31
 # fail 0
 # cancelled 0
 # skipped 0
@@ -88,11 +88,12 @@ Executed via `cd mcp/computer-use-mcp && pnpm check && pnpm test`:
 
 - **Tool Inventory**: `computer_use_status` and `computer_use_observe` (Exactly 2 tools).
 - **Adversarial & Hardening Tests**:
-  - `parseJPEGDimensions` strict SOF/SOS/EOI validation and dimension match.
-  - Base64 pre-allocation size check: Decoded length verified <= 10 MiB before `Buffer.from()` allocation.
+  - `parseJPEGDimensions` structural validation (SOF0/SOF2, SOS, entropy stuffing/restarts, terminal EOI, no trailing garbage).
+  - Decoder-invocation injection seam proving **zero allocation** on rejected Base64/JPEG payloads ($N+1$, $N+2$, $N+3$).
+  - Single canonical Base64 decoding path (`validateAndDecodeBase64JPEG`).
   - Host client response ID matching (`parsedResp.id === reqId`).
   - Post-dispatch mutation error mapping to `ACTION_OUTCOME_UNKNOWN`.
-  - Signal propagation and `display_id` argument runtime Zod checks.
+  - Signal propagation and `display_id` argument normalization and runtime Zod checks.
   - Strict Zod schemas (`.strict()`) and finite numbers (`.finite()`).
 - **Skill Sync**: 100% byte-for-byte identity verified between `.agents/skills/computer-use/` and `skills/computer-use/`.
 
