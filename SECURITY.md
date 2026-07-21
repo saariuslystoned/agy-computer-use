@@ -14,7 +14,7 @@ Security issues should be reported confidentially. Do NOT open public GitHub iss
 ### Security Principles & Boundaries
 
 1. **Owner-Only IPC & Peer Admission**:
-   - The IPC socket for `agy-computer-use` resides in a Darwin per-user directory (`/tmp/agy-computer-use-$UID`) created with `umask 077` (`chmod 0700`).
+   - The IPC socket for `agy-computer-use` resides in a Darwin per-user directory (`/tmp/agy-computer-use-$UID/host.sock`) created with `umask 077` (`chmod 0700`).
    - On macOS, peer UID is checked via `getpeereid` or `SOL_LOCAL / LOCAL_PEERCRED` (never Linux `SO_PEERCRED`).
    - **Residual Threat Boundary**: Peer UID is an admission filter, not full privilege authorization. Malicious same-UID unprivileged local processes can connect to the socket. Future revisions will enforce authenticated client token bindings (`AUTH_SECRET` handshake).
    - Socket directory checks enforce fail-closed `lstat` verification of owner (`uid`), permission mode (`0700`), and non-symlink status before binding, and never unlink live sockets.

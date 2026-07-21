@@ -113,9 +113,9 @@ async function main() {
   }
 
   if (subcommand === "test-native") {
-    log("Building and running portable native test runner...");
+    log("Building and running portable native test runner with strict concurrency flags...");
     const hostDir = path.join(rootDir, "apps/computer-use-host");
-    execSync("swift run ComputerUseHostTestRunner", { cwd: hostDir, stdio: "inherit" });
+    execSync("swift run -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors ComputerUseHostTestRunner", { cwd: hostDir, stdio: "inherit" });
     log("Portable native test suite execution complete.");
     process.exit(0);
   }

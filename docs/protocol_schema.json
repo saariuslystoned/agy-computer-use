@@ -3,20 +3,29 @@
   "title": "ComputerUseIPCProtocol",
   "description": "IPC Request and Response Schemas between MCP Server and ComputerUseHost Native App (Milestone D2)",
   "oneOf": [
-    { "$ref": "#/definitions/IPCRequest" },
-    { "$ref": "#/definitions/IPCResponse" }
+    { "$ref": "#/definitions/StatusRequest" },
+    { "$ref": "#/definitions/ObserveRequest" },
+    { "$ref": "#/definitions/StatusResponse" },
+    { "$ref": "#/definitions/ObserveResponse" },
+    { "$ref": "#/definitions/ErrorResponse" }
   ],
   "definitions": {
-    "IPCRequest": {
+    "StatusRequest": {
       "type": "object",
       "required": ["id", "method"],
       "additionalProperties": false,
       "properties": {
         "id": { "type": "string", "minLength": 1 },
-        "method": {
-          "type": "string",
-          "enum": ["status", "observe"]
-        },
+        "method": { "const": "status" }
+      }
+    },
+    "ObserveRequest": {
+      "type": "object",
+      "required": ["id", "method"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "method": { "const": "observe" },
         "params": {
           "type": "object",
           "additionalProperties": false,
@@ -26,14 +35,139 @@
         }
       }
     },
-    "IPCResponse": {
+    "DisplayInfo": {
       "type": "object",
-      "required": ["id", "success"],
+      "required": [
+        "id",
+        "width_points",
+        "height_points",
+        "scale_factor",
+        "origin_x",
+        "origin_y",
+        "pixel_width",
+        "pixel_height",
+        "rotation"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "integer", "minimum": 1 },
+        "width_points": { "type": "number", "exclusiveMinimum": 0 },
+        "height_points": { "type": "number", "exclusiveMinimum": 0 },
+        "scale_factor": { "type": "number", "exclusiveMinimum": 0 },
+        "origin_x": { "type": "number" },
+        "origin_y": { "type": "number" },
+        "pixel_width": { "type": "integer", "minimum": 1 },
+        "pixel_height": { "type": "integer", "minimum": 1 },
+        "rotation": { "type": "number" }
+      }
+    },
+    "DisplayTopology": {
+      "type": "object",
+      "required": ["version", "primary_display_id", "displays"],
+      "additionalProperties": false,
+      "properties": {
+        "version": { "type": "string", "pattern": "^top-sha256-[0-9a-f]{64}$" },
+        "primary_display_id": { "type": "integer", "minimum": 1 },
+        "displays": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/definitions/DisplayInfo" }
+        }
+      }
+    },
+    "StatusResponse": {
+      "type": "object",
+      "required": ["id", "success", "data"],
       "additionalProperties": false,
       "properties": {
         "id": { "type": "string", "minLength": 1 },
-        "success": { "type": "boolean" },
-        "data": { "type": "object" },
+        "success": { "const": true },
+        "data": {
+          "type": "object",
+          "required": [
+            "connected",
+            "tcc_permission_state",
+            "accessibility_available",
+            "accessibility_trusted",
+            "input_mutation_state",
+            "topology_version",
+            "primary_display_id",
+            "display_count",
+            "topology"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "connected": { "type": "boolean" },
+            "tcc_permission_state": { "enum": ["granted", "denied"] },
+            "accessibility_available": { "type": "boolean" },
+            "accessibility_trusted": { "type": "boolean" },
+            "input_mutation_state": { "enum": ["enabled", "disabled"] },
+            "topology_version": { "type": "string", "pattern": "^top-sha256-[0-9a-f]{64}$" },
+            "primary_display_id": { "type": "integer", "minimum": 1 },
+            "display_count": { "type": "integer", "minimum": 1 },
+            "topology": { "$ref": "#/definitions/DisplayTopology" }
+          }
+        }
+      }
+    },
+    "ObserveResponse": {
+      "type": "object",
+      "required": ["id", "success", "data"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "success": { "const": true },
+        "data": {
+          "type": "object",
+          "required": [
+            "capture_id",
+            "timestamp",
+            "topology_version",
+            "display_id",
+            "width_points",
+            "height_points",
+            "scale_factor",
+            "pixel_width",
+            "pixel_height",
+            "image_format",
+            "image_data_base64",
+            "normalized_bounds"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "capture_id": { "type": "string", "minLength": 1 },
+            "timestamp": { "type": "integer", "minimum": 0 },
+            "topology_version": { "type": "string", "pattern": "^top-sha256-[0-9a-f]{64}$" },
+            "display_id": { "type": "integer", "minimum": 1 },
+            "width_points": { "type": "number", "exclusiveMinimum": 0 },
+            "height_points": { "type": "number", "exclusiveMinimum": 0 },
+            "scale_factor": { "type": "number", "exclusiveMinimum": 0 },
+            "pixel_width": { "type": "integer", "minimum": 1 },
+            "pixel_height": { "type": "integer", "minimum": 1 },
+            "image_format": { "const": "jpeg" },
+            "image_data_base64": { "type": "string", "minLength": 1 },
+            "normalized_bounds": {
+              "type": "object",
+              "required": ["min_x", "min_y", "max_x", "max_y"],
+              "additionalProperties": false,
+              "properties": {
+                "min_x": { "const": 0 },
+                "min_y": { "const": 0 },
+                "max_x": { "const": 999 },
+                "max_y": { "const": 999 }
+              }
+            }
+          }
+        }
+      }
+    },
+    "ErrorResponse": {
+      "type": "object",
+      "required": ["id", "success", "error"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "success": { "const": false },
         "error": {
           "type": "object",
           "required": ["code", "message"],
@@ -44,21 +178,7 @@
             "details": { "type": "object" }
           }
         }
-      },
-      "oneOf": [
-        {
-          "properties": {
-            "success": { "const": true }
-          },
-          "required": ["data"]
-        },
-        {
-          "properties": {
-            "success": { "const": false }
-          },
-          "required": ["error"]
-        }
-      ]
+      }
     }
   }
 }

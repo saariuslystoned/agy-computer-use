@@ -1,5 +1,33 @@
 import Foundation
 
+private final class OneShotResolver<T: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var resumed = false
+    private let continuation: CheckedContinuation<T, Error>
+
+    init(continuation: CheckedContinuation<T, Error>) {
+        self.continuation = continuation
+    }
+
+    func resolveSuccess(_ value: T) {
+        lock.lock()
+        defer { lock.unlock() }
+        if !resumed {
+            resumed = true
+            continuation.resume(returning: value)
+        }
+    }
+
+    func resolveFailure(_ error: Error) {
+        lock.lock()
+        defer { lock.unlock() }
+        if !resumed {
+            resumed = true
+            continuation.resume(throwing: error)
+        }
+    }
+}
+
 public actor HostServer {
     private var isConnected: Bool = false
     private let authorizer: ScreenRecordingAuthorizing
@@ -97,7 +125,7 @@ public actor HostServer {
                 let generation = latestIssuedGeneration
                 self.latestCapture = nil
 
-                // Nonisolated actor-safe deadline execution
+                // Nonisolated actor-safe deadline execution with immediate prompt return
                 let frame = try await HostServer.executeObservationWithDeadline(
                     captureEngine: captureEngine,
                     targetDisplayId: targetDisplayId,
@@ -190,20 +218,24 @@ public actor HostServer {
         initialTopology: DisplayTopology,
         timeoutSec: Double
     ) async throws -> CaptureFrameDTO {
-        let timeoutNano = UInt64(timeoutSec * 1_000_000_000)
-        return try await withThrowingTaskGroup(of: CaptureFrameDTO.self) { group in
-            group.addTask {
-                try await captureEngine.captureDisplay(displayId: targetDisplayId, topology: initialTopology)
+        return try await withCheckedThrowingContinuation { continuation in
+            let resolver = OneShotResolver(continuation: continuation)
+
+            let captureTask = Task {
+                do {
+                    let frame = try await captureEngine.captureDisplay(displayId: targetDisplayId, topology: initialTopology)
+                    resolver.resolveSuccess(frame)
+                } catch {
+                    resolver.resolveFailure(error)
+                }
             }
-            group.addTask {
-                try await Task.sleep(nanoseconds: timeoutNano)
-                throw ComputerUseError.timeout(operation: "observe", seconds: timeoutSec)
+
+            let timeoutNano = UInt64(timeoutSec * 1_000_000_000)
+            Task {
+                try? await Task.sleep(nanoseconds: timeoutNano)
+                captureTask.cancel()
+                resolver.resolveFailure(ComputerUseError.timeout(operation: "observe", seconds: timeoutSec))
             }
-            guard let firstResult = try await group.next() else {
-                throw ComputerUseError.ipcError(reason: "Observation task group produced no result")
-            }
-            group.cancelAll()
-            return firstResult
         }
     }
 

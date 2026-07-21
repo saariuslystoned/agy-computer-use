@@ -20,7 +20,7 @@ Work is partitioned into dependency-ordered milestones (M0–M9 & Dogfood D1–D
 | **M7** | Antigravity Skill Definition & Safety Guardrails | `IMPLEMENTED & TESTED` | `.agents/skills/computer-use/SKILL.md` |
 | **M8** | Continuous Integration & End-to-End Verification Suite | `IMPLEMENTED & TESTED` | `./bin/agy-computer-use test-native`, `pnpm test`, `.github/workflows/ci.yml` |
 | **D1** | Dogfood Harness Canary & Read-Only Vision Verification | `IMPLEMENTED & TESTED` | `computer_use_canary_screenshot`, `proof/v0.1_verification.md` |
-| **D2** | Production-Bounded Native Observation Slice (Closure Slice) | `IMPLEMENTED & TESTED` | `ComputerUseHostTestRunner` (13 native tests), `SCScreenshotCaptureEngine`, `SystemDisplayTopologyProvider`, `HostServer` generation gate, `DisabledInputInjector`, `DisabledAXInspector`, `proof/d2_verification.md` |
+| **D2** | Production-Bounded Native Observation Slice (Closure Slice) | `IMPLEMENTED & TESTED` | `ComputerUseHostTestRunner` (authoritative native tests), `SCScreenshotCaptureEngine`, `SystemDisplayTopologyProvider`, `HostServer` generation gate, `DisabledInputInjector`, `DisabledAXInspector`, `proof/d2_verification.md` |
 | **M9** | Production Input Synthesis (CGEvent) & Signed App Bundle | `GATED / FUTURE` | Requires signed `ComputerUseHost.app` bundle and active TCC authorization |
 
 ---
@@ -61,9 +61,9 @@ Work is partitioned into dependency-ordered milestones (M0–M9 & Dogfood D1–D
 ### D2: Production-Bounded Native Observation Slice (Test Authority Closure)
 - **Status**: Implemented & Tested
 - **Key Deliverables & Repairs**:
-  - Authoritative native test runner (`./bin/agy-computer-use test-native`) executing 13 named native test cases.
+  - Authoritative native test runner (`./bin/agy-computer-use test-native`) executing required named native test cases.
   - Strict-concurrency compilation with warnings as errors (`swift build -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors`).
-  - Pure test target isolation under `Tests/ComputerUseHostTestRunner`. Demangled release executable contains zero `fake`, `test`, `spy`, `scripted`, or `continuation` symbols.
+  - Pure test target isolation under `Tests/ComputerUseHostTestRunner`. Demangled release executable contains zero test-double family symbols (`Fake`, `Spy`, `Scripted`, `Mock`, `TestDouble`, `TestRunner`, `TestHelper`).
   - Nonisolated static observation deadline helper (`executeObservationWithDeadline`) preventing actor isolation leaks under Swift 5.10.
   - Generation allocation counter (`latestIssuedGeneration`) with immediate lease invalidation before await.
   - ContinuousClock UDS monotonic deadlines and separate phase budgets.

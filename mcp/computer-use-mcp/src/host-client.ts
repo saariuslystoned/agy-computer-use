@@ -141,12 +141,17 @@ export class MockHostClient implements HostClient {
 
 const MUTATION_METHODS = new Set(["click", "move", "drag", "type", "shortcut", "scroll"]);
 
+export function getDefaultSocketPath(): String {
+  const uid = process.getuid ? process.getuid() : 501;
+  return process.env.AGY_SOCKET_PATH || `/tmp/agy-computer-use-${uid}/host.sock`;
+}
+
 export class UnixSocketHostClient implements HostClient {
   private socketPath: string;
   private timeoutMs: number;
 
-  constructor(socketPath: string = "/tmp/agy-computer-use/host.sock", timeoutMs: number = 5000) {
-    this.socketPath = socketPath;
+  constructor(socketPath?: string, timeoutMs: number = 5000) {
+    this.socketPath = socketPath || (getDefaultSocketPath() as string);
     this.timeoutMs = timeoutMs;
   }
 
@@ -294,11 +299,19 @@ export class UnixSocketHostClient implements HostClient {
             expectedLen = responseBuffer.readUInt32BE(0);
             if (expectedLen > 16 * 1024 * 1024) {
               clearTimeout(timer);
-              finish({
-                id: reqId,
-                success: false,
-                error: { code: "RESPONSE_TOO_LARGE", message: `Response payload length ${expectedLen} exceeds 16MB limit` }
-              });
+              if (isDispatched) {
+                finish({
+                  id: reqId,
+                  success: false,
+                  error: { code: "ACTION_OUTCOME_UNKNOWN", message: `Oversized response payload length ${expectedLen} after mutation dispatch` }
+                });
+              } else {
+                finish({
+                  id: reqId,
+                  success: false,
+                  error: { code: "RESPONSE_TOO_LARGE", message: `Response payload length ${expectedLen} exceeds 16MB limit` }
+                });
+              }
               return;
             }
           }
@@ -311,20 +324,36 @@ export class UnixSocketHostClient implements HostClient {
             const rawObj = JSON.parse(jsonBuf.toString("utf-8"));
             const parsedResp = IPCResponseSchema.parse(rawObj);
             if (parsedResp.id !== reqId) {
-              finish({
-                id: reqId,
-                success: false,
-                error: { code: "ID_MISMATCH", message: `IPC response ID '${parsedResp.id}' does not match request ID '${reqId}'` }
-              });
+              if (isDispatched) {
+                finish({
+                  id: reqId,
+                  success: false,
+                  error: { code: "ACTION_OUTCOME_UNKNOWN", message: `Response ID mismatch '${parsedResp.id}' after mutation dispatch` }
+                });
+              } else {
+                finish({
+                  id: reqId,
+                  success: false,
+                  error: { code: "ID_MISMATCH", message: `IPC response ID '${parsedResp.id}' does not match request ID '${reqId}'` }
+                });
+              }
               return;
             }
             finish(parsedResp);
           } catch (parseErr: any) {
-            finish({
-              id: reqId,
-              success: false,
-              error: { code: "INVALID_RESPONSE", message: `Failed to parse IPC response JSON: ${parseErr.message}` }
-            });
+            if (isDispatched) {
+              finish({
+                id: reqId,
+                success: false,
+                error: { code: "ACTION_OUTCOME_UNKNOWN", message: `Response parse error after mutation dispatch: ${parseErr.message}` }
+              });
+            } else {
+              finish({
+                id: reqId,
+                success: false,
+                error: { code: "INVALID_RESPONSE", message: `Failed to parse IPC response JSON: ${parseErr.message}` }
+              });
+            }
           }
         }
       });

@@ -9,7 +9,7 @@ Distribution of native Swift binaries alongside Node-based MCP server packages r
 ## Decision
 1. **Swift Host Packaging**:
    - Packaged as a standard macOS Swift Package (`apps/computer-use-host`) buildable via `swift build`.
-   - Production releases wrap the executable into a signed `.app` bundle with `Info.plist` key declarations (`NSAccessibilityUsageDescription`, `NSScreenCaptureUsageDescription`).
+   - Production releases wrap the executable into a signed `.app` bundle with `Info.plist` key declarations (`NSScreenCaptureUsageDescription`).
 2. **TypeScript MCP Packaging**:
    - Packaged in `mcp/computer-use-mcp` with `package.json` declaring `packageManager: "pnpm@10.33.0"`.
 3. **Monorepo Structure**:

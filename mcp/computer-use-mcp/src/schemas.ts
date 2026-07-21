@@ -1,5 +1,11 @@
 import { z } from "zod";
 
+export const StatusInputSchema = z.object({}).strict();
+
+export const ObserveInputSchema = z.object({
+  display_id: z.number().int().min(1).finite().optional()
+}).strict();
+
 export const TopologyVersionSchema = z
   .string()
   .regex(/^top-sha256-[0-9a-f]{64}$/, {
@@ -15,6 +21,17 @@ export const Base64ImageSchema = z.string().superRefine((data, ctx) => {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Base64 image string contains invalid characters" });
     return;
   }
+
+  // Pre-allocation limit check
+  let paddingCount = 0;
+  if (data.endsWith("==")) paddingCount = 2;
+  else if (data.endsWith("=")) paddingCount = 1;
+  const decodedLen = Math.floor((data.length * 3) / 4) - paddingCount;
+  if (decodedLen > 10 * 1024 * 1024) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Decoded image data size exceeds 10 MiB limit" });
+    return;
+  }
+
   try {
     const buf = Buffer.from(data, "base64");
     if (buf.toString("base64") !== data) {

@@ -1,0 +1,7 @@
+{
+  "id": "observe-req-001",
+  "method": "observe",
+  "params": {
+    "display_id": 1
+  }
+}

@@ -13,6 +13,12 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      - name: Select Xcode & Verify Swift Toolchain
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode_15.4.app || true
+          swift --version | grep -E "Swift version 5\.10"
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
@@ -34,7 +40,35 @@ jobs:
         run: |
           set -euo pipefail
           TEST_OUT=$(./bin/agy-computer-use test-native 2>&1 | tee /dev/stderr)
-          echo "$TEST_OUT" | grep -E "Executed 16 native test cases successfully"
+          echo "$TEST_OUT" | grep -E "Executed 28 native test cases successfully"
+          echo "$TEST_OUT" | grep -F "testLengthPrefixedFraming"
+          echo "$TEST_OUT" | grep -F "testOversizedFramingHeaderRejection"
+          echo "$TEST_OUT" | grep -F "testDirectoryPreparation"
+          echo "$TEST_OUT" | grep -F "testUDSClientServerRoundTrip"
+          echo "$TEST_OUT" | grep -F "testPostTimeoutUDSRecovery"
+          echo "$TEST_OUT" | grep -F "testSlowDripHeaderTimeout"
+          echo "$TEST_OUT" | grep -F "testSlowDripBodyTimeout"
+          echo "$TEST_OUT" | grep -F "testBlockedResponseWriteTimeout"
+          echo "$TEST_OUT" | grep -F "testPeerCloseAndPartialIO"
+          echo "$TEST_OUT" | grep -F "testEINTRRetryPath"
+          echo "$TEST_OUT" | grep -F "testTimeoutResponseFollowedByNextClient"
+          echo "$TEST_OUT" | grep -F "testLiveSocketCollisionRefusal"
+          echo "$TEST_OUT" | grep -F "testVerifiedStaleSocketRecovery"
+          echo "$TEST_OUT" | grep -F "testForeignSymlinkNonSocketRefusal"
+          echo "$TEST_OUT" | grep -F "testStopNeverUnlinksReplacementInode"
+          echo "$TEST_OUT" | grep -F "testIEEE754BitPatternTopologyGoldenVectorAndMutations"
+          echo "$TEST_OUT" | grep -F "testHotPlugSafeDisplayEnumerator"
+          echo "$TEST_OUT" | grep -F "testPermissionPreflightDeniedZeroLoaderCalls"
+          echo "$TEST_OUT" | grep -F "testPureJPEGValidatorExactAndNear10MiBBoundaries"
+          echo "$TEST_OUT" | grep -F "testSOF0AndSOF2MarkerValidation"
+          echo "$TEST_OUT" | grep -F "testJPEGInvalidMagicTruncatedSegmentAndMismatchRejection"
+          echo "$TEST_OUT" | grep -F "testNoncooperativeLateCompletionGenerationFence"
+          echo "$TEST_OUT" | grep -F "testTopologyChangeDuringCaptureDiscarded"
+          echo "$TEST_OUT" | grep -F "testDisabledActionsAndAXTreeRejection"
+          echo "$TEST_OUT" | grep -F "testDisplayIdParameterValidation"
+          echo "$TEST_OUT" | grep -F "testNoncooperativeObservationDeadlineElapsedTime"
+          echo "$TEST_OUT" | grep -F "test64MegapixelSafetyPreCheckRejection"
+          echo "$TEST_OUT" | grep -F "testCancellationErrorMappedToCancelledCode"
 
       - name: Build Release Executable & Guard Binary Symbols
         run: |
@@ -42,7 +76,10 @@ jobs:
           cd apps/computer-use-host
           swift build -c release -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors
           BIN_PATH=$(swift build -c release --show-bin-path)/ComputerUseHost
+          test -f "$BIN_PATH"
           ! nm "$BIN_PATH" | swift demangle | grep -iE "Fake|Spy|Scripted|Mock|TestDouble|TestRunner|TestHelper"
+          # Verify missing binary probe fails closed
+          ! nm /nonexistent/path/ComputerUseHost >/dev/null 2>&1
 
       - name: Build & Test TypeScript MCP Server
         run: |

@@ -1,6 +1,10 @@
 import Foundation
 
 public final class SocketListener: @unchecked Sendable {
+    public static var defaultSocketPath: String {
+        return "/tmp/agy-computer-use-\(getuid())/host.sock"
+    }
+
     public let socketPath: String
     private let server: HostServer
     private var serverFd: Int32 = -1
@@ -9,8 +13,8 @@ public final class SocketListener: @unchecked Sendable {
     private let lock = NSLock()
     private let perFrameTimeoutSec: Double
 
-    public init(socketPath: String = "/tmp/agy-computer-use/host.sock", server: HostServer, perFrameTimeoutSec: Double = 5.0) {
-        self.socketPath = socketPath
+    public init(socketPath: String? = nil, server: HostServer, perFrameTimeoutSec: Double = 5.0) {
+        self.socketPath = socketPath ?? SocketListener.defaultSocketPath
         self.server = server
         self.perFrameTimeoutSec = perFrameTimeoutSec
     }
@@ -22,8 +26,7 @@ public final class SocketListener: @unchecked Sendable {
             var isDir: ObjCBool = false
             if fileManager.fileExists(atPath: path, isDirectory: &isDir) {
                 if !isDir.boolValue {
-                    try fileManager.removeItem(atPath: path)
-                    try createOwnerOnlyDir(at: path)
+                    throw ComputerUseError.ipcError(reason: "Refusing to remove pre-existing non-directory file at runtime path: \(path)")
                 } else {
                     try setOwnerOnlyPermissions(at: path)
                 }
@@ -79,6 +82,31 @@ public final class SocketListener: @unchecked Sendable {
             guard (statBuf.st_mode & S_IFMT) == S_IFSOCK else {
                 throw ComputerUseError.ipcError(reason: "Refusing to unlink non-socket file at \(socketPath)")
             }
+
+            // Probe with short connect deadline to refuse live listener
+            let probeFd = socket(AF_UNIX, SOCK_STREAM, 0)
+            if probeFd >= 0 {
+                defer { close(probeFd) }
+                var probeAddr = sockaddr_un()
+                let pathBytes = socketPath.utf8CString
+                let addrLen = MemoryLayout<sa_family_t>.size + pathBytes.count
+                probeAddr.sun_len = UInt8(addrLen)
+                probeAddr.sun_family = sa_family_t(AF_UNIX)
+                withUnsafeMutableBytes(of: &probeAddr.sun_path) { ptr in
+                    ptr.initializeMemory(as: CChar.self, repeating: 0)
+                    _ = pathBytes.withUnsafeBufferPointer { bPtr in memcpy(ptr.baseAddress!, bPtr.baseAddress!, bPtr.count) }
+                }
+
+                let connRes = withUnsafePointer(to: &probeAddr) { ptr in
+                    ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { saPtr in
+                        connect(probeFd, saPtr, socklen_t(addrLen))
+                    }
+                }
+                if connRes == 0 {
+                    throw ComputerUseError.ipcError(reason: "Refusing to unlink active socket with live listener at \(socketPath)")
+                }
+            }
+
             _ = unlink(socketPath)
         }
 
@@ -250,7 +278,12 @@ public final class SocketListener: @unchecked Sendable {
                 throw ComputerUseError.timeout(operation: operation, seconds: perFrameTimeoutSec)
             }
 
-            var tv = timeval(tv_sec: Int(remainingSec), tv_usec: __darwin_suseconds_t((remainingSec - floor(remainingSec)) * 1_000_000))
+            let tvSec = Int(remainingSec)
+            var tvUsec = __darwin_suseconds_t((remainingSec - floor(remainingSec)) * 1_000_000)
+            if remainingSec > 0 && tvSec == 0 && tvUsec == 0 {
+                tvUsec = 1
+            }
+            var tv = timeval(tv_sec: tvSec, tv_usec: tvUsec)
             let optRes = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
             guard optRes == 0 else {
                 throw ComputerUseError.ipcError(reason: "Failed to set SO_RCVTIMEO socket option")
@@ -300,7 +333,12 @@ public final class SocketListener: @unchecked Sendable {
                     throw ComputerUseError.timeout(operation: "socket_write_response", seconds: perFrameTimeoutSec)
                 }
 
-                var tv = timeval(tv_sec: Int(remainingSec), tv_usec: __darwin_suseconds_t((remainingSec - floor(remainingSec)) * 1_000_000))
+                let tvSec = Int(remainingSec)
+                var tvUsec = __darwin_suseconds_t((remainingSec - floor(remainingSec)) * 1_000_000)
+                if remainingSec > 0 && tvSec == 0 && tvUsec == 0 {
+                    tvUsec = 1
+                }
+                var tv = timeval(tv_sec: tvSec, tv_usec: tvUsec)
                 let optRes = setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
                 guard optRes == 0 else {
                     throw ComputerUseError.ipcError(reason: "Failed to set SO_SNDTIMEO socket option")

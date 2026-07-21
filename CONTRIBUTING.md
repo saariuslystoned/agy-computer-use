@@ -6,18 +6,18 @@ Thank you for contributing! Please review these guidelines before submitting pul
 
 ### Toolchain Requirements
 - **macOS**: macOS 14.0+ (Sonoma)
-- **Swift**: Swift 5.9+ / Xcode Command Line Tools
+- **Swift**: Swift 5.10 / Xcode 15.4+
 - **Node.js**: `v22.23.1`
 - **pnpm**: `10.33.0`
 - **Mise**: Used for runtime management (`.mise.toml`)
 
 ### Building and Testing
 
-1. **Swift Host Package (`apps/computer-use-host`)**:
+1. **Swift Host Package & Native Test Authority**:
    ```bash
+   ./bin/agy-computer-use test-native
    cd apps/computer-use-host
    swift build
-   swift test
    ```
 
 2. **TypeScript MCP Server Package (`mcp/computer-use-mcp`)**:

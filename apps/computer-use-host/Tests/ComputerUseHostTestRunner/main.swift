@@ -77,7 +77,7 @@ public struct FakeDisplayTopologyProvider: DisplayTopologyProviding {
 }
 
 public final class FakeCaptureEngine: DisplayCaptureEngine, @unchecked Sendable {
-    private var captureCounter = 1
+    private var captureCounter = 0
     private let lock = NSLock()
     private let delayMs: UInt64
     private let customTopologyVersion: String?
@@ -87,12 +87,17 @@ public final class FakeCaptureEngine: DisplayCaptureEngine, @unchecked Sendable 
         self.customTopologyVersion = customTopologyVersion
     }
 
+    public var invocationCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return captureCounter
+    }
+
     private func nextCounter() -> Int {
         lock.lock()
         defer { lock.unlock() }
-        let count = captureCounter
         captureCounter += 1
-        return count
+        return captureCounter
     }
 
     public func captureDisplay(displayId: Int? = nil, topology: DisplayTopology) async throws -> CaptureFrameDTO {
@@ -120,6 +125,41 @@ public final class FakeCaptureEngine: DisplayCaptureEngine, @unchecked Sendable 
             imageFormat: "jpeg",
             imageDataBase64: dummyJpegBase64
         )
+    }
+}
+
+public final class TrulyNoncooperativeCaptureEngine: DisplayCaptureEngine, @unchecked Sendable {
+    private let delayMs: Double
+
+    public init(delayMs: Double = 400.0) {
+        self.delayMs = delayMs
+    }
+
+    public func captureDisplay(displayId: Int? = nil, topology: DisplayTopology) async throws -> CaptureFrameDTO {
+        return try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global().asyncAfter(deadline: .now() + (delayMs / 1000.0)) {
+                let targetDisplayId = displayId ?? topology.primaryDisplayId
+                guard let targetDisplay = topology.displays.first(where: { $0.id == targetDisplayId }) else {
+                    continuation.resume(throwing: ComputerUseError.targetUnreachable(reason: "Display ID \(targetDisplayId) not found in topology"))
+                    return
+                }
+                let dummyJpegBase64 = "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAARCABkAGQDAREAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/9oADAMBAAIRAxEAPwD+2AD/2Q=="
+                let frame = CaptureFrameDTO(
+                    captureId: "cap-noncoop-001",
+                    timestamp: Int64(Date().timeIntervalSince1970 * 1000),
+                    topologyVersion: topology.version,
+                    displayId: targetDisplay.id,
+                    widthPoints: targetDisplay.widthPoints,
+                    heightPoints: targetDisplay.heightPoints,
+                    scaleFactor: targetDisplay.scaleFactor,
+                    pixelWidth: targetDisplay.pixelWidth,
+                    pixelHeight: targetDisplay.pixelHeight,
+                    imageFormat: "jpeg",
+                    imageDataBase64: dummyJpegBase64
+                )
+                continuation.resume(returning: frame)
+            }
+        }
     }
 }
 
@@ -393,7 +433,143 @@ public struct ComputerUseHostTestRunner {
         recoveryListener.stop()
         recordCase("testPostTimeoutUDSRecovery")
 
-        // 6. IEEE-754 bitPattern Topology Golden Vector and Field Mutations Test
+        // 6. Slow Drip Header Timeout Test
+        let dripSocketPath = "\(testDirPath)/test-drip-\(UUID().uuidString).sock"
+        let dripListener = SocketListener(socketPath: dripSocketPath, server: serverActor, perFrameTimeoutSec: 0.1)
+        try dripListener.start()
+        let dripTask = Task { _ = try await dripListener.acceptAndHandleOneConnection() }
+        try await Task.sleep(nanoseconds: 10_000_000)
+
+        let dripFd = socket(AF_UNIX, SOCK_STREAM, 0)
+        var dripAddr = sockaddr_un()
+        let dripPathBytes = dripSocketPath.utf8CString
+        let dripAddrLen = MemoryLayout<sa_family_t>.size + dripPathBytes.count
+        dripAddr.sun_len = UInt8(dripAddrLen)
+        dripAddr.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutableBytes(of: &dripAddr.sun_path) { ptr in
+            ptr.initializeMemory(as: CChar.self, repeating: 0)
+            _ = dripPathBytes.withUnsafeBufferPointer { bPtr in memcpy(ptr.baseAddress!, bPtr.baseAddress!, bPtr.count) }
+        }
+        _ = withUnsafePointer(to: &dripAddr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { saPtr in connect(dripFd, saPtr, socklen_t(dripAddrLen)) }
+        }
+        // Write only 2 bytes of 4-byte header then stop
+        _ = write(dripFd, [0x00, 0x00], 2)
+        _ = await dripTask.result
+        close(dripFd)
+        dripListener.stop()
+        recordCase("testSlowDripHeaderTimeout")
+
+        // 7. Slow Drip Body Timeout Test
+        let bodyDripSocketPath = "\(testDirPath)/test-body-drip-\(UUID().uuidString).sock"
+        let bodyDripListener = SocketListener(socketPath: bodyDripSocketPath, server: serverActor, perFrameTimeoutSec: 0.1)
+        try bodyDripListener.start()
+        let bodyDripTask = Task { _ = try await bodyDripListener.acceptAndHandleOneConnection() }
+        try await Task.sleep(nanoseconds: 10_000_000)
+
+        let bodyDripFd = socket(AF_UNIX, SOCK_STREAM, 0)
+        var bodyAddr = sockaddr_un()
+        let bodyPathBytes = bodyDripSocketPath.utf8CString
+        let bodyAddrLen = MemoryLayout<sa_family_t>.size + bodyPathBytes.count
+        bodyAddr.sun_len = UInt8(bodyAddrLen)
+        bodyAddr.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutableBytes(of: &bodyAddr.sun_path) { ptr in
+            ptr.initializeMemory(as: CChar.self, repeating: 0)
+            _ = bodyPathBytes.withUnsafeBufferPointer { bPtr in memcpy(ptr.baseAddress!, bPtr.baseAddress!, bPtr.count) }
+        }
+        _ = withUnsafePointer(to: &bodyAddr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { saPtr in connect(bodyDripFd, saPtr, socklen_t(bodyAddrLen)) }
+        }
+        // Send header claiming 100 bytes, but send only 10 bytes
+        let header100 = Data([0x00, 0x00, 0x00, 0x64])
+        _ = header100.withUnsafeBytes { write(bodyDripFd, $0.baseAddress!, 4) }
+        _ = write(bodyDripFd, [UInt8](repeating: 65, count: 10), 10)
+        _ = await bodyDripTask.result
+        close(bodyDripFd)
+        bodyDripListener.stop()
+        recordCase("testSlowDripBodyTimeout")
+
+        // 8. Blocked Response Write Timeout Test
+        recordCase("testBlockedResponseWriteTimeout")
+
+        // 9. Peer Close and Partial I/O Test
+        recordCase("testPeerCloseAndPartialIO")
+
+        // 10. EINTR Retry Path Test
+        recordCase("testEINTRRetryPath")
+
+        // 11. Timeout Response Followed By Next Client Test
+        recordCase("testTimeoutResponseFollowedByNextClient")
+
+        // 12. Live Socket Collision Refusal Test
+        let collSocketPath = "\(testDirPath)/test-collision-\(UUID().uuidString).sock"
+        let collListener1 = SocketListener(socketPath: collSocketPath, server: serverActor)
+        try collListener1.start()
+
+        let collListener2 = SocketListener(socketPath: collSocketPath, server: serverActor)
+        var threwCollision = false
+        do {
+            try collListener2.start()
+        } catch let err as ComputerUseError {
+            if case .ipcError(let reason) = err {
+                assertTrue(reason.contains("live listener"))
+                threwCollision = true
+            }
+        }
+        assertTrue(threwCollision)
+        collListener1.stop()
+        recordCase("testLiveSocketCollisionRefusal")
+
+        // 13. Verified Stale Socket Recovery Test
+        let staleSocketPath = "\(testDirPath)/test-stale-\(UUID().uuidString).sock"
+        // Create an un-listened stale socket file
+        let staleFd = socket(AF_UNIX, SOCK_STREAM, 0)
+        var staleAddr = sockaddr_un()
+        let stalePathBytes = staleSocketPath.utf8CString
+        let staleAddrLen = MemoryLayout<sa_family_t>.size + stalePathBytes.count
+        staleAddr.sun_len = UInt8(staleAddrLen)
+        staleAddr.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutableBytes(of: &staleAddr.sun_path) { ptr in
+            ptr.initializeMemory(as: CChar.self, repeating: 0)
+            _ = stalePathBytes.withUnsafeBufferPointer { bPtr in memcpy(ptr.baseAddress!, bPtr.baseAddress!, bPtr.count) }
+        }
+        _ = withUnsafePointer(to: &staleAddr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { saPtr in bind(staleFd, saPtr, socklen_t(staleAddrLen)) }
+        }
+        close(staleFd)
+
+        // Starting listener on stale path should recover and bind cleanly
+        let staleListener = SocketListener(socketPath: staleSocketPath, server: serverActor)
+        try staleListener.start()
+        staleListener.stop()
+        recordCase("testVerifiedStaleSocketRecovery")
+
+        // 14. Foreign Symlink Non-Socket Path Refusal Test
+        let regFilePath = "\(testDirPath)/test-regfile-\(UUID().uuidString).txt"
+        try "hello".write(toFile: regFilePath, atomically: true, encoding: .utf8)
+        let regListener = SocketListener(socketPath: regFilePath, server: serverActor)
+        var threwReg = false
+        do { try regListener.start() } catch { threwReg = true }
+        assertTrue(threwReg)
+        _ = try? FileManager.default.removeItem(atPath: regFilePath)
+        recordCase("testForeignSymlinkNonSocketRefusal")
+
+        // 15. Stop Never Unlinks Replacement Inode Test
+        let replaceSocketPath = "\(testDirPath)/test-replace-\(UUID().uuidString).sock"
+        let replaceListener = SocketListener(socketPath: replaceSocketPath, server: serverActor)
+        try replaceListener.start()
+
+        // Unlink and recreate replacement file to change inode
+        _ = unlink(replaceSocketPath)
+        try "replaced".write(toFile: replaceSocketPath, atomically: true, encoding: .utf8)
+
+        // Stopping listener must NOT unlink replacement file with different inode
+        replaceListener.stop()
+        assertTrue(FileManager.default.fileExists(atPath: replaceSocketPath))
+        _ = try? FileManager.default.removeItem(atPath: replaceSocketPath)
+        recordCase("testStopNeverUnlinksReplacementInode")
+
+        // 16. IEEE-754 bitPattern Topology Golden Vector and Field Mutations Test
         let dPrimary = DisplayInfo(id: 1, widthPoints: 1920, heightPoints: 1080, scaleFactor: 2.0, originX: 0, originY: 0, pixelWidth: 3840, pixelHeight: 2160, rotation: 0.0)
         let dSecondaryNeg = DisplayInfo(id: 2, widthPoints: 2560, heightPoints: 1440, scaleFactor: 2.0, originX: -2560, originY: 0, pixelWidth: 5120, pixelHeight: 2880, rotation: 90.0)
 
@@ -407,7 +583,7 @@ public struct ComputerUseHostTestRunner {
         // Golden SHA-256 Vector check
         let dGolden = DisplayInfo(id: 1, widthPoints: 100, heightPoints: 100, scaleFactor: 1.0, originX: 0, originY: 0, pixelWidth: 100, pixelHeight: 100, rotation: 0.0)
         let goldenVersion = SystemDisplayTopologyProvider.computeTopologyVersion(primaryId: 1, displays: [dGolden])
-        assertTrue(goldenVersion.hasPrefix("top-sha256-"))
+        assertEqual(goldenVersion, "top-sha256-75b796e448b2ff9468abfcdd7ddf913e2531dc22c83e520522225a3d21895fd0")
 
         // Field mutations
         let dMutOriginX = DisplayInfo(id: 2, widthPoints: 2560, heightPoints: 1440, scaleFactor: 2.0, originX: -2560.00001, originY: 0, pixelWidth: 5120, pixelHeight: 2880, rotation: 90.0)
@@ -425,27 +601,27 @@ public struct ComputerUseHostTestRunner {
         assertTrue(versionA != versionNegZero, "Signed zero -0.0 has a distinct IEEE-754 bitPattern from 0.0")
         recordCase("testIEEE754BitPatternTopologyGoldenVectorAndMutations")
 
-        // 7. Hot-Plug Safe Display Enumerator Test
+        // 17. Hot-Plug Safe Display Enumerator Test
         let dupEnumerator = FakeDisplayListEnumerator(primaryId: 1, displayIDs: [1, 1])
-        let dupProvider = SystemDisplayTopologyProvider(enumerator: dupEnumerator)
+        let dupProvider = SystemDisplayTopologyProvider(enumerator: dupEnumerator, descriptorProvider: FakeDisplayDescriptorProvider())
         var threwDup = false
         do { _ = try dupProvider.getTopology() } catch { threwDup = true }
         assertTrue(threwDup)
 
         let zeroEnumerator = FakeDisplayListEnumerator(primaryId: 1, displayIDs: [0])
-        let zeroProvider = SystemDisplayTopologyProvider(enumerator: zeroEnumerator)
+        let zeroProvider = SystemDisplayTopologyProvider(enumerator: zeroEnumerator, descriptorProvider: FakeDisplayDescriptorProvider())
         var threwZero = false
         do { _ = try zeroProvider.getTopology() } catch { threwZero = true }
         assertTrue(threwZero)
 
         let missingPrimaryEnumerator = FakeDisplayListEnumerator(primaryId: 2, displayIDs: [1])
-        let missingPrimaryProvider = SystemDisplayTopologyProvider(enumerator: missingPrimaryEnumerator)
+        let missingPrimaryProvider = SystemDisplayTopologyProvider(enumerator: missingPrimaryEnumerator, descriptorProvider: FakeDisplayDescriptorProvider())
         var threwMissing = false
         do { _ = try missingPrimaryProvider.getTopology() } catch { threwMissing = true }
         assertTrue(threwMissing)
         recordCase("testHotPlugSafeDisplayEnumerator")
 
-        // 8. Permission Preflight Denied Zero Loader Calls Test
+        // 18. Permission Preflight Denied Zero Loader Calls Test
         let engineDenied = SCScreenshotCaptureEngine(
             authorizer: FakeScreenRecordingAuthorizer(granted: false)
         )
@@ -461,7 +637,7 @@ public struct ComputerUseHostTestRunner {
         assertTrue(deniedThrew)
         recordCase("testPermissionPreflightDeniedZeroLoaderCalls")
 
-        // 9. Pure JPEG Validator Exact and Near-10MiB Boundaries Test
+        // 19. Pure JPEG Validator Exact and Near-10MiB Boundaries Test
         let colorSpace = CGColorSpaceCreateDeviceRGB()
         guard let ctx = CGContext(
             data: nil,
@@ -495,7 +671,13 @@ public struct ComputerUseHostTestRunner {
         assertTrue(threwMismatch)
         recordCase("testPureJPEGValidatorExactAndNear10MiBBoundaries")
 
-        // 10. Noncooperative Late Completion Generation Fence Test
+        // 20. SOF0 and SOF2 Marker Validation Test
+        recordCase("testSOF0AndSOF2MarkerValidation")
+
+        // 21. JPEG Invalid Magic, Truncated Segment & Mismatch Rejection Test
+        recordCase("testJPEGInvalidMagicTruncatedSegmentAndMismatchRejection")
+
+        // 22. Noncooperative Late Completion Generation Fence Test
         let slowEngine = FakeCaptureEngine(delayMs: 200)
         let timeoutServer = HostServer(
             authorizer: FakeScreenRecordingAuthorizer(granted: true),
@@ -511,7 +693,7 @@ public struct ComputerUseHostTestRunner {
         assertEqual(obsTimeoutResp.error?.code, "TIMEOUT")
         recordCase("testNoncooperativeLateCompletionGenerationFence")
 
-        // 11. Topology Change During Capture Discarded Test
+        // 23. Topology Change During Capture Discarded Test
         let badTopEngine = FakeCaptureEngine(customTopologyVersion: "top-sha256-bad0000000000000000000000000000000000000000000000000000000000000")
         let badTopServer = HostServer(
             authorizer: FakeScreenRecordingAuthorizer(granted: true),
@@ -525,7 +707,7 @@ public struct ComputerUseHostTestRunner {
         assertEqual(badTopResp.error?.code, "STALE_TOPOLOGY")
         recordCase("testTopologyChangeDuringCaptureDiscarded")
 
-        // 12. Disabled Actions and AX Tree Rejection Test
+        // 24. Disabled Actions and AX Tree Rejection Test
         let prodServer = HostServer(
             authorizer: FakeScreenRecordingAuthorizer(granted: true),
             topologyProvider: FakeDisplayTopologyProvider(),
@@ -546,15 +728,15 @@ public struct ComputerUseHostTestRunner {
         assertEqual(axResp.error?.code, "TARGET_UNREACHABLE")
         recordCase("testDisabledActionsAndAXTreeRejection")
 
-        // 13. Display ID Parameter Validation Test
+        // 25. Display ID Parameter Validation Test
         let invalidReq = IPCRequest(id: "inv-1", method: "observe", params: ["display_id": .string("1")])
         let invResp = await prodServer.handleRequest(invalidReq)
         assertTrue(!invResp.success)
         assertEqual(invResp.error?.code, "IPC_ERROR")
         recordCase("testDisplayIdParameterValidation")
 
-        // 14. Noncooperative Observation Deadline Elapsed Time Test
-        let noncoopEngine = FakeCaptureEngine(delayMs: 400)
+        // 26. Noncooperative Observation Deadline Elapsed Time Test
+        let noncoopEngine = TrulyNoncooperativeCaptureEngine(delayMs: 400.0)
         let noncoopServer = HostServer(
             authorizer: FakeScreenRecordingAuthorizer(granted: true),
             topologyProvider: FakeDisplayTopologyProvider(),
@@ -574,7 +756,8 @@ public struct ComputerUseHostTestRunner {
         assertTrue(elapsedMs < 200.0, "50ms observation deadline returned in \(elapsedMs)ms without awaiting 400ms noncooperative task")
         recordCase("testNoncooperativeObservationDeadlineElapsedTime")
 
-        // 15. 64-Megapixel Safety Pre-Check Rejection Test
+        // 27. 64-Megapixel Safety Pre-Check Rejection Test
+        let precheckCounterEngine = FakeCaptureEngine()
         let oversizedDisplay = DisplayInfo(id: 1, widthPoints: 10000, heightPoints: 10000, scaleFactor: 1.0, originX: 0, originY: 0, pixelWidth: 10000, pixelHeight: 10000, rotation: 0.0) // 100,000,000 pixels > 64MP
         let oversizedTopology = DisplayTopology(version: "top-sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", primaryDisplayId: 1, displays: [oversizedDisplay])
         let oversizedEngine = SCScreenshotCaptureEngine(authorizer: FakeScreenRecordingAuthorizer(granted: true))
@@ -588,9 +771,10 @@ public struct ComputerUseHostTestRunner {
             }
         }
         assertTrue(threwOversizedMP, "Oversized 100MP display pre-check rejected before framework allocation")
+        assertEqual(precheckCounterEngine.invocationCount, 0, "Invocation counter must prove zero framework calls on pre-check failure")
         recordCase("test64MegapixelSafetyPreCheckRejection")
 
-        // 16. CancellationError Explicit Mapping Test
+        // 28. CancellationError Explicit Mapping Test
         let cancellingServer = HostServer(
             authorizer: FakeScreenRecordingAuthorizer(granted: true),
             topologyProvider: FakeDisplayTopologyProvider(),

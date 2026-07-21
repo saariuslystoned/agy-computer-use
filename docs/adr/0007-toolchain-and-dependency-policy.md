@@ -10,7 +10,7 @@ MCP servers communicate with language models via JSON-RPC messages sent over sta
 1. **Toolchain Pins**:
    - Node.js pinned to `22.23.1`.
    - pnpm pinned to `10.33.0`.
-   - Use official production `@modelcontextprotocol/sdk` (`^1.6.0`).
+   - Use official production `@modelcontextprotocol/sdk` (`1.29.0`).
 2. **Strict Stdio Hygiene**:
    - Standard output (`stdout`) is strictly reserved for MCP JSON-RPC protocol frames.
    - All server logging, diagnostic messages, and debug output must route strictly to `stderr`.

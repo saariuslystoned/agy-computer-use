@@ -24,6 +24,6 @@
 
 ## Security & IPC Boundaries
 
-- **Local IPC Security**: Unix domain socket path `/tmp/agy-computer-use-$UID/agy-computer-use.sock` with directory permissions set to `0700`.
+- **Local IPC Security**: Unix domain socket path `/tmp/agy-computer-use-$UID/host.sock` with directory permissions set to `0700`.
 - **Peer Verification**: Host verifies connecting process UID. (Residual risk: unprivileged processes owned by the same UID on macOS can access the socket).
 - **Data Redaction**: Sensitive fields (`AXIsPassword`, `AXIsSecureText`) are redacted at the host level before serialization (`[REDACTED]`).

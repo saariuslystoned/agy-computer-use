@@ -5,8 +5,8 @@ import {
   ListToolsRequestSchema,
   Tool
 } from "@modelcontextprotocol/sdk/types.js";
-import { HostClient, UnixSocketHostClient } from "./host-client.js";
-import { StatusDataSchema, ObserveDataSchema } from "./schemas.js";
+import { HostClient, UnixSocketHostClient, getDefaultSocketPath } from "./host-client.js";
+import { StatusDataSchema, ObserveDataSchema, StatusInputSchema, ObserveInputSchema } from "./schemas.js";
 
 export interface JPEGDimensions {
   width: number;
@@ -19,7 +19,11 @@ export function parseJPEGDimensions(buf: Buffer): JPEGDimensions | null {
   }
 
   let offset = 2;
-  while (offset < buf.length - 8) {
+  let foundSOF = false;
+  let foundSOS = false;
+  let dimensions: JPEGDimensions | null = null;
+
+  while (offset < buf.length - 1) {
     if (buf[offset] !== 0xff) {
       offset++;
       continue;
@@ -33,11 +37,20 @@ export function parseJPEGDimensions(buf: Buffer): JPEGDimensions | null {
       const height = (buf[offset + 5] << 8) | buf[offset + 6];
       const width = (buf[offset + 7] << 8) | buf[offset + 8];
       if (width <= 0 || height <= 0) return null;
-      return { width, height };
+      dimensions = { width, height };
+      foundSOF = true;
+      offset += 2 + ((buf[offset + 2] << 8) | buf[offset + 3]);
+      continue;
     }
 
-    // Stop at SOS (0xDA) or EOI (0xD9)
-    if (marker === 0xda || marker === 0xd9) {
+    // SOS (0xDA)
+    if (marker === 0xda) {
+      foundSOS = true;
+      break;
+    }
+
+    // EOI (0xD9)
+    if (marker === 0xd9) {
       break;
     }
 
@@ -51,7 +64,11 @@ export function parseJPEGDimensions(buf: Buffer): JPEGDimensions | null {
     }
   }
 
-  return null;
+  if (!foundSOF || !foundSOS || !dimensions) {
+    return null;
+  }
+
+  return dimensions;
 }
 
 export function validateAndDecodeBase64JPEG(base64Data: string, expectedPixelWidth?: number, expectedPixelHeight?: number): Buffer {
@@ -68,6 +85,14 @@ export function validateAndDecodeBase64JPEG(base64Data: string, expectedPixelWid
     throw new Error(`Base64 payload length ${base64Data.length} exceeds maximum encoded limit ${maxEncodedChars}`);
   }
 
+  let paddingCount = 0;
+  if (base64Data.endsWith("==")) paddingCount = 2;
+  else if (base64Data.endsWith("=")) paddingCount = 1;
+  const decodedLen = Math.floor((base64Data.length * 3) / 4) - paddingCount;
+  if (decodedLen > 10 * 1024 * 1024) {
+    throw new Error(`Decoded byte size ${decodedLen} exceeds 10 MiB limit`);
+  }
+
   const imageBuffer = Buffer.from(base64Data, "base64");
 
   if (imageBuffer.toString("base64") !== base64Data) {
@@ -82,8 +107,23 @@ export function validateAndDecodeBase64JPEG(base64Data: string, expectedPixelWid
     throw new Error(`Decoded image buffer size ${imageBuffer.length} bytes exceeds 10 MiB limit`);
   }
 
-  if (imageBuffer.length < 3 || imageBuffer[0] !== 0xff || imageBuffer[1] !== 0xd8 || imageBuffer[2] !== 0xff) {
+  if (imageBuffer.length < 4 || imageBuffer[0] !== 0xff || imageBuffer[1] !== 0xd8 || imageBuffer[2] !== 0xff) {
     throw new Error("Invalid JPEG magic bytes: buffer must start with 0xFF 0xD8 0xFF");
+  }
+
+  // EOI marker check (0xFF 0xD9)
+  const eoiIdx = imageBuffer.lastIndexOf(Buffer.from([0xff, 0xd9]));
+  if (eoiIdx === -1 || eoiIdx < imageBuffer.length - 2) {
+    // Check if trailing bytes past EOI are non-zero
+    if (eoiIdx !== -1) {
+      for (let i = eoiIdx + 2; i < imageBuffer.length; i++) {
+        if (imageBuffer[i] !== 0) {
+          throw new Error("Trailing non-zero garbage bytes after JPEG EOI marker");
+        }
+      }
+    } else {
+      throw new Error("Missing JPEG EOI marker (0xFF 0xD9)");
+    }
   }
 
   if (expectedPixelWidth !== undefined && expectedPixelHeight !== undefined) {
@@ -238,6 +278,7 @@ export function createComputerUseServer(hostClient: HostClient): Server {
       properties: {
         display_id: {
           type: "integer",
+          minimum: 1,
           description: "Optional display ID to capture. Defaults to primary display."
         }
       },
@@ -255,30 +296,46 @@ export function createComputerUseServer(hostClient: HostClient): Server {
     const { name, arguments: args } = request.params;
 
     if (name === "computer_use_status") {
+      const parseRes = StatusInputSchema.safeParse(args || {});
+      if (!parseRes.success) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                error: {
+                  code: "INVALID_ARGUMENT",
+                  message: `Invalid arguments for computer_use_status: ${parseRes.error.message}`
+                }
+              }, null, 2)
+            }
+          ]
+        };
+      }
       const ipcResp = await hostClient.request("status", undefined, extra?.signal);
       return formatToolResponse(ipcResp, name);
     }
 
     if (name === "computer_use_observe") {
-      if (args?.display_id !== undefined) {
-        if (typeof args.display_id !== "number" || !Number.isInteger(args.display_id) || args.display_id < 1 || !Number.isFinite(args.display_id)) {
-          return {
-            isError: true,
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify({
-                  error: {
-                    code: "INVALID_ARGUMENT",
-                    message: "Parameter 'display_id' must be a positive integer"
-                  }
-                }, null, 2)
-              }
-            ]
-          };
-        }
+      const parseRes = ObserveInputSchema.safeParse(args || {});
+      if (!parseRes.success) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                error: {
+                  code: "INVALID_ARGUMENT",
+                  message: `Invalid arguments for computer_use_observe: ${parseRes.error.message}`
+                }
+              }, null, 2)
+            }
+          ]
+        };
       }
-      const displayId = args?.display_id as number | undefined;
+      const displayId = parseRes.data.display_id;
       const params = displayId !== undefined ? { display_id: displayId } : undefined;
       const ipcResp = await hostClient.request("observe", params, extra?.signal);
       return formatToolResponse(ipcResp, name);
@@ -304,7 +361,7 @@ export function createComputerUseServer(hostClient: HostClient): Server {
 }
 
 export async function main() {
-  const socketPath = process.env.COMPUTER_USE_SOCKET_PATH || "/tmp/agy-computer-use/host.sock";
+  const socketPath = process.env.COMPUTER_USE_SOCKET_PATH || (getDefaultSocketPath() as string);
   const hostClient = new UnixSocketHostClient(socketPath);
   const server = createComputerUseServer(hostClient);
   const transport = new StdioServerTransport();
