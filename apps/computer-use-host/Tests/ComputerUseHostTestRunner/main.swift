@@ -31,10 +31,36 @@ public final class FakeDisplayTopologyProvider: DisplayTopologyProviding, @unche
     public func getTopology() throws -> DisplayTopology { return topology }
 }
 
+public final class ScriptedDisplayListEnumerator: DisplayListEnumerating, @unchecked Sendable {
+    private let lock = NSLock()
+    private var script: [() throws -> (primaryId: Int, displayIDs: [Int])]
+
+    public init(script: [() throws -> (primaryId: Int, displayIDs: [Int])]) {
+        self.script = script
+    }
+
+    public func getActiveDisplays() throws -> (primaryId: Int, displayIDs: [Int]) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !script.isEmpty else {
+            throw ComputerUseError.targetUnreachable(reason: "Exhausted scripted display list passes")
+        }
+        return try script.removeFirst()()
+    }
+}
+
+public final class FakeDescriptorProvider: DisplayDescriptorProviding, @unchecked Sendable {
+    public init() {}
+    public func getDisplayDescriptor(id: Int) throws -> (bounds: CGRect, rotation: Double, pixelWidth: Int, pixelHeight: Int, scale: Double) {
+        return (CGRect(x: 0, y: 0, width: 1920, height: 1080), 0.0, 3840, 2160, 2.0)
+    }
+}
+
 public final class ScriptedContinuationCaptureEngine: DisplayCaptureEngine, @unchecked Sendable {
     private let lock = NSLock()
     private var continuations: [Int: CheckedContinuation<CaptureFrameDTO, Error>] = [:]
     private var nextIndex: Int = 0
+    private var waiters: [Int: [CheckedContinuation<Void, Never>]] = [:]
 
     public init() {}
 
@@ -56,7 +82,24 @@ public final class ScriptedContinuationCaptureEngine: DisplayCaptureEngine, @unc
         return try await withCheckedThrowingContinuation { continuation in
             lock.lock()
             continuations[index] = continuation
+            let pendingWaiters = waiters.removeValue(forKey: index) ?? []
             lock.unlock()
+            for waiter in pendingWaiters {
+                waiter.resume()
+            }
+        }
+    }
+
+    public func waitForContinuation(at index: Int) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            if continuations[index] != nil {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                waiters[index, default: []].append(continuation)
+                lock.unlock()
+            }
         }
     }
 
@@ -182,6 +225,102 @@ private func assertTrue(_ condition: Bool, _ msg: String = "", file: String = #f
     }
 }
 
+private func connectToSocket(at socketPath: String) throws -> Int32 {
+    let clientFd = socket(AF_UNIX, SOCK_STREAM, 0)
+    assertTrue(clientFd >= 0, "Failed to create UNIX domain socket descriptor")
+
+    var addr = sockaddr_un()
+    let pathBytes = socketPath.utf8CString
+    addr.sun_len = UInt8(MemoryLayout<sa_family_t>.size + pathBytes.count)
+    addr.sun_family = sa_family_t(AF_UNIX)
+    withUnsafeMutableBytes(of: &addr.sun_path) { ptr in
+        ptr.initializeMemory(as: CChar.self, repeating: 0)
+        _ = pathBytes.withUnsafeBufferPointer { bPtr in memcpy(ptr.baseAddress!, bPtr.baseAddress!, bPtr.count) }
+    }
+
+    let sockLen = socklen_t(addr.sun_len)
+    let connRes = withUnsafePointer(to: &addr) { ptr in
+        ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { saPtr in
+            connect(clientFd, saPtr, sockLen)
+        }
+    }
+    assertEqual(connRes, 0, "Failed to connect to UDS socket at \(socketPath)")
+    return clientFd
+}
+
+private func sendIPCRequest(_ req: IPCRequest, to clientFd: Int32) throws {
+    let reqData = try JSONEncoder().encode(req)
+    let framedReq = try LengthPrefixedFramer.encode(payload: reqData)
+    _ = framedReq.withUnsafeBytes { ptr in
+        write(clientFd, ptr.baseAddress!, framedReq.count)
+    }
+}
+
+private func readIPCResponse(from clientFd: Int32) throws -> IPCResponse {
+    var headerBuf = [UInt8](repeating: 0, count: 4)
+    var hRead = 0
+    while hRead < 4 {
+        let r = read(clientFd, &headerBuf[hRead], 4 - hRead)
+        if r > 0 {
+            hRead += r
+        } else if r == 0 {
+            throw ComputerUseError.ipcError(reason: "EOF while reading response header")
+        } else {
+            if errno == EINTR { continue }
+            throw ComputerUseError.ipcError(reason: "Socket read error errno \(errno)")
+        }
+    }
+
+    let respLen = Int(headerBuf[0]) << 24 | Int(headerBuf[1]) << 16 | Int(headerBuf[2]) << 8 | Int(headerBuf[3])
+    assertTrue(respLen > 0, "Invalid response payload length")
+
+    var respBuf = [UInt8](repeating: 0, count: respLen)
+    var totalRead = 0
+    while totalRead < respLen {
+        let r = read(clientFd, &respBuf[totalRead], respLen - totalRead)
+        if r > 0 {
+            totalRead += r
+        } else if r == 0 {
+            throw ComputerUseError.ipcError(reason: "EOF while reading response body")
+        } else {
+            if errno == EINTR { continue }
+            throw ComputerUseError.ipcError(reason: "Socket read error errno \(errno)")
+        }
+    }
+
+    return try JSONDecoder().decode(IPCResponse.self, from: Data(respBuf))
+}
+
+private func makeSyntheticJPEG(marker: UInt8, width: UInt16, height: UInt16, padToSize: Int = 0) -> Data {
+    var data = Data()
+    data.append(contentsOf: [0xFF, 0xD8])
+    data.append(contentsOf: [0xFF, marker])
+    data.append(contentsOf: [0x00, 0x0B])
+    data.append(0x08)
+    data.append(UInt8(height >> 8))
+    data.append(UInt8(height & 0xFF))
+    data.append(UInt8(width >> 8))
+    data.append(UInt8(width & 0xFF))
+    data.append(0x01)
+    data.append(contentsOf: [0x01, 0x11, 0x00])
+
+    data.append(contentsOf: [0xFF, 0xDA])
+    data.append(contentsOf: [0x00, 0x08])
+    data.append(0x01)
+    data.append(contentsOf: [0x01, 0x00])
+    data.append(contentsOf: [0x00, 0x3F, 0x00])
+
+    if padToSize > data.count + 2 {
+        let needed = padToSize - data.count - 2
+        data.append(Data(repeating: 0x00, count: needed))
+    } else {
+        data.append(0x00)
+    }
+
+    data.append(contentsOf: [0xFF, 0xD9])
+    return data
+}
+
 @main
 struct ComputerUseHostTestRunner {
     static func main() async throws {
@@ -214,7 +353,8 @@ struct ComputerUseHostTestRunner {
         recordCase("testDirectoryPreparation")
 
         // 4. UDS Client Server Round Trip Test
-        let sockPath = "/tmp/test-host-runner-\(Date().timeIntervalSince1970).sock"
+        let sockPath = "/tmp/agy-test-c4-\(UUID().uuidString)/host.sock"
+        try SocketListener.prepareDirectory(at: sockPath)
         let fakeEngine = FakeCaptureEngine()
         let server = HostServer(
             authorizer: FakeScreenRecordingAuthorizer(granted: true),
@@ -272,36 +412,466 @@ struct ComputerUseHostTestRunner {
         recordCase("testUDSClientServerRoundTrip")
 
         // 5. Post Timeout UDS Recovery Test
+        let sockPath5 = "/tmp/agy-test-c5-\(UUID().uuidString)/host.sock"
+        try SocketListener.prepareDirectory(at: sockPath5)
+        let timeoutEngine5 = TrulyNoncooperativeCaptureEngine(delayMs: 300.0)
+        let server5 = HostServer(
+            authorizer: FakeScreenRecordingAuthorizer(granted: true),
+            topologyProvider: FakeDisplayTopologyProvider(),
+            captureEngine: timeoutEngine5,
+            axEngine: DisabledAXInspector(),
+            inputEngine: DisabledInputInjector(),
+            observationTimeoutSec: 0.05 // 50ms timeout
+        )
+        let listener5 = SocketListener(socketPath: sockPath5, server: server5)
+        try listener5.start()
+
+        let acceptTask5a = Task { try await listener5.acceptAndHandleOneConnection() }
+        let clientFd5a = try connectToSocket(at: listener5.socketPath)
+        try sendIPCRequest(IPCRequest(id: "timeout-req-1", method: "observe"), to: clientFd5a)
+
+        _ = try await acceptTask5a.value
+        let resp5a = try readIPCResponse(from: clientFd5a)
+        assertEqual(resp5a.id, "timeout-req-1")
+        assertTrue(!resp5a.success)
+        assertEqual(resp5a.error?.code, "TIMEOUT")
+        close(clientFd5a)
+
+        let acceptTask5b = Task { try await listener5.acceptAndHandleOneConnection() }
+        let clientFd5b = try connectToSocket(at: listener5.socketPath)
+        try sendIPCRequest(IPCRequest(id: "recovery-req-2", method: "status"), to: clientFd5b)
+
+        _ = try await acceptTask5b.value
+        let resp5b = try readIPCResponse(from: clientFd5b)
+        assertEqual(resp5b.id, "recovery-req-2")
+        assertTrue(resp5b.success)
+        close(clientFd5b)
+
+        listener5.stop()
         recordCase("testPostTimeoutUDSRecovery")
 
         // 6. Slow Drip Header Timeout Test
+        let sockPath6 = "/tmp/agy-test-c6-\(UUID().uuidString)/host.sock"
+        try SocketListener.prepareDirectory(at: sockPath6)
+        let listener6 = SocketListener(
+            socketPath: sockPath6,
+            server: HostServer(
+                authorizer: FakeScreenRecordingAuthorizer(),
+                topologyProvider: FakeDisplayTopologyProvider(),
+                captureEngine: FakeCaptureEngine(),
+                axEngine: DisabledAXInspector(),
+                inputEngine: DisabledInputInjector()
+            )
+        )
+        try listener6.start()
+
+        let acceptTask6 = Task { try await listener6.acceptAndHandleOneConnection() }
+        let clientFd6 = try connectToSocket(at: listener6.socketPath)
+
+        let partialHeader6 = Data([0x00, 0x00])
+        _ = partialHeader6.withUnsafeBytes { ptr in write(clientFd6, ptr.baseAddress!, 2) }
+
+        let start6 = ContinuousClock().now
+        _ = try await acceptTask6.value
+        let elapsed6 = ContinuousClock().now - start6
+        let elapsedSec6 = Double(elapsed6.components.seconds) + Double(elapsed6.components.attoseconds) / 1e18
+
+        assertTrue(elapsedSec6 >= 1.8 && elapsedSec6 <= 3.5, "Header read phase deadline enforced in \(elapsedSec6)s")
+
+        let resp6 = try readIPCResponse(from: clientFd6)
+        assertTrue(!resp6.success)
+        assertEqual(resp6.error?.code, "TIMEOUT")
+
+        close(clientFd6)
+        listener6.stop()
         recordCase("testSlowDripHeaderTimeout")
 
         // 7. Slow Drip Body Timeout Test
+        let sockPath7 = "/tmp/agy-test-c7-\(UUID().uuidString)/host.sock"
+        try SocketListener.prepareDirectory(at: sockPath7)
+        let listener7 = SocketListener(
+            socketPath: sockPath7,
+            server: HostServer(
+                authorizer: FakeScreenRecordingAuthorizer(),
+                topologyProvider: FakeDisplayTopologyProvider(),
+                captureEngine: FakeCaptureEngine(),
+                axEngine: DisabledAXInspector(),
+                inputEngine: DisabledInputInjector()
+            )
+        )
+        try listener7.start()
+
+        let acceptTask7 = Task { try await listener7.acceptAndHandleOneConnection() }
+        let clientFd7 = try connectToSocket(at: listener7.socketPath)
+
+        let header7 = Data([0x00, 0x00, 0x00, 0x40]) // 64 bytes
+        let bodyPartial7 = Data("hello".utf8)
+        var msg7 = header7
+        msg7.append(bodyPartial7)
+        _ = msg7.withUnsafeBytes { ptr in write(clientFd7, ptr.baseAddress!, msg7.count) }
+
+        let start7 = ContinuousClock().now
+        _ = try await acceptTask7.value
+        let elapsed7 = ContinuousClock().now - start7
+        let elapsedSec7 = Double(elapsed7.components.seconds) + Double(elapsed7.components.attoseconds) / 1e18
+
+        assertTrue(elapsedSec7 >= 2.8 && elapsedSec7 <= 4.5, "Body read phase deadline enforced in \(elapsedSec7)s")
+
+        let resp7 = try readIPCResponse(from: clientFd7)
+        assertTrue(!resp7.success)
+        assertEqual(resp7.error?.code, "TIMEOUT")
+
+        close(clientFd7)
+        listener7.stop()
         recordCase("testSlowDripBodyTimeout")
 
         // 8. Blocked Response Write Timeout Test
+        let sockPath8 = "/tmp/agy-test-c8-\(UUID().uuidString)/host.sock"
+        try SocketListener.prepareDirectory(at: sockPath8)
+        let listener8 = SocketListener(
+            socketPath: sockPath8,
+            server: HostServer(
+                authorizer: FakeScreenRecordingAuthorizer(granted: true),
+                topologyProvider: FakeDisplayTopologyProvider(),
+                captureEngine: FakeCaptureEngine(),
+                axEngine: DisabledAXInspector(),
+                inputEngine: DisabledInputInjector()
+            )
+        )
+        try listener8.start()
+
+        let acceptTask8 = Task { try await listener8.acceptAndHandleOneConnection() }
+        let clientFd8 = try connectToSocket(at: listener8.socketPath)
+
+        var smallBuf: Int32 = 1024
+        _ = setsockopt(clientFd8, SOL_SOCKET, SO_RCVBUF, &smallBuf, socklen_t(MemoryLayout<Int32>.size))
+
+        try sendIPCRequest(IPCRequest(id: "block-req-8", method: "observe"), to: clientFd8)
+
+        let start8 = ContinuousClock().now
+        let handled8 = try await acceptTask8.value
+        let elapsed8 = ContinuousClock().now - start8
+        let elapsedSec8 = Double(elapsed8.components.seconds) + Double(elapsed8.components.attoseconds) / 1e18
+
+        assertTrue(handled8)
+        assertTrue(elapsedSec8 >= 1.8 && elapsedSec8 <= 5.5, "Blocked write phase deadline enforced in \(elapsedSec8)s")
+
+        close(clientFd8)
+        listener8.stop()
         recordCase("testBlockedResponseWriteTimeout")
 
         // 9. Peer Close and Partial IO Test
+        let sockPath9 = "/tmp/agy-test-c9-\(UUID().uuidString)/host.sock"
+        try SocketListener.prepareDirectory(at: sockPath9)
+        let listener9 = SocketListener(
+            socketPath: sockPath9,
+            server: HostServer(
+                authorizer: FakeScreenRecordingAuthorizer(),
+                topologyProvider: FakeDisplayTopologyProvider(),
+                captureEngine: FakeCaptureEngine(),
+                axEngine: DisabledAXInspector(),
+                inputEngine: DisabledInputInjector()
+            )
+        )
+        try listener9.start()
+
+        // Scenario A: Client closes immediately after sending 2 header bytes
+        let acceptTask9a = Task { try await listener9.acceptAndHandleOneConnection() }
+        let clientFd9a = try connectToSocket(at: listener9.socketPath)
+        let pBytes = Data([0x00, 0x00])
+        _ = pBytes.withUnsafeBytes { ptr in write(clientFd9a, ptr.baseAddress!, 2) }
+        close(clientFd9a)
+
+        let handled9a = try await acceptTask9a.value
+        assertTrue(handled9a, "Listener handles abrupt peer close during header read safely")
+
+        // Scenario B: Client closes immediately after sending header + 5 body bytes
+        let acceptTask9b = Task { try await listener9.acceptAndHandleOneConnection() }
+        let clientFd9b = try connectToSocket(at: listener9.socketPath)
+        var msg9b = Data([0x00, 0x00, 0x00, 0x20]) // 32 byte body
+        msg9b.append(Data("partial".utf8))
+        _ = msg9b.withUnsafeBytes { ptr in write(clientFd9b, ptr.baseAddress!, msg9b.count) }
+        close(clientFd9b)
+
+        let handled9b = try await acceptTask9b.value
+        assertTrue(handled9b, "Listener handles abrupt peer close during body read safely")
+
+        listener9.stop()
         recordCase("testPeerCloseAndPartialIO")
 
         // 10. EINTR Retry Path Test
+        signal(SIGUSR1, { _ in })
+
+        let sockPath10 = "/tmp/agy-test-c10-\(UUID().uuidString)/host.sock"
+        try SocketListener.prepareDirectory(at: sockPath10)
+        let listener10 = SocketListener(
+            socketPath: sockPath10,
+            server: HostServer(
+                authorizer: FakeScreenRecordingAuthorizer(granted: true),
+                topologyProvider: FakeDisplayTopologyProvider(),
+                captureEngine: FakeCaptureEngine(),
+                axEngine: DisabledAXInspector(),
+                inputEngine: DisabledInputInjector()
+            )
+        )
+        try listener10.start()
+
+        let acceptTask10 = Task { try await listener10.acceptAndHandleOneConnection() }
+        let clientFd10 = try connectToSocket(at: listener10.socketPath)
+
+        kill(getpid(), SIGUSR1)
+        try sendIPCRequest(IPCRequest(id: "eintr-req-10", method: "status"), to: clientFd10)
+
+        kill(getpid(), SIGUSR1)
+        let handled10 = try await acceptTask10.value
+        assertTrue(handled10)
+
+        let resp10 = try readIPCResponse(from: clientFd10)
+        assertEqual(resp10.id, "eintr-req-10")
+        assertTrue(resp10.success)
+
+        close(clientFd10)
+        listener10.stop()
+        signal(SIGUSR1, SIG_DFL)
         recordCase("testEINTRRetryPath")
 
         // 11. Timeout Response Followed By Next Client Test
+        let sockPath11 = "/tmp/agy-test-c11-\(UUID().uuidString)/host.sock"
+        try SocketListener.prepareDirectory(at: sockPath11)
+        let listener11 = SocketListener(
+            socketPath: sockPath11,
+            server: HostServer(
+                authorizer: FakeScreenRecordingAuthorizer(granted: true),
+                topologyProvider: FakeDisplayTopologyProvider(),
+                captureEngine: FakeCaptureEngine(),
+                axEngine: DisabledAXInspector(),
+                inputEngine: DisabledInputInjector()
+            )
+        )
+        try listener11.start()
+
+        let acceptTask11a = Task { try await listener11.acceptAndHandleOneConnection() }
+        let clientFd11a = try connectToSocket(at: listener11.socketPath)
+        let partialHeader11 = Data([0x00, 0x00])
+        _ = partialHeader11.withUnsafeBytes { ptr in write(clientFd11a, ptr.baseAddress!, 2) }
+
+        _ = try await acceptTask11a.value
+        let resp11a = try readIPCResponse(from: clientFd11a)
+        assertTrue(!resp11a.success)
+        assertEqual(resp11a.error?.code, "TIMEOUT")
+        close(clientFd11a)
+
+        let acceptTask11b = Task { try await listener11.acceptAndHandleOneConnection() }
+        let clientFd11b = try connectToSocket(at: listener11.socketPath)
+        try sendIPCRequest(IPCRequest(id: "seq-req-11", method: "status"), to: clientFd11b)
+
+        _ = try await acceptTask11b.value
+        let resp11b = try readIPCResponse(from: clientFd11b)
+        assertEqual(resp11b.id, "seq-req-11")
+        assertTrue(resp11b.success)
+        close(clientFd11b)
+
+        listener11.stop()
         recordCase("testTimeoutResponseFollowedByNextClient")
 
         // 12. Live Socket Collision Refusal Test
+        let sockPath12 = "/tmp/agy-test-c12-\(UUID().uuidString)/host.sock"
+        try SocketListener.prepareDirectory(at: sockPath12)
+        let listener12a = SocketListener(
+            socketPath: sockPath12,
+            server: HostServer(
+                authorizer: FakeScreenRecordingAuthorizer(),
+                topologyProvider: FakeDisplayTopologyProvider(),
+                captureEngine: FakeCaptureEngine(),
+                axEngine: DisabledAXInspector(),
+                inputEngine: DisabledInputInjector()
+            )
+        )
+        try listener12a.start()
+
+        let listener12b = SocketListener(
+            socketPath: sockPath12,
+            server: HostServer(
+                authorizer: FakeScreenRecordingAuthorizer(),
+                topologyProvider: FakeDisplayTopologyProvider(),
+                captureEngine: FakeCaptureEngine(),
+                axEngine: DisabledAXInspector(),
+                inputEngine: DisabledInputInjector()
+            )
+        )
+
+        var threwCollision12 = false
+        do {
+            try listener12b.start()
+        } catch let err as ComputerUseError {
+            if case .ipcError(let reason) = err {
+                assertTrue(reason.contains("another active host") || reason.contains("active socket"))
+                threwCollision12 = true
+            }
+        }
+        assertTrue(threwCollision12, "Starting second listener on active socket path must throw ipcError collision refusal")
+
+        listener12a.stop()
         recordCase("testLiveSocketCollisionRefusal")
 
         // 13. Verified Stale Socket Recovery Test
+        let sockPath13 = "/tmp/agy-test-c13-\(UUID().uuidString)/host.sock"
+        try SocketListener.prepareDirectory(at: sockPath13)
+
+        let dummyFd13 = socket(AF_UNIX, SOCK_STREAM, 0)
+        assertTrue(dummyFd13 >= 0)
+        var addr13 = sockaddr_un()
+        let pathBytes13 = sockPath13.utf8CString
+        addr13.sun_len = UInt8(MemoryLayout<sa_family_t>.size + pathBytes13.count)
+        addr13.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutableBytes(of: &addr13.sun_path) { ptr in
+            ptr.initializeMemory(as: CChar.self, repeating: 0)
+            _ = pathBytes13.withUnsafeBufferPointer { bPtr in memcpy(ptr.baseAddress!, bPtr.baseAddress!, bPtr.count) }
+        }
+        let sockLen13 = socklen_t(addr13.sun_len)
+        let bindRes13 = withUnsafePointer(to: &addr13) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { saPtr in
+                bind(dummyFd13, saPtr, sockLen13)
+            }
+        }
+        assertEqual(bindRes13, 0)
+        close(dummyFd13)
+
+        var statBuf13 = stat()
+        assertEqual(lstat(sockPath13, &statBuf13), 0)
+        assertTrue((statBuf13.st_mode & S_IFMT) == S_IFSOCK)
+
+        let listener13 = SocketListener(
+            socketPath: sockPath13,
+            server: HostServer(
+                authorizer: FakeScreenRecordingAuthorizer(granted: true),
+                topologyProvider: FakeDisplayTopologyProvider(),
+                captureEngine: FakeCaptureEngine(),
+                axEngine: DisabledAXInspector(),
+                inputEngine: DisabledInputInjector()
+            )
+        )
+        try listener13.start()
+
+        let acceptTask13 = Task { try await listener13.acceptAndHandleOneConnection() }
+        let clientFd13 = try connectToSocket(at: listener13.socketPath)
+        try sendIPCRequest(IPCRequest(id: "stale-rec-13", method: "status"), to: clientFd13)
+
+        _ = try await acceptTask13.value
+        let resp13 = try readIPCResponse(from: clientFd13)
+        assertEqual(resp13.id, "stale-rec-13")
+        assertTrue(resp13.success)
+
+        close(clientFd13)
+        listener13.stop()
         recordCase("testVerifiedStaleSocketRecovery")
 
         // 14. Foreign Symlink Non-Socket Refusal Test
+        let sockPath14Reg = "/tmp/agy-test-c14r-\(UUID().uuidString)/reg.sock"
+        try SocketListener.prepareDirectory(at: sockPath14Reg)
+
+        let regFd14 = open(sockPath14Reg, O_CREAT | O_WRONLY, 0o600)
+        assertTrue(regFd14 >= 0)
+        close(regFd14)
+
+        let listener14a = SocketListener(
+            socketPath: sockPath14Reg,
+            server: HostServer(
+                authorizer: FakeScreenRecordingAuthorizer(),
+                topologyProvider: FakeDisplayTopologyProvider(),
+                captureEngine: FakeCaptureEngine(),
+                axEngine: DisabledAXInspector(),
+                inputEngine: DisabledInputInjector()
+            )
+        )
+
+        var threwReg14 = false
+        do {
+            try listener14a.start()
+        } catch let err as ComputerUseError {
+            if case .ipcError(let reason) = err {
+                assertTrue(reason.contains("non-socket file"))
+                threwReg14 = true
+            }
+        }
+        assertTrue(threwReg14, "Listener must refuse to unlink pre-existing regular file")
+        _ = unlink(sockPath14Reg)
+
+        let sockPath14Lnk = "/tmp/agy-test-c14l-\(UUID().uuidString)/lnk.sock"
+        try SocketListener.prepareDirectory(at: sockPath14Lnk)
+        let targetPath14 = "/tmp/agy-test-c14l-\(UUID().uuidString)/target"
+        _ = symlink(targetPath14, sockPath14Lnk)
+
+        let listener14b = SocketListener(
+            socketPath: sockPath14Lnk,
+            server: HostServer(
+                authorizer: FakeScreenRecordingAuthorizer(),
+                topologyProvider: FakeDisplayTopologyProvider(),
+                captureEngine: FakeCaptureEngine(),
+                axEngine: DisabledAXInspector(),
+                inputEngine: DisabledInputInjector()
+            )
+        )
+
+        var threwLnk14 = false
+        do {
+            try listener14b.start()
+        } catch let err as ComputerUseError {
+            if case .ipcError(let reason) = err {
+                assertTrue(reason.contains("non-socket file"))
+                threwLnk14 = true
+            }
+        }
+        assertTrue(threwLnk14, "Listener must refuse to unlink pre-existing symlink")
+        _ = unlink(sockPath14Lnk)
+
         recordCase("testForeignSymlinkNonSocketRefusal")
 
         // 15. Stop Never Unlinks Replacement Inode Test
+        let sockPath15 = "/tmp/agy-test-c15-\(UUID().uuidString)/host.sock"
+        try SocketListener.prepareDirectory(at: sockPath15)
+        let listener15 = SocketListener(
+            socketPath: sockPath15,
+            server: HostServer(
+                authorizer: FakeScreenRecordingAuthorizer(),
+                topologyProvider: FakeDisplayTopologyProvider(),
+                captureEngine: FakeCaptureEngine(),
+                axEngine: DisabledAXInspector(),
+                inputEngine: DisabledInputInjector()
+            )
+        )
+        try listener15.start()
+
+        _ = unlink(listener15.socketPath)
+
+        let replacementFd15 = socket(AF_UNIX, SOCK_STREAM, 0)
+        assertTrue(replacementFd15 >= 0)
+        var addr15 = sockaddr_un()
+        let pathBytes15 = listener15.socketPath.utf8CString
+        addr15.sun_len = UInt8(MemoryLayout<sa_family_t>.size + pathBytes15.count)
+        addr15.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutableBytes(of: &addr15.sun_path) { ptr in
+            ptr.initializeMemory(as: CChar.self, repeating: 0)
+            _ = pathBytes15.withUnsafeBufferPointer { bPtr in memcpy(ptr.baseAddress!, bPtr.baseAddress!, bPtr.count) }
+        }
+        let sockLen15 = socklen_t(addr15.sun_len)
+        _ = withUnsafePointer(to: &addr15) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { saPtr in
+                bind(replacementFd15, saPtr, sockLen15)
+            }
+        }
+        close(replacementFd15)
+
+        var replacementStat15 = stat()
+        assertEqual(lstat(listener15.socketPath, &replacementStat15), 0)
+
+        listener15.stop()
+
+        var postStopStat15 = stat()
+        assertEqual(lstat(listener15.socketPath, &postStopStat15), 0, "Replacement inode file must remain on disk after stop()")
+        assertEqual(postStopStat15.st_ino, replacementStat15.st_ino, "Inode of replacement file must match")
+
+        _ = unlink(listener15.socketPath)
         recordCase("testStopNeverUnlinksReplacementInode")
 
         // 16. IEEE-754 Bit Pattern Topology Golden Vector & Mutations Test
@@ -320,6 +890,53 @@ struct ComputerUseHostTestRunner {
         recordCase("testIEEE754BitPatternTopologyGoldenVectorAndMutations")
 
         // 17. Hot-Plug Safe Display Enumerator Test
+        let validPass: () throws -> (primaryId: Int, displayIDs: [Int]) = { (1, [1]) }
+
+        // Success path
+        let successEnum = ScriptedDisplayListEnumerator(script: [validPass, validPass, validPass])
+        let successProvider = SystemDisplayTopologyProvider(enumerator: successEnum, descriptorProvider: FakeDescriptorProvider())
+        let top = try successProvider.getTopology()
+        assertEqual(top.primaryDisplayId, 1)
+        assertEqual(top.displays.count, 1)
+
+        // Grow failure
+        let growEnum = ScriptedDisplayListEnumerator(script: [{ (1, [1]) }, { (1, [1, 2]) }])
+        let growProvider = SystemDisplayTopologyProvider(enumerator: growEnum, descriptorProvider: FakeDescriptorProvider())
+        var threwGrow = false
+        do { _ = try growProvider.getTopology() } catch { threwGrow = true }
+        assertTrue(threwGrow, "Must reject display topology growth between passes")
+
+        // Shrink failure
+        let shrinkEnum = ScriptedDisplayListEnumerator(script: [{ (1, [1, 2]) }, { (1, [1]) }])
+        let shrinkProvider = SystemDisplayTopologyProvider(enumerator: shrinkEnum, descriptorProvider: FakeDescriptorProvider())
+        var threwShrink = false
+        do { _ = try shrinkProvider.getTopology() } catch { threwShrink = true }
+        assertTrue(threwShrink, "Must reject display topology shrinkage between passes")
+
+        // Recount failure
+        let errorEnum = ScriptedDisplayListEnumerator(script: [
+            validPass,
+            { throw ComputerUseError.targetUnreachable(reason: "Transient CG enumeration failure") }
+        ])
+        let errorProvider = SystemDisplayTopologyProvider(enumerator: errorEnum, descriptorProvider: FakeDescriptorProvider())
+        var threwError = false
+        do { _ = try errorProvider.getTopology() } catch { threwError = true }
+        assertTrue(threwError, "Must propagate enumeration error on recount failure")
+
+        // Duplicate ID failure
+        let dupEnum = ScriptedDisplayListEnumerator(script: [{ (1, [1, 1]) }, { (1, [1, 1]) }])
+        let dupProvider = SystemDisplayTopologyProvider(enumerator: dupEnum, descriptorProvider: FakeDescriptorProvider())
+        var threwDup = false
+        do { _ = try dupProvider.getTopology() } catch { threwDup = true }
+        assertTrue(threwDup, "Must reject display list containing duplicate IDs")
+
+        // Missing primary failure
+        let missingPrimaryEnum = ScriptedDisplayListEnumerator(script: [{ (2, [1]) }, { (2, [1]) }])
+        let missingPrimaryProvider = SystemDisplayTopologyProvider(enumerator: missingPrimaryEnum, descriptorProvider: FakeDescriptorProvider())
+        var threwMissingPrimary = false
+        do { _ = try missingPrimaryProvider.getTopology() } catch { threwMissingPrimary = true }
+        assertTrue(threwMissingPrimary, "Must reject display list missing declared primary display ID")
+
         recordCase("testHotPlugSafeDisplayEnumerator")
 
         // 18. Permission Preflight Denied Zero Loader Calls Test
@@ -365,12 +982,62 @@ struct ComputerUseHostTestRunner {
         var threwMismatch = false
         do { _ = try SCScreenshotCaptureEngine.validateAndEncode(image: cgImg, targetDisplay: mismatchedDisplay, quality: 0.8) } catch { threwMismatch = true }
         assertTrue(threwMismatch)
+
+        // Exact near-10MiB boundaries validation
+        let maxBytes = 10 * 1024 * 1024
+        let exact10MiB = makeSyntheticJPEG(marker: 0xC0, width: 100, height: 100, padToSize: maxBytes)
+        assertEqual(exact10MiB.count, maxBytes)
+        try SCScreenshotCaptureEngine.validateJPEGData(data: exact10MiB, expectedWidth: 100, expectedHeight: 100, maxBytes: maxBytes)
+
+        let oversized10MiB = makeSyntheticJPEG(marker: 0xC0, width: 100, height: 100, padToSize: maxBytes + 1)
+        assertEqual(oversized10MiB.count, maxBytes + 1)
+        var threwOversized10MiB = false
+        do {
+            try SCScreenshotCaptureEngine.validateJPEGData(data: oversized10MiB, expectedWidth: 100, expectedHeight: 100, maxBytes: maxBytes)
+        } catch let err as ComputerUseError {
+            if case .ipcError(let reason) = err {
+                assertTrue(reason.contains("10 MiB limit"))
+                threwOversized10MiB = true
+            }
+        }
+        assertTrue(threwOversized10MiB, "Must reject JPEG exceeding exact 10 MiB boundary")
+
         recordCase("testPureJPEGValidatorExactAndNear10MiBBoundaries")
 
         // 20. SOF0 and SOF2 Marker Validation Test
+        let sof0Data = makeSyntheticJPEG(marker: 0xC0, width: 320, height: 240)
+        let dims0 = SCScreenshotCaptureEngine.parseJPEGDimensions(data: sof0Data)
+        assertTrue(dims0 != nil)
+        assertEqual(dims0?.width, 320)
+        assertEqual(dims0?.height, 240)
+        try SCScreenshotCaptureEngine.validateJPEGData(data: sof0Data, expectedWidth: 320, expectedHeight: 240)
+
+        let sof2Data = makeSyntheticJPEG(marker: 0xC2, width: 640, height: 480)
+        let dims2 = SCScreenshotCaptureEngine.parseJPEGDimensions(data: sof2Data)
+        assertTrue(dims2 != nil)
+        assertEqual(dims2?.width, 640)
+        assertEqual(dims2?.height, 480)
+        try SCScreenshotCaptureEngine.validateJPEGData(data: sof2Data, expectedWidth: 640, expectedHeight: 480)
+
         recordCase("testSOF0AndSOF2MarkerValidation")
 
         // 21. JPEG Invalid Magic, Truncated Segment & Mismatch Rejection Test
+        let invalidMagicData = Data([0x00, 0x00, 0xFF, 0xD8])
+        assertTrue(SCScreenshotCaptureEngine.parseJPEGDimensions(data: invalidMagicData) == nil)
+        var threwBadMagic = false
+        do { try SCScreenshotCaptureEngine.validateJPEGData(data: invalidMagicData) } catch { threwBadMagic = true }
+        assertTrue(threwBadMagic, "Must reject invalid magic bytes")
+
+        let truncatedData = sof0Data.prefix(8)
+        assertTrue(SCScreenshotCaptureEngine.parseJPEGDimensions(data: Data(truncatedData)) == nil)
+        var threwTruncated = false
+        do { try SCScreenshotCaptureEngine.validateJPEGData(data: Data(truncatedData)) } catch { threwTruncated = true }
+        assertTrue(threwTruncated, "Must reject truncated JPEG segment")
+
+        var threwDimensionMismatch = false
+        do { try SCScreenshotCaptureEngine.validateJPEGData(data: sof0Data, expectedWidth: 100, expectedHeight: 100) } catch { threwDimensionMismatch = true }
+        assertTrue(threwDimensionMismatch, "Must reject JPEG dimension mismatch")
+
         recordCase("testJPEGInvalidMagicTruncatedSegmentAndMismatchRejection")
 
         // 22. Noncooperative Late Completion Generation Fence Test
@@ -390,9 +1057,9 @@ struct ComputerUseHostTestRunner {
         assertTrue(!respA.success)
         assertEqual(respA.error?.code, "TIMEOUT")
 
-        // Request B: succeeds on same HostServer
+        // Request B: succeeds on same HostServer deterministically
         let reqBTask = Task { await fenceServer.handleRequest(IPCRequest(id: "fence-B", method: "observe")) }
-        try await Task.sleep(nanoseconds: 10_000_000)
+        await scriptedEngine.waitForContinuation(at: 1)
         let frameB = try! FakeCaptureEngine().generateDTO(topology: FakeDisplayTopologyProvider().getTopology())
         scriptedEngine.resumeContinuation(at: 1, with: .success(frameB))
 
@@ -522,7 +1189,8 @@ struct ComputerUseHostTestRunner {
         // Occupy slot 2 (Request B)
         let reqBudgetBTask = Task { await budgetServer.handleRequest(IPCRequest(id: "budget-B", method: "observe")) }
 
-        try await Task.sleep(nanoseconds: 20_000_000)
+        await scriptedBudgetEngine.waitForContinuation(at: 0)
+        await scriptedBudgetEngine.waitForContinuation(at: 1)
         assertEqual(budget.count, 2)
 
         // Request C: while 2 slots are occupied, fails fast with CAPTURE_BUSY
@@ -549,7 +1217,7 @@ struct ComputerUseHostTestRunner {
 
         // Request D: succeeds on same server
         let reqDTask = Task { await budgetServer.handleRequest(IPCRequest(id: "budget-D", method: "observe")) }
-        try await Task.sleep(nanoseconds: 20_000_000)
+        await scriptedBudgetEngine.waitForContinuation(at: 2)
         scriptedBudgetEngine.resumeContinuation(at: 2, with: .success(frameDTO))
 
         let respD = await reqDTask.value

@@ -140,7 +140,143 @@ public actor SCScreenshotCaptureEngine: DisplayCaptureEngine {
         )
     }
 
-    public static func validateAndEncode(image: CGImage, targetDisplay: DisplayInfo, quality: Double = 0.8) throws -> (data: Data, base64: String) {
+    public static func parseJPEGDimensions(data: Data) -> (width: Int, height: Int)? {
+        guard data.count >= 4, data[0] == 0xFF, data[1] == 0xD8 else {
+            return nil
+        }
+
+        var offset = 2
+        var foundSOF = false
+        var foundSOS = false
+        var dimensions: (width: Int, height: Int)? = nil
+        var eoiOffset = -1
+
+        while offset < data.count - 1 {
+            if data[offset] != 0xFF {
+                if foundSOS {
+                    offset += 1
+                    continue
+                } else {
+                    return nil
+                }
+            }
+
+            while offset < data.count - 1 && data[offset] == 0xFF && data[offset + 1] == 0xFF {
+                offset += 1
+            }
+            if offset >= data.count - 1 { return nil }
+
+            let marker = data[offset + 1]
+
+            if foundSOS {
+                if marker == 0x00 {
+                    offset += 2
+                    continue
+                }
+                if marker >= 0xD0 && marker <= 0xD7 {
+                    offset += 2
+                    continue
+                }
+                if marker == 0xD9 {
+                    eoiOffset = offset
+                    break
+                }
+                return nil
+            }
+
+            if marker == 0xD8 {
+                offset += 2
+                continue
+            }
+
+            if marker == 0xD9 {
+                return nil
+            }
+
+            if marker == 0xDA {
+                if !foundSOF { return nil }
+                if offset + 4 >= data.count { return nil }
+                let segLen = (Int(data[offset + 2]) << 8) | Int(data[offset + 3])
+                let numScanComponents = Int(data[offset + 4])
+                if segLen != 6 + 2 * numScanComponents || offset + 2 + segLen > data.count { return nil }
+                foundSOS = true
+                offset += 2 + segLen
+                continue
+            }
+
+            if marker == 0xC0 || marker == 0xC2 {
+                if foundSOF { return nil }
+                if offset + 9 >= data.count { return nil }
+                let segLen = (Int(data[offset + 2]) << 8) | Int(data[offset + 3])
+                let precision = data[offset + 4]
+                if precision != 8 { return nil }
+
+                let height = (Int(data[offset + 5]) << 8) | Int(data[offset + 6])
+                let width = (Int(data[offset + 7]) << 8) | Int(data[offset + 8])
+                let numComponents = Int(data[offset + 9])
+
+                if segLen != 8 + 3 * numComponents || offset + 2 + segLen > data.count { return nil }
+                if width <= 0 || height <= 0 { return nil }
+                if numComponents != 1 && numComponents != 3 && numComponents != 4 { return nil }
+
+                dimensions = (width, height)
+                foundSOF = true
+                offset += 2 + segLen
+                continue
+            }
+
+            if offset + 3 < data.count {
+                let segLen = (Int(data[offset + 2]) << 8) | Int(data[offset + 3])
+                if segLen < 2 || offset + 2 + segLen > data.count { return nil }
+                offset += 2 + segLen
+            } else {
+                return nil
+            }
+        }
+
+        guard foundSOF, foundSOS, let dims = dimensions, eoiOffset != -1 else {
+            return nil
+        }
+
+        for i in (eoiOffset + 2)..<data.count {
+            if data[i] != 0 {
+                return nil
+            }
+        }
+
+        return dims
+    }
+
+    public static func validateJPEGData(
+        data: Data,
+        expectedWidth: Int? = nil,
+        expectedHeight: Int? = nil,
+        maxBytes: Int = 10 * 1024 * 1024
+    ) throws {
+        guard !data.isEmpty else {
+            throw ComputerUseError.ipcError(reason: "Encoded JPEG data is empty")
+        }
+
+        guard data.count <= maxBytes else {
+            throw ComputerUseError.ipcError(reason: "Captured JPEG image size (\(data.count) bytes) exceeds maximum 10 MiB limit")
+        }
+
+        guard data.count >= 4 && data[0] == 0xFF && data[1] == 0xD8 else {
+            throw ComputerUseError.ipcError(reason: "Invalid JPEG magic header")
+        }
+
+        guard let dims = parseJPEGDimensions(data: data) else {
+            throw ComputerUseError.ipcError(reason: "Invalid JPEG structure or marker truncation")
+        }
+
+        if let expW = expectedWidth, let expH = expectedHeight {
+            guard dims.width == expW && dims.height == expH else {
+                throw ComputerUseError.targetUnreachable(reason: "Captured JPEG dimensions (\(dims.width)x\(dims.height)) mismatch requested topology (\(expW)x\(expH))")
+            }
+        }
+    }
+
+    public static func validateAndEncode(image: CGImage, targetDisplay: DisplayInfo, quality: Double = 0.8, overrideDataSize: Int? = nil) throws -> (data: Data, base64: String) {
         let pixelWidth = targetDisplay.pixelWidth
         let pixelHeight = targetDisplay.pixelHeight
 
@@ -158,14 +294,11 @@ public actor SCScreenshotCaptureEngine: DisplayCaptureEngine {
         }
 
         let jpegData = try encodeToJPEG(image: image, quality: quality)
-        guard !jpegData.isEmpty else {
-            throw ComputerUseError.ipcError(reason: "Encoded JPEG data is empty")
+        let effectiveSize = overrideDataSize ?? jpegData.count
+        guard effectiveSize <= 10 * 1024 * 1024 else {
+            throw ComputerUseError.targetUnreachable(reason: "Captured JPEG image size (\(effectiveSize) bytes) exceeds maximum 10 MiB limit")
         }
-
-        let maxRawBytes = 10 * 1024 * 1024 // Exact 10 MiB limit
-        guard jpegData.count <= maxRawBytes else {
-            throw ComputerUseError.ipcError(reason: "Captured JPEG image size (\(jpegData.count) bytes) exceeds maximum 10 MiB limit")
-        }
+        try validateJPEGData(data: jpegData, expectedWidth: pixelWidth, expectedHeight: pixelHeight, maxBytes: 10 * 1024 * 1024)
 
         return (jpegData, jpegData.base64EncodedString())
     }
