@@ -113,10 +113,35 @@ async function main() {
   }
 
   if (subcommand === "test-native") {
-    log("Building and running portable native test runner with strict concurrency flags...");
+    log("Building and running native test suite with strict concurrency flags...");
     const hostDir = path.join(rootDir, "apps/computer-use-host");
-    execSync("swift run -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors ComputerUseHostTestRunner", { cwd: hostDir, stdio: "inherit" });
-    log("Portable native test suite execution complete.");
+    const manifestPath = path.join(rootDir, "docs/native_test_manifest.txt");
+
+    let hasXCTest = false;
+    let actualList = "";
+    try {
+      const testListRaw = execSync("swift test list 2>/dev/null", { cwd: hostDir, encoding: "utf-8" });
+      actualList = testListRaw.trim().split("\n").map(l => l.trim()).filter(Boolean).sort().join("\n");
+      if (actualList.length > 0) {
+        hasXCTest = true;
+      }
+    } catch {
+      hasXCTest = false;
+    }
+
+    if (hasXCTest) {
+      log("Verifying native test manifest matches 'swift test list'...");
+      const expectedList = fs.readFileSync(manifestPath, "utf-8").trim().split("\n").map(l => l.trim()).filter(Boolean).sort().join("\n");
+      if (actualList !== expectedList) {
+        fail(`Native test manifest mismatch!\nExpected:\n${expectedList}\nActual:\n${actualList}`);
+      }
+      execSync("swift test -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors", { cwd: hostDir, stdio: "inherit" });
+    } else {
+      log("XCTest discovery unavailable in environment; running ComputerUseHostTestRunner executable authority...");
+      execSync("swift run -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors ComputerUseHostTestRunner", { cwd: hostDir, stdio: "inherit" });
+    }
+
+    log("Native test suite execution complete.");
     process.exit(0);
   }
 

@@ -59,6 +59,21 @@ public struct CaptureFrameDTO: Codable, Equatable, Sendable {
     }
 }
 
+/// Pure pixel-preflight helper enforcing positivity and the 64-megapixel safety limit.
+public func validatePixelDimensions(width: Int, height: Int) throws {
+    guard width > 0, height > 0 else {
+        throw ComputerUseError.targetUnreachable(
+            reason: "Pixel dimensions (\(width)x\(height)) must be positive"
+        )
+    }
+    let (totalPixels, overflow) = width.multipliedReportingOverflow(by: height)
+    guard !overflow, totalPixels <= 64_000_000 else {
+        throw ComputerUseError.targetUnreachable(
+            reason: "Pixel dimensions (\(width)x\(height)) exceed 64-megapixel safety limit"
+        )
+    }
+}
+
 public protocol DisplayCaptureEngine: Sendable {
     func captureDisplay(displayId: Int?, topology: DisplayTopology) async throws -> CaptureFrameDTO
 }
@@ -92,13 +107,7 @@ public actor SCScreenshotCaptureEngine: DisplayCaptureEngine {
         }
 
         // 2. Pre-check 64-megapixel budget BEFORE framework allocation
-        guard targetDisplay.pixelWidth > 0, targetDisplay.pixelHeight > 0 else {
-            throw ComputerUseError.targetUnreachable(reason: "Display ID \(targetDisplayId) pixel dimensions (\(targetDisplay.pixelWidth)x\(targetDisplay.pixelHeight)) must be positive")
-        }
-        let (totalPixels, overflow) = targetDisplay.pixelWidth.multipliedReportingOverflow(by: targetDisplay.pixelHeight)
-        guard !overflow, totalPixels <= 64_000_000 else {
-            throw ComputerUseError.targetUnreachable(reason: "Display ID \(targetDisplayId) pixel dimensions (\(targetDisplay.pixelWidth)x\(targetDisplay.pixelHeight)) exceed 64-megapixel safety limit")
-        }
+        try validatePixelDimensions(width: targetDisplay.pixelWidth, height: targetDisplay.pixelHeight)
 
         // 3. Increment framework invocation counter to track real framework calls
         frameworkInvocationCount += 1

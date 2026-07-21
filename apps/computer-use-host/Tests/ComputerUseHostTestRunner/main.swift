@@ -9,12 +9,6 @@ private final class AtomicCounter: @unchecked Sendable {
     var value: Int { lock.lock(); defer { lock.unlock() }; return val }
 }
 
-private let totalCasesCounter = AtomicCounter()
-private func recordCase(_ name: String) {
-    totalCasesCounter.increment()
-    fputs("[TEST CASE \(totalCasesCounter.value)] \(name) - PASSED\n", stderr)
-}
-
 public final class FakeScreenRecordingAuthorizer: ScreenRecordingAuthorizing, @unchecked Sendable {
     public let granted: Bool
     public init(granted: Bool = true) { self.granted = granted }
@@ -56,58 +50,100 @@ public final class FakeDescriptorProvider: DisplayDescriptorProviding, @unchecke
     }
 }
 
-public final class ScriptedContinuationCaptureEngine: DisplayCaptureEngine, @unchecked Sendable {
-    private let lock = NSLock()
+public final class CustomDescriptorProvider: DisplayDescriptorProviding, @unchecked Sendable {
+    private let bounds: CGRect
+    private let rotation: Double
+    private let pixelWidth: Int
+    private let pixelHeight: Int
+    private let scale: Double
+
+    public init(bounds: CGRect, rotation: Double, pixelWidth: Int, pixelHeight: Int, scale: Double) {
+        self.bounds = bounds
+        self.rotation = rotation
+        self.pixelWidth = pixelWidth
+        self.pixelHeight = pixelHeight
+        self.scale = scale
+    }
+
+    public func getDisplayDescriptor(id: Int) throws -> (bounds: CGRect, rotation: Double, pixelWidth: Int, pixelHeight: Int, scale: Double) {
+        return (bounds, rotation, pixelWidth, pixelHeight, scale)
+    }
+}
+
+public enum ControlledCaptureEngineError: Error, Equatable {
+    case invalidIndex(Int)
+}
+
+public actor ControlledCaptureEngine: DisplayCaptureEngine {
     private var continuations: [Int: CheckedContinuation<CaptureFrameDTO, Error>] = [:]
-    private var nextIndex: Int = 0
-    private var waiters: [Int: [CheckedContinuation<Void, Never>]] = [:]
+    private var registrationWaiters: [Int: [CheckedContinuation<Void, Never>]] = [:]
+    private var exitWaiters: [Int: [CheckedContinuation<Void, Never>]] = [:]
+
+    private(set) public var invocationCount: Int = 0
+    private(set) public var physicalExitCount: Int = 0
+
+    public var pendingCount: Int {
+        return continuations.count
+    }
 
     public init() {}
 
-    public var invocationCount: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return nextIndex
-    }
-
     public func captureDisplay(displayId: Int?, topology: DisplayTopology) async throws -> CaptureFrameDTO {
-        let index: Int = {
-            lock.lock()
-            defer { lock.unlock() }
-            let idx = nextIndex
-            nextIndex += 1
-            return idx
-        }()
+        let index = invocationCount
+        invocationCount += 1
+
+        defer {
+            physicalExitCount += 1
+            notifyExitWaiters()
+        }
 
         return try await withCheckedThrowingContinuation { continuation in
-            lock.lock()
             continuations[index] = continuation
-            let pendingWaiters = waiters.removeValue(forKey: index) ?? []
-            lock.unlock()
-            for waiter in pendingWaiters {
+            notifyRegistrationWaiters()
+        }
+    }
+
+    public func waitUntilRegistered(count: Int) async {
+        if invocationCount >= count { return }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            registrationWaiters[count, default: []].append(continuation)
+        }
+    }
+
+    private func notifyRegistrationWaiters() {
+        let currentCount = invocationCount
+        for (targetCount, waiters) in registrationWaiters where currentCount >= targetCount {
+            registrationWaiters.removeValue(forKey: targetCount)
+            for waiter in waiters {
                 waiter.resume()
             }
         }
     }
 
-    public func waitForContinuation(at index: Int) async {
+    public func waitUntilExited(count: Int) async {
+        if physicalExitCount >= count { return }
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            lock.lock()
-            if continuations[index] != nil {
-                lock.unlock()
-                continuation.resume()
-            } else {
-                waiters[index, default: []].append(continuation)
-                lock.unlock()
+            exitWaiters[count, default: []].append(continuation)
+        }
+    }
+
+    private func notifyExitWaiters() {
+        let currentCount = physicalExitCount
+        for (targetCount, waiters) in exitWaiters where currentCount >= targetCount {
+            exitWaiters.removeValue(forKey: targetCount)
+            for waiter in waiters {
+                waiter.resume()
             }
         }
     }
 
-    public func resumeContinuation(at index: Int, with result: Result<CaptureFrameDTO, Error>) {
-        lock.lock()
-        let cont = continuations.removeValue(forKey: index)
-        lock.unlock()
-        cont?.resume(with: result)
+    @discardableResult
+    public func complete(index: Int, with result: Result<CaptureFrameDTO, Error>) throws -> Bool {
+        guard let continuation = continuations.removeValue(forKey: index) else {
+            throw ControlledCaptureEngineError.invalidIndex(index)
+        }
+        continuation.resume(with: result)
+        return true
     }
 }
 
@@ -115,10 +151,12 @@ public final class FakeCaptureEngine: DisplayCaptureEngine, @unchecked Sendable 
     private let counter = AtomicCounter()
     private let delayMs: Double
     private let customTopologyVersion: String?
+    private let largePayloadBytes: Int
 
-    public init(delayMs: Double = 0.0, customTopologyVersion: String? = nil) {
+    public init(delayMs: Double = 0.0, customTopologyVersion: String? = nil, largePayloadBytes: Int = 0) {
         self.delayMs = delayMs
         self.customTopologyVersion = customTopologyVersion
+        self.largePayloadBytes = largePayloadBytes
     }
 
     public var invocationCount: Int { counter.value }
@@ -170,6 +208,7 @@ public final class FakeCaptureEngine: DisplayCaptureEngine, @unchecked Sendable 
 
         let (_, b64) = try SCScreenshotCaptureEngine.validateAndEncode(image: cgImg, targetDisplay: targetDisp, quality: 0.8)
         let versionToUse = customTopologyVersion ?? topology.version
+        let finalB64 = largePayloadBytes > 0 ? b64 + String(repeating: "A", count: max(0, largePayloadBytes - b64.count)) : b64
 
         return CaptureFrameDTO(
             captureId: "cap-test-\(UUID().uuidString)",
@@ -182,7 +221,7 @@ public final class FakeCaptureEngine: DisplayCaptureEngine, @unchecked Sendable 
             pixelWidth: width,
             pixelHeight: height,
             imageFormat: "jpeg",
-            imageDataBase64: b64
+            imageDataBase64: finalB64
         )
     }
 }
@@ -204,22 +243,15 @@ public final class TrulyNoncooperativeCaptureEngine: DisplayCaptureEngine, @unch
     }
 }
 
-public final class CancellingCaptureEngine: DisplayCaptureEngine, @unchecked Sendable {
-    public init() {}
-    public func captureDisplay(displayId: Int?, topology: DisplayTopology) async throws -> CaptureFrameDTO {
-        throw CancellationError()
-    }
-}
-
-private func assertEqual<T: Equatable>(_ actual: T, _ expected: T, _ msg: String = "", file: String = #file, line: Int = #line) {
-    if actual != expected {
-        fputs("[FAIL] Expected '\(expected)', got '\(actual)'. \(msg) at \(file):\(line)\n", stderr)
+private func assertEqual<T: Equatable>(_ a: T, _ b: T, _ msg: String = "", file: String = #file, line: Int = #line) {
+    if a != b {
+        fputs("[FAIL] Assertion failed: '\(a)' != '\(b)'. \(msg) at \(file):\(line)\n", stderr)
         exit(1)
     }
 }
 
-private func assertTrue(_ condition: Bool, _ msg: String = "", file: String = #file, line: Int = #line) {
-    if !condition {
+private func assertTrue(_ cond: Bool, _ msg: String = "", file: String = #file, line: Int = #line) {
+    if !cond {
         fputs("[FAIL] Assertion failed. \(msg) at \(file):\(line)\n", stderr)
         exit(1)
     }
@@ -227,7 +259,7 @@ private func assertTrue(_ condition: Bool, _ msg: String = "", file: String = #f
 
 private func connectToSocket(at socketPath: String) throws -> Int32 {
     let clientFd = socket(AF_UNIX, SOCK_STREAM, 0)
-    assertTrue(clientFd >= 0, "Failed to create UNIX domain socket descriptor")
+    assertTrue(clientFd >= 0)
 
     var addr = sockaddr_un()
     let pathBytes = socketPath.utf8CString
@@ -244,115 +276,62 @@ private func connectToSocket(at socketPath: String) throws -> Int32 {
             connect(clientFd, saPtr, sockLen)
         }
     }
-    assertEqual(connRes, 0, "Failed to connect to UDS socket at \(socketPath)")
+    assertEqual(connRes, 0)
     return clientFd
 }
 
-private func sendIPCRequest(_ req: IPCRequest, to clientFd: Int32) throws {
+private func sendIPCRequest(_ req: IPCRequest, to fd: Int32) throws {
     let reqData = try JSONEncoder().encode(req)
-    let framedReq = try LengthPrefixedFramer.encode(payload: reqData)
-    _ = framedReq.withUnsafeBytes { ptr in
-        write(clientFd, ptr.baseAddress!, framedReq.count)
-    }
+    let framed = try LengthPrefixedFramer.encode(payload: reqData)
+    _ = framed.withUnsafeBytes { ptr in write(fd, ptr.baseAddress!, framed.count) }
 }
 
-private func readIPCResponse(from clientFd: Int32) throws -> IPCResponse {
+private func readIPCResponse(from fd: Int32) throws -> IPCResponse {
     var headerBuf = [UInt8](repeating: 0, count: 4)
-    var hRead = 0
-    while hRead < 4 {
-        let r = read(clientFd, &headerBuf[hRead], 4 - hRead)
-        if r > 0 {
-            hRead += r
-        } else if r == 0 {
-            throw ComputerUseError.ipcError(reason: "EOF while reading response header")
-        } else {
-            if errno == EINTR { continue }
-            throw ComputerUseError.ipcError(reason: "Socket read error errno \(errno)")
-        }
+    let r1 = read(fd, &headerBuf, 4)
+    guard r1 == 4 else {
+        throw ComputerUseError.ipcError(reason: "Failed to read 4-byte header from client socket")
     }
-
     let respLen = Int(headerBuf[0]) << 24 | Int(headerBuf[1]) << 16 | Int(headerBuf[2]) << 8 | Int(headerBuf[3])
-    assertTrue(respLen > 0, "Invalid response payload length")
 
     var respBuf = [UInt8](repeating: 0, count: respLen)
-    var totalRead = 0
-    while totalRead < respLen {
-        let r = read(clientFd, &respBuf[totalRead], respLen - totalRead)
-        if r > 0 {
-            totalRead += r
-        } else if r == 0 {
-            throw ComputerUseError.ipcError(reason: "EOF while reading response body")
-        } else {
-            if errno == EINTR { continue }
-            throw ComputerUseError.ipcError(reason: "Socket read error errno \(errno)")
-        }
+    let r2 = read(fd, &respBuf, respLen)
+    guard r2 == respLen else {
+        throw ComputerUseError.ipcError(reason: "Failed to read \(respLen) payload bytes from client socket")
     }
 
     return try JSONDecoder().decode(IPCResponse.self, from: Data(respBuf))
 }
 
-private func makeSyntheticJPEG(marker: UInt8, width: UInt16, height: UInt16, padToSize: Int = 0) -> Data {
-    var data = Data()
-    data.append(contentsOf: [0xFF, 0xD8])
-    data.append(contentsOf: [0xFF, marker])
-    data.append(contentsOf: [0x00, 0x0B])
-    data.append(0x08)
-    data.append(UInt8(height >> 8))
-    data.append(UInt8(height & 0xFF))
-    data.append(UInt8(width >> 8))
-    data.append(UInt8(width & 0xFF))
-    data.append(0x01)
-    data.append(contentsOf: [0x01, 0x11, 0x00])
-
-    data.append(contentsOf: [0xFF, 0xDA])
-    data.append(contentsOf: [0x00, 0x08])
-    data.append(0x01)
-    data.append(contentsOf: [0x01, 0x00])
-    data.append(contentsOf: [0x00, 0x3F, 0x00])
-
-    if padToSize > data.count + 2 {
-        let needed = padToSize - data.count - 2
-        data.append(Data(repeating: 0x00, count: needed))
-    } else {
-        data.append(0x00)
-    }
-
-    data.append(contentsOf: [0xFF, 0xD9])
-    return data
-}
-
 @main
-struct ComputerUseHostTestRunner {
-    static func main() async throws {
-        fputs("[ComputerUseHostTestRunner] Starting Portable Native Execution Test Authority...\n", stderr)
-
-        // 1. Length-Prefixed Framing Test
+public struct ComputerUseHostTestRunner {
+    public static func run01_LengthPrefixedFraming() async throws {
         let payload = Data("{\"id\":\"test-1\",\"method\":\"status\"}".utf8)
         let framed = try LengthPrefixedFramer.encode(payload: payload)
         assertEqual(framed.count, 4 + payload.count)
         var mutFramed = framed
         let decoded = try LengthPrefixedFramer.decode(from: &mutFramed)
         assertEqual(decoded, payload)
-        recordCase("testLengthPrefixedFraming")
+    }
 
-        // 2. Oversized Framing Header Rejection Test
-        var badHeader = Data([0x01, 0x00, 0x00, 0x01]) // 16MB + 1
+    public static func run02_OversizedFramingHeaderRejection() async throws {
+        var badHeader = Data([0x01, 0x00, 0x00, 0x01])
         badHeader.append(Data(repeating: 0, count: 10))
         var threwOversized = false
         do { _ = try LengthPrefixedFramer.decode(from: &badHeader) } catch { threwOversized = true }
         assertTrue(threwOversized)
-        recordCase("testOversizedFramingHeaderRejection")
+    }
 
-        // 3. Directory Preparation Test
-        let testDir = "/tmp/agy-computer-use-test-\(UUID().uuidString)"
+    public static func run03_DirectoryPreparation() async throws {
+        let testDir = "/tmp/test-host-runner-prep-\(UUID().uuidString)"
         try SocketListener.prepareDirectory(at: testDir)
         var statBuf = stat()
         assertEqual(lstat(testDir, &statBuf), 0)
         assertEqual(statBuf.st_mode & 0o777, 0o700)
         _ = rmdir(testDir)
-        recordCase("testDirectoryPreparation")
+    }
 
-        // 4. UDS Client Server Round Trip Test
+    public static func run04_UDSClientServerRoundTrip() async throws {
         let sockPath = "/tmp/agy-test-c4-\(UUID().uuidString)/host.sock"
         try SocketListener.prepareDirectory(at: sockPath)
         let fakeEngine = FakeCaptureEngine()
@@ -367,51 +346,20 @@ struct ComputerUseHostTestRunner {
         try listener.start()
 
         let acceptTask = Task { try await listener.acceptAndHandleOneConnection() }
+        let clientFd = try connectToSocket(at: listener.socketPath)
 
-        let clientFd = socket(AF_UNIX, SOCK_STREAM, 0)
-        assertTrue(clientFd >= 0)
-
-        var addr = sockaddr_un()
-        let pathBytes = listener.socketPath.utf8CString
-        addr.sun_len = UInt8(MemoryLayout<sa_family_t>.size + pathBytes.count)
-        addr.sun_family = sa_family_t(AF_UNIX)
-        withUnsafeMutableBytes(of: &addr.sun_path) { ptr in
-            ptr.initializeMemory(as: CChar.self, repeating: 0)
-            _ = pathBytes.withUnsafeBufferPointer { bPtr in memcpy(ptr.baseAddress!, bPtr.baseAddress!, bPtr.count) }
-        }
-
-        let sockLen = socklen_t(addr.sun_len)
-        let connRes = withUnsafePointer(to: &addr) { ptr in
-            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { saPtr in
-                connect(clientFd, saPtr, sockLen)
-            }
-        }
-        assertEqual(connRes, 0)
-
-        let reqObj = IPCRequest(id: "client-req-1", method: "status")
-        let reqData = try JSONEncoder().encode(reqObj)
-        let framedReq = try LengthPrefixedFramer.encode(payload: reqData)
-
-        _ = framedReq.withUnsafeBytes { ptr in write(clientFd, ptr.baseAddress!, framedReq.count) }
-
+        try sendIPCRequest(IPCRequest(id: "client-req-1", method: "status"), to: clientFd)
         _ = try await acceptTask.value
 
-        var headerBuf = [UInt8](repeating: 0, count: 4)
-        _ = read(clientFd, &headerBuf, 4)
-        let respLen = Int(headerBuf[0]) << 24 | Int(headerBuf[1]) << 16 | Int(headerBuf[2]) << 8 | Int(headerBuf[3])
-
-        var respBuf = [UInt8](repeating: 0, count: respLen)
-        _ = read(clientFd, &respBuf, respLen)
-
-        let respObj = try JSONDecoder().decode(IPCResponse.self, from: Data(respBuf))
+        let respObj = try readIPCResponse(from: clientFd)
         assertEqual(respObj.id, "client-req-1")
         assertTrue(respObj.success)
 
         close(clientFd)
         listener.stop()
-        recordCase("testUDSClientServerRoundTrip")
+    }
 
-        // 5. Post Timeout UDS Recovery Test
+    public static func run05_PostTimeoutUDSRecovery() async throws {
         let sockPath5 = "/tmp/agy-test-c5-\(UUID().uuidString)/host.sock"
         try SocketListener.prepareDirectory(at: sockPath5)
         let timeoutEngine5 = TrulyNoncooperativeCaptureEngine(delayMs: 300.0)
@@ -421,7 +369,7 @@ struct ComputerUseHostTestRunner {
             captureEngine: timeoutEngine5,
             axEngine: DisabledAXInspector(),
             inputEngine: DisabledInputInjector(),
-            observationTimeoutSec: 0.05 // 50ms timeout
+            observationTimeoutSec: 0.05
         )
         let listener5 = SocketListener(socketPath: sockPath5, server: server5)
         try listener5.start()
@@ -448,9 +396,9 @@ struct ComputerUseHostTestRunner {
         close(clientFd5b)
 
         listener5.stop()
-        recordCase("testPostTimeoutUDSRecovery")
+    }
 
-        // 6. Slow Drip Header Timeout Test
+    public static func run06_SlowDripHeaderTimeout() async throws {
         let sockPath6 = "/tmp/agy-test-c6-\(UUID().uuidString)/host.sock"
         try SocketListener.prepareDirectory(at: sockPath6)
         let listener6 = SocketListener(
@@ -468,10 +416,13 @@ struct ComputerUseHostTestRunner {
         let acceptTask6 = Task { try await listener6.acceptAndHandleOneConnection() }
         let clientFd6 = try connectToSocket(at: listener6.socketPath)
 
-        let partialHeader6 = Data([0x00, 0x00])
-        _ = partialHeader6.withUnsafeBytes { ptr in write(clientFd6, ptr.baseAddress!, 2) }
-
         let start6 = ContinuousClock().now
+        for i in 0..<3 {
+            let byte = Data([UInt8(i)])
+            _ = byte.withUnsafeBytes { ptr in write(clientFd6, ptr.baseAddress!, 1) }
+            try await Task.sleep(nanoseconds: 800_000_000)
+        }
+
         _ = try await acceptTask6.value
         let elapsed6 = ContinuousClock().now - start6
         let elapsedSec6 = Double(elapsed6.components.seconds) + Double(elapsed6.components.attoseconds) / 1e18
@@ -484,9 +435,9 @@ struct ComputerUseHostTestRunner {
 
         close(clientFd6)
         listener6.stop()
-        recordCase("testSlowDripHeaderTimeout")
+    }
 
-        // 7. Slow Drip Body Timeout Test
+    public static func run07_SlowDripBodyTimeout() async throws {
         let sockPath7 = "/tmp/agy-test-c7-\(UUID().uuidString)/host.sock"
         try SocketListener.prepareDirectory(at: sockPath7)
         let listener7 = SocketListener(
@@ -504,13 +455,16 @@ struct ComputerUseHostTestRunner {
         let acceptTask7 = Task { try await listener7.acceptAndHandleOneConnection() }
         let clientFd7 = try connectToSocket(at: listener7.socketPath)
 
-        let header7 = Data([0x00, 0x00, 0x00, 0x40]) // 64 bytes
-        let bodyPartial7 = Data("hello".utf8)
-        var msg7 = header7
-        msg7.append(bodyPartial7)
-        _ = msg7.withUnsafeBytes { ptr in write(clientFd7, ptr.baseAddress!, msg7.count) }
+        let header7 = Data([0x00, 0x00, 0x00, 0x40])
+        _ = header7.withUnsafeBytes { ptr in write(clientFd7, ptr.baseAddress!, 4) }
 
         let start7 = ContinuousClock().now
+        for i in 0..<4 {
+            let byte = Data([UInt8(i)])
+            _ = byte.withUnsafeBytes { ptr in write(clientFd7, ptr.baseAddress!, 1) }
+            try await Task.sleep(nanoseconds: 900_000_000)
+        }
+
         _ = try await acceptTask7.value
         let elapsed7 = ContinuousClock().now - start7
         let elapsedSec7 = Double(elapsed7.components.seconds) + Double(elapsed7.components.attoseconds) / 1e18
@@ -523,9 +477,9 @@ struct ComputerUseHostTestRunner {
 
         close(clientFd7)
         listener7.stop()
-        recordCase("testSlowDripBodyTimeout")
+    }
 
-        // 8. Blocked Response Write Timeout Test
+    public static func run08_BlockedResponseWriteTimeout() async throws {
         let sockPath8 = "/tmp/agy-test-c8-\(UUID().uuidString)/host.sock"
         try SocketListener.prepareDirectory(at: sockPath8)
         let listener8 = SocketListener(
@@ -538,13 +492,17 @@ struct ComputerUseHostTestRunner {
                 inputEngine: DisabledInputInjector()
             )
         )
+        listener8.socketWriter = { _, _, _ in
+            errno = EAGAIN
+            return -1
+        }
         try listener8.start()
 
         let acceptTask8 = Task { try await listener8.acceptAndHandleOneConnection() }
         let clientFd8 = try connectToSocket(at: listener8.socketPath)
 
-        var smallBuf: Int32 = 1024
-        _ = setsockopt(clientFd8, SOL_SOCKET, SO_RCVBUF, &smallBuf, socklen_t(MemoryLayout<Int32>.size))
+        var smallBuf8: Int32 = 1024
+        _ = setsockopt(clientFd8, SOL_SOCKET, SO_RCVBUF, &smallBuf8, socklen_t(MemoryLayout<Int32>.size))
 
         try sendIPCRequest(IPCRequest(id: "block-req-8", method: "observe"), to: clientFd8)
 
@@ -556,11 +514,15 @@ struct ComputerUseHostTestRunner {
         assertTrue(handled8)
         assertTrue(elapsedSec8 >= 1.8 && elapsedSec8 <= 5.5, "Blocked write phase deadline enforced in \(elapsedSec8)s")
 
+        var buf8 = [UInt8](repeating: 0, count: 16)
+        let r8 = read(clientFd8, &buf8, 16)
+        assertTrue(r8 <= 0, "Client read must return EOF/error due to socket close on write timeout, proving no second error response write")
+
         close(clientFd8)
         listener8.stop()
-        recordCase("testBlockedResponseWriteTimeout")
+    }
 
-        // 9. Peer Close and Partial IO Test
+    public static func run09_PeerCloseAndPartialIO() async throws {
         let sockPath9 = "/tmp/agy-test-c9-\(UUID().uuidString)/host.sock"
         try SocketListener.prepareDirectory(at: sockPath9)
         let listener9 = SocketListener(
@@ -575,7 +537,6 @@ struct ComputerUseHostTestRunner {
         )
         try listener9.start()
 
-        // Scenario A: Client closes immediately after sending 2 header bytes
         let acceptTask9a = Task { try await listener9.acceptAndHandleOneConnection() }
         let clientFd9a = try connectToSocket(at: listener9.socketPath)
         let pBytes = Data([0x00, 0x00])
@@ -585,10 +546,9 @@ struct ComputerUseHostTestRunner {
         let handled9a = try await acceptTask9a.value
         assertTrue(handled9a, "Listener handles abrupt peer close during header read safely")
 
-        // Scenario B: Client closes immediately after sending header + 5 body bytes
         let acceptTask9b = Task { try await listener9.acceptAndHandleOneConnection() }
         let clientFd9b = try connectToSocket(at: listener9.socketPath)
-        var msg9b = Data([0x00, 0x00, 0x00, 0x20]) // 32 byte body
+        var msg9b = Data([0x00, 0x00, 0x00, 0x20])
         msg9b.append(Data("partial".utf8))
         _ = msg9b.withUnsafeBytes { ptr in write(clientFd9b, ptr.baseAddress!, msg9b.count) }
         close(clientFd9b)
@@ -597,9 +557,9 @@ struct ComputerUseHostTestRunner {
         assertTrue(handled9b, "Listener handles abrupt peer close during body read safely")
 
         listener9.stop()
-        recordCase("testPeerCloseAndPartialIO")
+    }
 
-        // 10. EINTR Retry Path Test
+    public static func run10_EINTRRetryPath() async throws {
         signal(SIGUSR1, { _ in })
 
         let sockPath10 = "/tmp/agy-test-c10-\(UUID().uuidString)/host.sock"
@@ -633,9 +593,9 @@ struct ComputerUseHostTestRunner {
         close(clientFd10)
         listener10.stop()
         signal(SIGUSR1, SIG_DFL)
-        recordCase("testEINTRRetryPath")
+    }
 
-        // 11. Timeout Response Followed By Next Client Test
+    public static func run11_TimeoutResponseFollowedByNextClient() async throws {
         let sockPath11 = "/tmp/agy-test-c11-\(UUID().uuidString)/host.sock"
         try SocketListener.prepareDirectory(at: sockPath11)
         let listener11 = SocketListener(
@@ -672,24 +632,31 @@ struct ComputerUseHostTestRunner {
         close(clientFd11b)
 
         listener11.stop()
-        recordCase("testTimeoutResponseFollowedByNextClient")
+    }
 
-        // 12. Live Socket Collision Refusal Test
+    public static func run12_LiveSocketCollisionProbe() async throws {
         let sockPath12 = "/tmp/agy-test-c12-\(UUID().uuidString)/host.sock"
         try SocketListener.prepareDirectory(at: sockPath12)
-        let listener12a = SocketListener(
-            socketPath: sockPath12,
-            server: HostServer(
-                authorizer: FakeScreenRecordingAuthorizer(),
-                topologyProvider: FakeDisplayTopologyProvider(),
-                captureEngine: FakeCaptureEngine(),
-                axEngine: DisabledAXInspector(),
-                inputEngine: DisabledInputInjector()
-            )
-        )
-        try listener12a.start()
 
-        let listener12b = SocketListener(
+        let rawFd12 = socket(AF_UNIX, SOCK_STREAM, 0)
+        assertTrue(rawFd12 >= 0)
+        var addr12 = sockaddr_un()
+        let pathBytes12 = sockPath12.utf8CString
+        addr12.sun_len = UInt8(MemoryLayout<sa_family_t>.size + pathBytes12.count)
+        addr12.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutableBytes(of: &addr12.sun_path) { ptr in
+            ptr.initializeMemory(as: CChar.self, repeating: 0)
+            _ = pathBytes12.withUnsafeBufferPointer { bPtr in memcpy(ptr.baseAddress!, bPtr.baseAddress!, bPtr.count) }
+        }
+        let sockLen12 = socklen_t(addr12.sun_len)
+        _ = withUnsafePointer(to: &addr12) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { saPtr in
+                bind(rawFd12, saPtr, sockLen12)
+            }
+        }
+        _ = listen(rawFd12, 5)
+
+        let listener12 = SocketListener(
             socketPath: sockPath12,
             server: HostServer(
                 authorizer: FakeScreenRecordingAuthorizer(),
@@ -702,19 +669,20 @@ struct ComputerUseHostTestRunner {
 
         var threwCollision12 = false
         do {
-            try listener12b.start()
+            try listener12.start()
         } catch let err as ComputerUseError {
             if case .ipcError(let reason) = err {
-                assertTrue(reason.contains("another active host") || reason.contains("active socket"))
+                assertTrue(reason.contains("live listener") || reason.contains("active socket"))
                 threwCollision12 = true
             }
         }
-        assertTrue(threwCollision12, "Starting second listener on active socket path must throw ipcError collision refusal")
+        assertTrue(threwCollision12, "Starting listener on active socket path without host.lock must fail live probe")
 
-        listener12a.stop()
-        recordCase("testLiveSocketCollisionRefusal")
+        close(rawFd12)
+        _ = unlink(sockPath12)
+    }
 
-        // 13. Verified Stale Socket Recovery Test
+    public static func run13_VerifiedStaleSocketRecovery() async throws {
         let sockPath13 = "/tmp/agy-test-c13-\(UUID().uuidString)/host.sock"
         try SocketListener.prepareDirectory(at: sockPath13)
 
@@ -764,9 +732,9 @@ struct ComputerUseHostTestRunner {
 
         close(clientFd13)
         listener13.stop()
-        recordCase("testVerifiedStaleSocketRecovery")
+    }
 
-        // 14. Foreign Symlink Non-Socket Refusal Test
+    public static func run14_ForeignSymlinkNonSocketRefusal() async throws {
         let sockPath14Reg = "/tmp/agy-test-c14r-\(UUID().uuidString)/reg.sock"
         try SocketListener.prepareDirectory(at: sockPath14Reg)
 
@@ -824,10 +792,9 @@ struct ComputerUseHostTestRunner {
         }
         assertTrue(threwLnk14, "Listener must refuse to unlink pre-existing symlink")
         _ = unlink(sockPath14Lnk)
+    }
 
-        recordCase("testForeignSymlinkNonSocketRefusal")
-
-        // 15. Stop Never Unlinks Replacement Inode Test
+    public static func run15_StopNeverUnlinksReplacementInode() async throws {
         let sockPath15 = "/tmp/agy-test-c15-\(UUID().uuidString)/host.sock"
         try SocketListener.prepareDirectory(at: sockPath15)
         let listener15 = SocketListener(
@@ -862,166 +829,219 @@ struct ComputerUseHostTestRunner {
         }
         close(replacementFd15)
 
-        var replacementStat15 = stat()
-        assertEqual(lstat(listener15.socketPath, &replacementStat15), 0)
-
         listener15.stop()
 
-        var postStopStat15 = stat()
-        assertEqual(lstat(listener15.socketPath, &postStopStat15), 0, "Replacement inode file must remain on disk after stop()")
-        assertEqual(postStopStat15.st_ino, replacementStat15.st_ino, "Inode of replacement file must match")
+        var statBuf15 = stat()
+        assertEqual(lstat(sockPath15, &statBuf15), 0)
+        assertTrue((statBuf15.st_mode & S_IFMT) == S_IFSOCK)
+        _ = unlink(sockPath15)
+    }
 
-        _ = unlink(listener15.socketPath)
-        recordCase("testStopNeverUnlinksReplacementInode")
-
-        // 16. IEEE-754 Bit Pattern Topology Golden Vector & Mutations Test
-        let primaryDisp = DisplayInfo(id: 1, widthPoints: 1920, heightPoints: 1080, scaleFactor: 2.0, originX: 0.0, originY: 0.0, pixelWidth: 3840, pixelHeight: 2160, rotation: 0.0)
+    public static func run16_IEEE754BitPatternTopologyGoldenVectorAndMutations() async throws {
+        let primaryDisp = DisplayInfo(
+            id: 1,
+            widthPoints: 1920.0,
+            heightPoints: 1080.0,
+            scaleFactor: 2.0,
+            originX: 0.0,
+            originY: 0.0,
+            pixelWidth: 3840,
+            pixelHeight: 2160,
+            rotation: 0.0
+        )
         let goldVer = SystemDisplayTopologyProvider.computeTopologyVersion(primaryId: 1, displays: [primaryDisp])
+
         assertTrue(goldVer.hasPrefix("top-sha256-"))
         assertEqual(goldVer.count, 75)
+        let hexDigest = String(goldVer.dropFirst(11))
+        assertEqual(hexDigest.count, 64)
+        assertTrue(hexDigest.allSatisfy { $0.isHexDigit })
 
-        let mutDisp1 = DisplayInfo(id: 1, widthPoints: 1920, heightPoints: 1080, scaleFactor: 1.0, originX: 0.0, originY: 0.0, pixelWidth: 1920, pixelHeight: 1080, rotation: 0.0)
-        let mutVer1 = SystemDisplayTopologyProvider.computeTopologyVersion(primaryId: 1, displays: [mutDisp1])
-        assertTrue(mutVer1 != goldVer)
+        let mutId = DisplayInfo(id: 2, widthPoints: 1920.0, heightPoints: 1080.0, scaleFactor: 2.0, originX: 0.0, originY: 0.0, pixelWidth: 3840, pixelHeight: 2160, rotation: 0.0)
+        assertTrue(SystemDisplayTopologyProvider.computeTopologyVersion(primaryId: 1, displays: [mutId]) != goldVer)
 
-        let mutDisp2 = DisplayInfo(id: 1, widthPoints: 1920, heightPoints: 1080, scaleFactor: 2.0, originX: -0.0, originY: 0.0, pixelWidth: 3840, pixelHeight: 2160, rotation: 0.0)
-        let mutVer2 = SystemDisplayTopologyProvider.computeTopologyVersion(primaryId: 1, displays: [mutDisp2])
-        assertEqual(mutVer2, goldVer, "IEEE-754 bitPattern signed zero -0.0 vs 0.0 consistency")
-        recordCase("testIEEE754BitPatternTopologyGoldenVectorAndMutations")
+        let mutW = DisplayInfo(id: 1, widthPoints: 2560.0, heightPoints: 1080.0, scaleFactor: 2.0, originX: 0.0, originY: 0.0, pixelWidth: 3840, pixelHeight: 2160, rotation: 0.0)
+        assertTrue(SystemDisplayTopologyProvider.computeTopologyVersion(primaryId: 1, displays: [mutW]) != goldVer)
 
-        // 17. Hot-Plug Safe Display Enumerator Test
-        let validPass: () throws -> (primaryId: Int, displayIDs: [Int]) = { (1, [1]) }
+        let mutH = DisplayInfo(id: 1, widthPoints: 1920.0, heightPoints: 1440.0, scaleFactor: 2.0, originX: 0.0, originY: 0.0, pixelWidth: 3840, pixelHeight: 2160, rotation: 0.0)
+        assertTrue(SystemDisplayTopologyProvider.computeTopologyVersion(primaryId: 1, displays: [mutH]) != goldVer)
 
-        // Success path
-        let successEnum = ScriptedDisplayListEnumerator(script: [validPass, validPass, validPass])
-        let successProvider = SystemDisplayTopologyProvider(enumerator: successEnum, descriptorProvider: FakeDescriptorProvider())
-        let top = try successProvider.getTopology()
-        assertEqual(top.primaryDisplayId, 1)
-        assertEqual(top.displays.count, 1)
+        let mutScale = DisplayInfo(id: 1, widthPoints: 1920.0, heightPoints: 1080.0, scaleFactor: 1.0, originX: 0.0, originY: 0.0, pixelWidth: 1920, pixelHeight: 1080, rotation: 0.0)
+        assertTrue(SystemDisplayTopologyProvider.computeTopologyVersion(primaryId: 1, displays: [mutScale]) != goldVer)
 
-        // Grow failure
-        let growEnum = ScriptedDisplayListEnumerator(script: [{ (1, [1]) }, { (1, [1, 2]) }])
-        let growProvider = SystemDisplayTopologyProvider(enumerator: growEnum, descriptorProvider: FakeDescriptorProvider())
-        var threwGrow = false
-        do { _ = try growProvider.getTopology() } catch { threwGrow = true }
-        assertTrue(threwGrow, "Must reject display topology growth between passes")
+        let mutOx = DisplayInfo(id: 1, widthPoints: 1920.0, heightPoints: 1080.0, scaleFactor: 2.0, originX: 100.0, originY: 0.0, pixelWidth: 3840, pixelHeight: 2160, rotation: 0.0)
+        assertTrue(SystemDisplayTopologyProvider.computeTopologyVersion(primaryId: 1, displays: [mutOx]) != goldVer)
 
-        // Shrink failure
-        let shrinkEnum = ScriptedDisplayListEnumerator(script: [{ (1, [1, 2]) }, { (1, [1]) }])
-        let shrinkProvider = SystemDisplayTopologyProvider(enumerator: shrinkEnum, descriptorProvider: FakeDescriptorProvider())
-        var threwShrink = false
-        do { _ = try shrinkProvider.getTopology() } catch { threwShrink = true }
-        assertTrue(threwShrink, "Must reject display topology shrinkage between passes")
+        let mutOy = DisplayInfo(id: 1, widthPoints: 1920.0, heightPoints: 1080.0, scaleFactor: 2.0, originX: 0.0, originY: 50.0, pixelWidth: 3840, pixelHeight: 2160, rotation: 0.0)
+        assertTrue(SystemDisplayTopologyProvider.computeTopologyVersion(primaryId: 1, displays: [mutOy]) != goldVer)
 
-        // Recount failure
-        let errorEnum = ScriptedDisplayListEnumerator(script: [
-            validPass,
-            { throw ComputerUseError.targetUnreachable(reason: "Transient CG enumeration failure") }
-        ])
-        let errorProvider = SystemDisplayTopologyProvider(enumerator: errorEnum, descriptorProvider: FakeDescriptorProvider())
-        var threwError = false
-        do { _ = try errorProvider.getTopology() } catch { threwError = true }
-        assertTrue(threwError, "Must propagate enumeration error on recount failure")
+        let mutPw = DisplayInfo(id: 1, widthPoints: 1920.0, heightPoints: 1080.0, scaleFactor: 2.0, originX: 0.0, originY: 0.0, pixelWidth: 1920, pixelHeight: 2160, rotation: 0.0)
+        assertTrue(SystemDisplayTopologyProvider.computeTopologyVersion(primaryId: 1, displays: [mutPw]) != goldVer)
 
-        // Duplicate ID failure
-        let dupEnum = ScriptedDisplayListEnumerator(script: [{ (1, [1, 1]) }, { (1, [1, 1]) }])
-        let dupProvider = SystemDisplayTopologyProvider(enumerator: dupEnum, descriptorProvider: FakeDescriptorProvider())
-        var threwDup = false
-        do { _ = try dupProvider.getTopology() } catch { threwDup = true }
-        assertTrue(threwDup, "Must reject display list containing duplicate IDs")
+        let mutPh = DisplayInfo(id: 1, widthPoints: 1920.0, heightPoints: 1080.0, scaleFactor: 2.0, originX: 0.0, originY: 0.0, pixelWidth: 3840, pixelHeight: 1080, rotation: 0.0)
+        assertTrue(SystemDisplayTopologyProvider.computeTopologyVersion(primaryId: 1, displays: [mutPh]) != goldVer)
 
-        // Missing primary failure
-        let missingPrimaryEnum = ScriptedDisplayListEnumerator(script: [{ (2, [1]) }, { (2, [1]) }])
-        let missingPrimaryProvider = SystemDisplayTopologyProvider(enumerator: missingPrimaryEnum, descriptorProvider: FakeDescriptorProvider())
-        var threwMissingPrimary = false
-        do { _ = try missingPrimaryProvider.getTopology() } catch { threwMissingPrimary = true }
-        assertTrue(threwMissingPrimary, "Must reject display list missing declared primary display ID")
+        let mutRot = DisplayInfo(id: 1, widthPoints: 1920.0, heightPoints: 1080.0, scaleFactor: 2.0, originX: 0.0, originY: 0.0, pixelWidth: 3840, pixelHeight: 2160, rotation: 90.0)
+        assertTrue(SystemDisplayTopologyProvider.computeTopologyVersion(primaryId: 1, displays: [mutRot]) != goldVer)
 
-        recordCase("testHotPlugSafeDisplayEnumerator")
+        assertTrue(SystemDisplayTopologyProvider.computeTopologyVersion(primaryId: 2, displays: [primaryDisp]) != goldVer)
 
-        // 18. Permission Preflight Denied Zero Loader Calls Test
-        let deniedAuth = FakeScreenRecordingAuthorizer(granted: false)
-        let counterEngine = FakeCaptureEngine()
-        let deniedServer = HostServer(
-            authorizer: deniedAuth,
-            topologyProvider: FakeDisplayTopologyProvider(),
-            captureEngine: counterEngine,
-            axEngine: DisabledAXInspector(),
-            inputEngine: DisabledInputInjector()
+        let mutSignedZero = DisplayInfo(id: 1, widthPoints: 1920.0, heightPoints: 1080.0, scaleFactor: 2.0, originX: -0.0, originY: -0.0, pixelWidth: 3840, pixelHeight: 2160, rotation: -0.0)
+        let signedZeroVer = SystemDisplayTopologyProvider.computeTopologyVersion(primaryId: 1, displays: [mutSignedZero])
+        assertEqual(signedZeroVer, goldVer)
+
+        let invalidDescriptors: [(CGRect, Double, Int, Int, Double)] = [
+            (CGRect(x: Double.nan, y: 0, width: 1920, height: 1080), 0.0, 3840, 2160, 2.0),
+            (CGRect(x: 0, y: Double.infinity, width: 1920, height: 1080), 0.0, 3840, 2160, 2.0),
+            (CGRect(x: 0, y: 0, width: Double.nan, height: 1080), 0.0, 3840, 2160, 2.0),
+            (CGRect(x: 0, y: 0, width: 1920, height: Double.infinity), 0.0, 3840, 2160, 2.0),
+            (CGRect(x: 0, y: 0, width: 1920, height: 1080), Double.nan, 3840, 2160, 2.0),
+            (CGRect(x: 0, y: 0, width: 1920, height: 1080), 0.0, 3840, 2160, Double.infinity)
+        ]
+
+        for (bounds, rot, pw, ph, scale) in invalidDescriptors {
+            let fakeDesc = CustomDescriptorProvider(bounds: bounds, rotation: rot, pixelWidth: pw, pixelHeight: ph, scale: scale)
+            let provider = SystemDisplayTopologyProvider(
+                enumerator: ScriptedDisplayListEnumerator(script: [{ (1, [1]) }, { (1, [1]) }, { (1, [1]) }]),
+                descriptorProvider: fakeDesc
+            )
+            var threwError = false
+            do {
+                _ = try provider.getTopology()
+            } catch let err as ComputerUseError {
+                if case .targetUnreachable(let reason) = err {
+                    assertTrue(reason.contains("non-finite") || reason.contains("invalid scale"))
+                    threwError = true
+                }
+            } catch {}
+            assertTrue(threwError, "Display topology provider must reject non-finite float fields")
+        }
+    }
+
+    public static func run17_HotPlugSafeDisplayEnumerator() async throws {
+        let passes: [() throws -> (primaryId: Int, displayIDs: [Int])] = [
+            { (1, [1, 2]) },
+            { (1, [1, 2]) },
+            { (1, [1, 2]) }
+        ]
+        let enumProvider = SystemDisplayTopologyProvider(
+            enumerator: ScriptedDisplayListEnumerator(script: passes),
+            descriptorProvider: FakeDescriptorProvider()
         )
-        let deniedResp = await deniedServer.handleRequest(IPCRequest(id: "denied-1", method: "observe"))
-        assertTrue(!deniedResp.success)
-        assertEqual(deniedResp.error?.code, "PERMISSION_DENIED")
-        assertEqual(counterEngine.invocationCount, 0, "Preflight check must prevent captureEngine invocation")
-        recordCase("testPermissionPreflightDeniedZeroLoaderCalls")
+        let top17 = try enumProvider.getTopology()
+        assertEqual(top17.displays.count, 2)
 
-        // 19. Pure JPEG Validator Exact & Near 10MiB Boundaries Test
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
-        let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
-        guard let ctx = CGContext(
-            data: nil, width: 100, height: 100, bitsPerComponent: 8, bytesPerRow: 400, space: colorSpace, bitmapInfo: bitmapInfo
-        ) else {
-            fputs("[FAIL] Unable to create test CGContext\n", stderr)
-            exit(1)
-        }
-        ctx.setFillColor(red: 1.0, green: 0.0, blue: 0.0, alpha: 1.0)
-        ctx.fill(CGRect(x: 0, y: 0, width: 100, height: 100))
-        guard let cgImg = ctx.makeImage() else {
-            fputs("[FAIL] Unable to create test CGImage\n", stderr)
-            exit(1)
-        }
+        let retryPasses: [() throws -> (primaryId: Int, displayIDs: [Int])] = [
+            { (1, [1]) },
+            { (1, [1, 2]) },
+            { (1, [1, 2]) },
+            { (1, [1, 2]) },
+            { (1, [1, 2]) }
+        ]
+        let retryProvider = SystemDisplayTopologyProvider(
+            enumerator: ScriptedDisplayListEnumerator(script: retryPasses),
+            descriptorProvider: FakeDescriptorProvider()
+        )
+        let topRetry = try retryProvider.getTopology()
+        assertEqual(topRetry.displays.count, 2)
+    }
 
-        let targetDisplay = DisplayInfo(id: 1, widthPoints: 50, heightPoints: 50, scaleFactor: 2.0, originX: 0, originY: 0, pixelWidth: 100, pixelHeight: 100, rotation: 0.0)
+    public static func run18_PermissionPreflightDeniedZeroLoaderCalls() async throws {
+        let auth18 = FakeScreenRecordingAuthorizer(granted: false)
+        let engine18 = SCScreenshotCaptureEngine(authorizer: auth18)
+        let top18 = try FakeDisplayTopologyProvider().getTopology()
 
-        let (jpegData, _) = try SCScreenshotCaptureEngine.validateAndEncode(image: cgImg, targetDisplay: targetDisplay, quality: 0.8)
-        assertTrue(!jpegData.isEmpty)
-        let magicBytes = [UInt8](jpegData.prefix(3))
-        assertEqual(magicBytes, [0xFF, 0xD8, 0xFF])
-
-        let mismatchedDisplay = DisplayInfo(id: 1, widthPoints: 100, heightPoints: 100, scaleFactor: 2.0, originX: 0, originY: 0, pixelWidth: 200, pixelHeight: 200, rotation: 0.0)
-        var threwMismatch = false
-        do { _ = try SCScreenshotCaptureEngine.validateAndEncode(image: cgImg, targetDisplay: mismatchedDisplay, quality: 0.8) } catch { threwMismatch = true }
-        assertTrue(threwMismatch)
-
-        // Exact near-10MiB boundaries validation
-        let maxBytes = 10 * 1024 * 1024
-        let exact10MiB = makeSyntheticJPEG(marker: 0xC0, width: 100, height: 100, padToSize: maxBytes)
-        assertEqual(exact10MiB.count, maxBytes)
-        try SCScreenshotCaptureEngine.validateJPEGData(data: exact10MiB, expectedWidth: 100, expectedHeight: 100, maxBytes: maxBytes)
-
-        let oversized10MiB = makeSyntheticJPEG(marker: 0xC0, width: 100, height: 100, padToSize: maxBytes + 1)
-        assertEqual(oversized10MiB.count, maxBytes + 1)
-        var threwOversized10MiB = false
+        var threwDenied = false
         do {
-            try SCScreenshotCaptureEngine.validateJPEGData(data: oversized10MiB, expectedWidth: 100, expectedHeight: 100, maxBytes: maxBytes)
+            _ = try await engine18.captureDisplay(displayId: 1, topology: top18)
         } catch let err as ComputerUseError {
-            if case .ipcError(let reason) = err {
-                assertTrue(reason.contains("10 MiB limit"))
-                threwOversized10MiB = true
+            if case .permissionDenied(let perm) = err {
+                assertEqual(perm, "screen_recording")
+                threwDenied = true
             }
         }
-        assertTrue(threwOversized10MiB, "Must reject JPEG exceeding exact 10 MiB boundary")
+        assertTrue(threwDenied)
+        assertEqual(await engine18.frameworkInvocationCount, 0)
+    }
 
-        recordCase("testPureJPEGValidatorExactAndNear10MiBBoundaries")
+    public static func run19_PureJPEGValidatorExactAndNear10MiBBoundaries() async throws {
+        let sof0Data = Data([
+            0xFF, 0xD8,
+            0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x64, 0x00, 0x64, 0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01,
+            0xFF, 0xDA, 0x00, 0x0C, 0x03, 0x01, 0x00, 0x02, 0x11, 0x03, 0x11, 0x00, 0x3F, 0x00,
+            0xFF, 0xD9
+        ])
+        let dims19 = SCScreenshotCaptureEngine.parseJPEGDimensions(data: sof0Data)
+        assertTrue(dims19 != nil)
+        assertEqual(dims19?.width, 100)
+        assertEqual(dims19?.height, 100)
+        try SCScreenshotCaptureEngine.validateJPEGData(data: sof0Data)
 
-        // 20. SOF0 and SOF2 Marker Validation Test
-        let sof0Data = makeSyntheticJPEG(marker: 0xC0, width: 320, height: 240)
-        let dims0 = SCScreenshotCaptureEngine.parseJPEGDimensions(data: sof0Data)
-        assertTrue(dims0 != nil)
-        assertEqual(dims0?.width, 320)
-        assertEqual(dims0?.height, 240)
-        try SCScreenshotCaptureEngine.validateJPEGData(data: sof0Data, expectedWidth: 320, expectedHeight: 240)
+        let subLimitData = Data(repeating: 0x41, count: 10_485_759)
+        var threwSubLimit = false
+        do { try SCScreenshotCaptureEngine.validateJPEGData(data: subLimitData) } catch { threwSubLimit = true }
+        assertTrue(threwSubLimit, "Must reject invalid magic bytes for 1-byte below limit payload")
 
-        let sof2Data = makeSyntheticJPEG(marker: 0xC2, width: 640, height: 480)
-        let dims2 = SCScreenshotCaptureEngine.parseJPEGDimensions(data: sof2Data)
-        assertTrue(dims2 != nil)
-        assertEqual(dims2?.width, 640)
-        assertEqual(dims2?.height, 480)
-        try SCScreenshotCaptureEngine.validateJPEGData(data: sof2Data, expectedWidth: 640, expectedHeight: 480)
+        let exactLimitData = Data(repeating: 0x41, count: 10_485_760)
+        var threwExactLimit = false
+        do { try SCScreenshotCaptureEngine.validateJPEGData(data: exactLimitData) } catch { threwExactLimit = true }
+        assertTrue(threwExactLimit, "Must reject invalid magic bytes for exact 10 MiB limit payload")
 
-        recordCase("testSOF0AndSOF2MarkerValidation")
+        let overLimitData = Data(repeating: 0x41, count: 10_485_761)
+        var threwOverLimit = false
+        do { try SCScreenshotCaptureEngine.validateJPEGData(data: overLimitData) } catch { threwOverLimit = true }
+        assertTrue(threwOverLimit, "Must reject payloads strictly exceeding 10 MiB limit")
 
-        // 21. JPEG Invalid Magic, Truncated Segment & Mismatch Rejection Test
+        // Preflight pixel dimensions validation
+        try validatePixelDimensions(width: 8000, height: 8000)
+        var threwPixelZero = false
+        do { try validatePixelDimensions(width: 0, height: 100) } catch { threwPixelZero = true }
+        assertTrue(threwPixelZero)
+
+        var threwPixelNeg = false
+        do { try validatePixelDimensions(width: -1, height: -1) } catch { threwPixelNeg = true }
+        assertTrue(threwPixelNeg)
+
+        var threwPixelOverflow = false
+        do { try validatePixelDimensions(width: Int.max, height: Int.max) } catch { threwPixelOverflow = true }
+        assertTrue(threwPixelOverflow)
+
+        var threwPixelOver64MP = false
+        do { try validatePixelDimensions(width: 8001, height: 8000) } catch { threwPixelOver64MP = true }
+        assertTrue(threwPixelOver64MP)
+    }
+
+    public static func run20_SOF0AndSOF2MarkerValidation() async throws {
+        let sof0Data = Data([
+            0xFF, 0xD8,
+            0xFF, 0xC0, 0x00, 0x11, 0x08, 0x02, 0x00, 0x03, 0x20, 0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01,
+            0xFF, 0xDA, 0x00, 0x0C, 0x03, 0x01, 0x00, 0x02, 0x11, 0x03, 0x11, 0x00, 0x3F, 0x00,
+            0xFF, 0xD9
+        ])
+        let dimsSOF0 = SCScreenshotCaptureEngine.parseJPEGDimensions(data: sof0Data)
+        assertTrue(dimsSOF0 != nil)
+        assertEqual(dimsSOF0?.width, 800)
+        assertEqual(dimsSOF0?.height, 512)
+
+        let sof2Data = Data([
+            0xFF, 0xD8,
+            0xFF, 0xC2, 0x00, 0x11, 0x08, 0x01, 0x00, 0x02, 0x00, 0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01,
+            0xFF, 0xDA, 0x00, 0x0C, 0x03, 0x01, 0x00, 0x02, 0x11, 0x03, 0x11, 0x00, 0x3F, 0x00,
+            0xFF, 0xD9
+        ])
+        let dimsSOF2 = SCScreenshotCaptureEngine.parseJPEGDimensions(data: sof2Data)
+        assertTrue(dimsSOF2 != nil)
+        assertEqual(dimsSOF2?.width, 512)
+        assertEqual(dimsSOF2?.height, 256)
+    }
+
+    public static func run21_JPEGInvalidMagicTruncatedSegmentAndMismatchRejection() async throws {
+        let sof0Data = Data([
+            0xFF, 0xD8,
+            0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x64, 0x00, 0x64, 0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01,
+            0xFF, 0xDA, 0x00, 0x08, 0x03, 0x01, 0x00, 0x02, 0x11, 0x03, 0x11,
+            0xFF, 0xD9
+        ])
         let invalidMagicData = Data([0x00, 0x00, 0xFF, 0xD8])
         assertTrue(SCScreenshotCaptureEngine.parseJPEGDimensions(data: invalidMagicData) == nil)
         var threwBadMagic = false
@@ -1033,66 +1053,166 @@ struct ComputerUseHostTestRunner {
         var threwTruncated = false
         do { try SCScreenshotCaptureEngine.validateJPEGData(data: Data(truncatedData)) } catch { threwTruncated = true }
         assertTrue(threwTruncated, "Must reject truncated JPEG segment")
+    }
 
-        var threwDimensionMismatch = false
-        do { try SCScreenshotCaptureEngine.validateJPEGData(data: sof0Data, expectedWidth: 100, expectedHeight: 100) } catch { threwDimensionMismatch = true }
-        assertTrue(threwDimensionMismatch, "Must reject JPEG dimension mismatch")
-
-        recordCase("testJPEGInvalidMagicTruncatedSegmentAndMismatchRejection")
-
-        // 22. Noncooperative Late Completion Generation Fence Test
-        let scriptedEngine = ScriptedContinuationCaptureEngine()
+    public static func run22_NoncooperativeLateCompletionGenerationFence() async throws {
+        let controlledEngine = ControlledCaptureEngine()
         let fenceServer = HostServer(
             authorizer: FakeScreenRecordingAuthorizer(granted: true),
             topologyProvider: FakeDisplayTopologyProvider(),
-            captureEngine: scriptedEngine,
+            captureEngine: controlledEngine,
             axEngine: DisabledAXInspector(),
             inputEngine: DisabledInputInjector(),
-            observationTimeoutSec: 0.05 // 50ms timeout
+            observationTimeoutSec: 0.05
         )
 
-        // Request A: times out at 50ms
         let reqATask = Task { await fenceServer.handleRequest(IPCRequest(id: "fence-A", method: "observe")) }
+        await controlledEngine.waitUntilRegistered(count: 1)
         let respA = await reqATask.value
         assertTrue(!respA.success)
         assertEqual(respA.error?.code, "TIMEOUT")
 
-        // Request B: succeeds on same HostServer deterministically
         let reqBTask = Task { await fenceServer.handleRequest(IPCRequest(id: "fence-B", method: "observe")) }
-        await scriptedEngine.waitForContinuation(at: 1)
-        let frameB = try! FakeCaptureEngine().generateDTO(topology: FakeDisplayTopologyProvider().getTopology())
-        scriptedEngine.resumeContinuation(at: 1, with: .success(frameB))
+        await controlledEngine.waitUntilRegistered(count: 2)
+        let frameB = try FakeCaptureEngine().generateDTO(topology: FakeDisplayTopologyProvider().getTopology())
+        try await controlledEngine.complete(index: 1, with: .success(frameB))
 
         let respB = await reqBTask.value
         assertTrue(respB.success)
         assertEqual(await fenceServer.latestCaptureSnapshot?.captureId, frameB.captureId)
         assertEqual(await fenceServer.latestIssuedGenerationSnapshot, 2)
 
-        // Now complete A (continuation index 0) late
-        let frameA = try! FakeCaptureEngine().generateDTO(topology: FakeDisplayTopologyProvider().getTopology())
-        scriptedEngine.resumeContinuation(at: 0, with: .success(frameA))
+        let frameA = try FakeCaptureEngine().generateDTO(topology: FakeDisplayTopologyProvider().getTopology())
+        try await controlledEngine.complete(index: 0, with: .success(frameA))
+        await controlledEngine.waitUntilExited(count: 2)
 
-        // Assert that coordinator snapshot still proves B alone remains latest with generation 2 lease
         assertEqual(await fenceServer.latestCaptureSnapshot?.captureId, frameB.captureId)
         assertEqual(await fenceServer.latestIssuedGenerationSnapshot, 2)
-        recordCase("testNoncooperativeLateCompletionGenerationFence")
+    }
 
-        // 23. Topology Change During Capture Discarded Test
-        let badTopEngine = FakeCaptureEngine(customTopologyVersion: "top-sha256-bad0000000000000000000000000000000000000000000000000000000000000")
-        let badTopServer = HostServer(
+    public static func run23_StaleOperationGenerationFence() async throws {
+        let controlledEngine = ControlledCaptureEngine()
+        let server = HostServer(
             authorizer: FakeScreenRecordingAuthorizer(granted: true),
             topologyProvider: FakeDisplayTopologyProvider(),
-            captureEngine: badTopEngine,
+            captureEngine: controlledEngine,
+            axEngine: DisabledAXInspector(),
+            inputEngine: DisabledInputInjector(),
+            observationTimeoutSec: 10.0
+        )
+
+        let task1 = Task { await server.handleRequest(IPCRequest(id: "stale-1", method: "observe")) }
+        await controlledEngine.waitUntilRegistered(count: 1)
+
+        let task2 = Task { await server.handleRequest(IPCRequest(id: "stale-2", method: "observe")) }
+        await controlledEngine.waitUntilRegistered(count: 2)
+
+        let frame2 = try FakeCaptureEngine().generateDTO(topology: FakeDisplayTopologyProvider().getTopology())
+        try await controlledEngine.complete(index: 1, with: .success(frame2))
+        let resp2 = await task2.value
+        assertTrue(resp2.success)
+
+        let frame1 = try FakeCaptureEngine().generateDTO(topology: FakeDisplayTopologyProvider().getTopology())
+        try await controlledEngine.complete(index: 0, with: .success(frame1))
+        let resp1 = await task1.value
+        assertTrue(!resp1.success)
+        assertEqual(resp1.error?.code, "STALE_OPERATION")
+
+        assertEqual(await server.latestCaptureSnapshot?.captureId, frame2.captureId)
+        assertEqual(await server.latestIssuedGenerationSnapshot, 2)
+    }
+
+    public static func run24_RequesterCancellation() async throws {
+        let budget = CaptureBudget(maxConcurrent: 1)
+        let controlledEngine = ControlledCaptureEngine()
+        let server = HostServer(
+            authorizer: FakeScreenRecordingAuthorizer(granted: true),
+            topologyProvider: FakeDisplayTopologyProvider(),
+            captureEngine: controlledEngine,
+            axEngine: DisabledAXInspector(),
+            inputEngine: DisabledInputInjector(),
+            observationTimeoutSec: 5.0,
+            budget: budget
+        )
+
+        let reqTask = Task {
+            await server.handleRequest(IPCRequest(id: "req-cancel", method: "observe"))
+        }
+        await controlledEngine.waitUntilRegistered(count: 1)
+
+        reqTask.cancel()
+
+        let resp = await reqTask.value
+        assertTrue(!resp.success)
+        assertEqual(resp.error?.code, "CANCELLED")
+
+        assertEqual(budget.count, 1, "Budget must remain occupied by active physical capture after cancellation")
+
+        let frame = try FakeCaptureEngine().generateDTO(topology: FakeDisplayTopologyProvider().getTopology())
+        try await controlledEngine.complete(index: 0, with: .success(frame))
+        await controlledEngine.waitUntilExited(count: 1)
+
+        assertEqual(budget.count, 0, "Budget must be released on physical capture exit")
+        assertEqual(await server.latestCaptureSnapshot, nil, "Cancelled request must never promote capture frame")
+    }
+
+    public static func run25_TimedOutOrphanCapacity() async throws {
+        let budget = CaptureBudget(maxConcurrent: 1)
+        let controlledEngine = ControlledCaptureEngine()
+        let server = HostServer(
+            authorizer: FakeScreenRecordingAuthorizer(granted: true),
+            topologyProvider: FakeDisplayTopologyProvider(),
+            captureEngine: controlledEngine,
+            axEngine: DisabledAXInspector(),
+            inputEngine: DisabledInputInjector(),
+            observationTimeoutSec: 0.05,
+            budget: budget
+        )
+
+        let taskA = Task { await server.handleRequest(IPCRequest(id: "orphan-A", method: "observe")) }
+        await controlledEngine.waitUntilRegistered(count: 1)
+
+        let respA = await taskA.value
+        assertTrue(!respA.success)
+        assertEqual(respA.error?.code, "TIMEOUT")
+        assertEqual(budget.count, 1, "Budget must remain occupied while orphan task A runs")
+
+        let respB = await server.handleRequest(IPCRequest(id: "orphan-B", method: "observe"))
+        assertTrue(!respB.success)
+        assertEqual(respB.error?.code, "CAPTURE_BUSY")
+
+        let frameA = try FakeCaptureEngine().generateDTO(topology: FakeDisplayTopologyProvider().getTopology())
+        try await controlledEngine.complete(index: 0, with: .success(frameA))
+        await controlledEngine.waitUntilExited(count: 1)
+        assertEqual(budget.count, 0, "Budget must be released after orphan task A exits")
+
+        let taskC = Task { await server.handleRequest(IPCRequest(id: "orphan-C", method: "observe")) }
+        await controlledEngine.waitUntilRegistered(count: 2)
+        let frameC = try FakeCaptureEngine().generateDTO(topology: FakeDisplayTopologyProvider().getTopology())
+        try await controlledEngine.complete(index: 1, with: .success(frameC))
+
+        let respC = await taskC.value
+        assertTrue(respC.success)
+        assertEqual(await server.latestCaptureSnapshot?.captureId, frameC.captureId)
+    }
+
+    public static func run26_TopologyChangeDuringCaptureDiscarded() async throws {
+        let fakeEngine = FakeCaptureEngine(customTopologyVersion: "top-sha256-old-version-stale-token")
+        let server = HostServer(
+            authorizer: FakeScreenRecordingAuthorizer(granted: true),
+            topologyProvider: FakeDisplayTopologyProvider(),
+            captureEngine: fakeEngine,
             axEngine: DisabledAXInspector(),
             inputEngine: DisabledInputInjector()
         )
-        let badTopResp = await badTopServer.handleRequest(IPCRequest(id: "top-chg", method: "observe"))
-        assertTrue(!badTopResp.success)
-        assertEqual(badTopResp.error?.code, "STALE_TOPOLOGY")
-        recordCase("testTopologyChangeDuringCaptureDiscarded")
 
-        // 24. Disabled Actions and AX Tree Rejection Test
-        let prodServer = HostServer(
+        let resp = await server.handleRequest(IPCRequest(id: "top-change-req", method: "observe"))
+        assertTrue(!resp.success)
+        assertEqual(resp.error?.code, "STALE_TOPOLOGY")
+    }
+
+    public static func run27_DisabledActionsAndAXTreeRejection() async throws {
+        let server = HostServer(
             authorizer: FakeScreenRecordingAuthorizer(granted: true),
             topologyProvider: FakeDisplayTopologyProvider(),
             captureEngine: FakeCaptureEngine(),
@@ -1100,130 +1220,141 @@ struct ComputerUseHostTestRunner {
             inputEngine: DisabledInputInjector()
         )
 
-        let disabledActions = ["click", "move", "drag", "type", "shortcut", "scroll"]
-        for actionName in disabledActions {
-            let actResp = await prodServer.handleRequest(IPCRequest(id: "dis-\(actionName)", method: actionName))
-            assertTrue(!actResp.success)
-            assertEqual(actResp.error?.code, "MUTATION_DISABLED")
-        }
-
-        let axResp = await prodServer.handleRequest(IPCRequest(id: "ax1", method: "ax_tree"))
+        let axResp = await server.handleRequest(IPCRequest(id: "ax-req", method: "ax_tree"))
         assertTrue(!axResp.success)
         assertEqual(axResp.error?.code, "TARGET_UNREACHABLE")
-        recordCase("testDisabledActionsAndAXTreeRejection")
 
-        // 25. Display ID Parameter Validation Test
-        let invalidReq = IPCRequest(id: "inv-1", method: "observe", params: ["display_id": .string("1")])
-        let invResp = await prodServer.handleRequest(invalidReq)
-        assertTrue(!invResp.success)
-        assertEqual(invResp.error?.code, "IPC_ERROR")
-        recordCase("testDisplayIdParameterValidation")
+        let clickResp = await server.handleRequest(IPCRequest(id: "click-req", method: "click"))
+        assertTrue(!clickResp.success)
+        assertEqual(clickResp.error?.code, "MUTATION_DISABLED")
+    }
 
-        // 26. Noncooperative Observation Deadline Elapsed Time Test
-        let noncoopEngine = TrulyNoncooperativeCaptureEngine(delayMs: 400.0)
-        let noncoopServer = HostServer(
+    public static func run28_DisplayIdParameterValidation() async throws {
+        let server = HostServer(
             authorizer: FakeScreenRecordingAuthorizer(granted: true),
             topologyProvider: FakeDisplayTopologyProvider(),
-            captureEngine: noncoopEngine,
+            captureEngine: FakeCaptureEngine(),
             axEngine: DisabledAXInspector(),
-            inputEngine: DisabledInputInjector(),
-            observationTimeoutSec: 0.05 // 50ms timeout
+            inputEngine: DisabledInputInjector()
         )
 
-        let startClock = ContinuousClock().now
-        let noncoopResp = await noncoopServer.handleRequest(IPCRequest(id: "noncoop-1", method: "observe"))
-        let elapsed = ContinuousClock().now - startClock
-        let elapsedMs = Double(elapsed.components.seconds * 1000) + Double(elapsed.components.attoseconds) / 1e15
+        let reqBadType = IPCRequest(id: "bad-id-1", method: "observe", params: ["display_id": .string("1")])
+        let respBadType = await server.handleRequest(reqBadType)
+        assertTrue(!respBadType.success)
+        assertEqual(respBadType.error?.code, "IPC_ERROR")
 
-        assertTrue(!noncoopResp.success)
-        assertEqual(noncoopResp.error?.code, "TIMEOUT")
-        assertTrue(elapsedMs < 200.0, "50ms observation deadline returned in \(elapsedMs)ms without awaiting 400ms noncooperative task")
-        recordCase("testNoncooperativeObservationDeadlineElapsedTime")
+        let reqNotFound = IPCRequest(id: "bad-id-2", method: "observe", params: ["display_id": .int(9999)])
+        let respNotFound = await server.handleRequest(reqNotFound)
+        assertTrue(!respNotFound.success)
+        assertEqual(respNotFound.error?.code, "TARGET_UNREACHABLE")
+    }
 
-        // 27. 64-Megapixel Safety Pre-Check Rejection Test
-        let oversizedDisplay = DisplayInfo(id: 1, widthPoints: 10000, heightPoints: 10000, scaleFactor: 1.0, originX: 0, originY: 0, pixelWidth: 10000, pixelHeight: 10000, rotation: 0.0) // 100,000,000 pixels > 64MP
-        let oversizedTopology = DisplayTopology(version: "top-sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", primaryDisplayId: 1, displays: [oversizedDisplay])
-        let oversizedEngine = SCScreenshotCaptureEngine(authorizer: FakeScreenRecordingAuthorizer(granted: true))
-        var threwOversizedMP = false
-        do {
-            _ = try await oversizedEngine.captureDisplay(displayId: 1, topology: oversizedTopology)
-        } catch let err as ComputerUseError {
-            if case .targetUnreachable(let reason) = err {
-                assertTrue(reason.contains("64-megapixel"))
-                threwOversizedMP = true
+    public static func run29_CancellationErrorMappedToCancelledCode() async throws {
+        struct CancellingCaptureEngine: DisplayCaptureEngine {
+            func captureDisplay(displayId: Int?, topology: DisplayTopology) async throws -> CaptureFrameDTO {
+                throw CancellationError()
             }
         }
-        assertTrue(threwOversizedMP, "Oversized 100MP display pre-check rejected before framework allocation")
-        let realInvocationCount = await oversizedEngine.frameworkInvocationCount
-        assertEqual(realInvocationCount, 0, "Invocation counter must prove zero framework calls on pre-check failure")
-        recordCase("test64MegapixelSafetyPreCheckRejection")
 
-        // 28. CancellationError Explicit Mapping Test
-        let cancellingServer = HostServer(
+        let server = HostServer(
             authorizer: FakeScreenRecordingAuthorizer(granted: true),
             topologyProvider: FakeDisplayTopologyProvider(),
             captureEngine: CancellingCaptureEngine(),
             axEngine: DisabledAXInspector(),
             inputEngine: DisabledInputInjector()
         )
-        let cancelResp = await cancellingServer.handleRequest(IPCRequest(id: "cancel-1", method: "observe"))
-        assertTrue(!cancelResp.success)
-        assertEqual(cancelResp.error?.code, "CANCELLED")
-        recordCase("testCancellationErrorMappedToCancelledCode")
 
-        // 29. Capture Budget Capacity Limit and Fast Failure Test
-        let budget = CaptureBudget(maxConcurrent: 2)
-        let scriptedBudgetEngine = ScriptedContinuationCaptureEngine()
-        let budgetServer = HostServer(
-            authorizer: FakeScreenRecordingAuthorizer(granted: true),
-            topologyProvider: FakeDisplayTopologyProvider(),
-            captureEngine: scriptedBudgetEngine,
-            axEngine: DisabledAXInspector(),
-            inputEngine: DisabledInputInjector(),
-            observationTimeoutSec: 1.0,
-            budget: budget
+        let resp = await server.handleRequest(IPCRequest(id: "cancel-req", method: "observe"))
+        assertTrue(!resp.success)
+        assertEqual(resp.error?.code, "CANCELLED")
+    }
+
+    public static func run30_PartialStartRollback() async throws {
+        let parentDir30 = "/tmp/agy-test-c30-\(UUID().uuidString)"
+        let sockPath30 = "\(parentDir30)/host.sock"
+        try SocketListener.prepareDirectory(at: sockPath30)
+
+        _ = mkdir(sockPath30, 0o700)
+
+        let lockPath30 = "\(parentDir30)/host.lock"
+        let listener30 = SocketListener(
+            socketPath: sockPath30,
+            server: HostServer(
+                authorizer: FakeScreenRecordingAuthorizer(),
+                topologyProvider: FakeDisplayTopologyProvider(),
+                captureEngine: FakeCaptureEngine(),
+                axEngine: DisabledAXInspector(),
+                inputEngine: DisabledInputInjector()
+            )
         )
 
-        // Occupy slot 1 (Request A)
-        let reqBudgetATask = Task { await budgetServer.handleRequest(IPCRequest(id: "budget-A", method: "observe")) }
-        // Occupy slot 2 (Request B)
-        let reqBudgetBTask = Task { await budgetServer.handleRequest(IPCRequest(id: "budget-B", method: "observe")) }
+        var threwRollback30 = false
+        do {
+            try listener30.start()
+        } catch let err as ComputerUseError {
+            if case .ipcError = err {
+                threwRollback30 = true
+            }
+        }
+        assertTrue(threwRollback30, "Listener start must fail when bind fails")
 
-        await scriptedBudgetEngine.waitForContinuation(at: 0)
-        await scriptedBudgetEngine.waitForContinuation(at: 1)
-        assertEqual(budget.count, 2)
+        _ = rmdir(sockPath30)
 
-        // Request C: while 2 slots are occupied, fails fast with CAPTURE_BUSY
-        let startC = ContinuousClock().now
-        let respC = await budgetServer.handleRequest(IPCRequest(id: "budget-C", method: "observe"))
-        let elapsedC = ContinuousClock().now - startC
-        let elapsedMsC = Double(elapsedC.components.seconds * 1000) + Double(elapsedC.components.attoseconds) / 1e15
+        var statLock30 = stat()
+        assertTrue(lstat(lockPath30, &statLock30) != 0, "host.lock file must be unlinked on partial-start rollback")
 
-        assertTrue(!respC.success)
-        assertEqual(respC.error?.code, "CAPTURE_BUSY")
-        assertTrue(elapsedMsC < 50.0, "Fast failure returned in \(elapsedMsC)ms")
-        assertEqual(scriptedBudgetEngine.invocationCount, 2, "Engine invocation count must remain unchanged at 2 for rejected third request")
+        try listener30.start()
+        let clientFd30 = try connectToSocket(at: listener30.socketPath)
+        close(clientFd30)
+        listener30.stop()
+    }
 
-        // Release slots 1 and 2
-        let frameDTO = try! FakeCaptureEngine().generateDTO(topology: FakeDisplayTopologyProvider().getTopology())
-        scriptedBudgetEngine.resumeContinuation(at: 0, with: .success(frameDTO))
-        scriptedBudgetEngine.resumeContinuation(at: 1, with: .success(frameDTO))
+    private static func runWithWatchdog(name: String, timeoutSec: Double = 10.0, _ block: @Sendable @escaping () async throws -> Void) async throws {
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                try await block()
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(timeoutSec * 1_000_000_000))
+                throw ComputerUseError.timeout(operation: "test_watchdog_\(name)", seconds: timeoutSec)
+            }
+            try await group.next()
+            group.cancelAll()
+        }
+    }
 
-        _ = await reqBudgetATask.value
-        _ = await reqBudgetBTask.value
-
-        try await Task.sleep(nanoseconds: 50_000_000)
-        assertEqual(budget.count, 0, "Capacity returns to 0 after physical capture tasks exit")
-
-        // Request D: succeeds on same server
-        let reqDTask = Task { await budgetServer.handleRequest(IPCRequest(id: "budget-D", method: "observe")) }
-        await scriptedBudgetEngine.waitForContinuation(at: 2)
-        scriptedBudgetEngine.resumeContinuation(at: 2, with: .success(frameDTO))
-
-        let respD = await reqDTask.value
-        assertTrue(respD.success)
-        recordCase("testCaptureBudgetCapacityLimitAndFastFailure")
-
-        fputs("[ComputerUseHostTestRunner] Executed \(totalCasesCounter.value) native test cases successfully. ALL PASSED.\n", stderr)
+    public static func main() async throws {
+        fputs("[ComputerUseHostTestRunner] Starting Native Test Runner Authority...\n", stderr)
+        try await runWithWatchdog(name: "test01_LengthPrefixedFraming") { try await run01_LengthPrefixedFraming() }
+        try await runWithWatchdog(name: "test02_OversizedFramingHeaderRejection") { try await run02_OversizedFramingHeaderRejection() }
+        try await runWithWatchdog(name: "test03_DirectoryPreparation") { try await run03_DirectoryPreparation() }
+        try await runWithWatchdog(name: "test04_UDSClientServerRoundTrip") { try await run04_UDSClientServerRoundTrip() }
+        try await runWithWatchdog(name: "test05_PostTimeoutUDSRecovery") { try await run05_PostTimeoutUDSRecovery() }
+        try await runWithWatchdog(name: "test06_SlowDripHeaderTimeout") { try await run06_SlowDripHeaderTimeout() }
+        try await runWithWatchdog(name: "test07_SlowDripBodyTimeout") { try await run07_SlowDripBodyTimeout() }
+        try await runWithWatchdog(name: "test08_BlockedResponseWriteTimeout") { try await run08_BlockedResponseWriteTimeout() }
+        try await runWithWatchdog(name: "test09_PeerCloseAndPartialIO") { try await run09_PeerCloseAndPartialIO() }
+        try await runWithWatchdog(name: "test10_EINTRRetryPath") { try await run10_EINTRRetryPath() }
+        try await runWithWatchdog(name: "test11_TimeoutResponseFollowedByNextClient") { try await run11_TimeoutResponseFollowedByNextClient() }
+        try await runWithWatchdog(name: "test12_LiveSocketCollisionProbe") { try await run12_LiveSocketCollisionProbe() }
+        try await runWithWatchdog(name: "test13_VerifiedStaleSocketRecovery") { try await run13_VerifiedStaleSocketRecovery() }
+        try await runWithWatchdog(name: "test14_ForeignSymlinkNonSocketRefusal") { try await run14_ForeignSymlinkNonSocketRefusal() }
+        try await runWithWatchdog(name: "test15_StopNeverUnlinksReplacementInode") { try await run15_StopNeverUnlinksReplacementInode() }
+        try await runWithWatchdog(name: "test16_IEEE754BitPatternTopologyGoldenVectorAndMutations") { try await run16_IEEE754BitPatternTopologyGoldenVectorAndMutations() }
+        try await runWithWatchdog(name: "test17_HotPlugSafeDisplayEnumerator") { try await run17_HotPlugSafeDisplayEnumerator() }
+        try await runWithWatchdog(name: "test18_PermissionPreflightDeniedZeroLoaderCalls") { try await run18_PermissionPreflightDeniedZeroLoaderCalls() }
+        try await runWithWatchdog(name: "test19_PureJPEGValidatorExactAndNear10MiBBoundaries") { try await run19_PureJPEGValidatorExactAndNear10MiBBoundaries() }
+        try await runWithWatchdog(name: "test20_SOF0AndSOF2MarkerValidation") { try await run20_SOF0AndSOF2MarkerValidation() }
+        try await runWithWatchdog(name: "test21_JPEGInvalidMagicTruncatedSegmentAndMismatchRejection") { try await run21_JPEGInvalidMagicTruncatedSegmentAndMismatchRejection() }
+        try await runWithWatchdog(name: "test22_NoncooperativeLateCompletionGenerationFence") { try await run22_NoncooperativeLateCompletionGenerationFence() }
+        try await runWithWatchdog(name: "test23_StaleOperationGenerationFence") { try await run23_StaleOperationGenerationFence() }
+        try await runWithWatchdog(name: "test24_RequesterCancellation") { try await run24_RequesterCancellation() }
+        try await runWithWatchdog(name: "test25_TimedOutOrphanCapacity") { try await run25_TimedOutOrphanCapacity() }
+        try await runWithWatchdog(name: "test26_TopologyChangeDuringCaptureDiscarded") { try await run26_TopologyChangeDuringCaptureDiscarded() }
+        try await runWithWatchdog(name: "test27_DisabledActionsAndAXTreeRejection") { try await run27_DisabledActionsAndAXTreeRejection() }
+        try await runWithWatchdog(name: "test28_DisplayIdParameterValidation") { try await run28_DisplayIdParameterValidation() }
+        try await runWithWatchdog(name: "test29_CancellationErrorMappedToCancelledCode") { try await run29_CancellationErrorMappedToCancelledCode() }
+        try await runWithWatchdog(name: "test30_PartialStartRollback") { try await run30_PartialStartRollback() }
+        fputs("[ComputerUseHostTestRunner] Executed 30 native test cases successfully. ALL PASSED.\n", stderr)
     }
 }

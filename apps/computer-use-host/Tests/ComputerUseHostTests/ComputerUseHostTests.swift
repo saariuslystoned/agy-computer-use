@@ -4,9 +4,156 @@ import XCTest
 import ComputerUseHostLib
 import ComputerUseHostTestRunner
 
-final class ComputerUseHostTests: XCTestCase {
-    func testPortableNativeSuite() async throws {
-        try await ComputerUseHostTestRunner.main()
+private final class ErrorBox: @unchecked Sendable {
+    private var err: Error? = nil
+    private let lock = NSLock()
+    func set(_ error: Error) {
+        lock.lock()
+        err = error
+        lock.unlock()
+    }
+    var value: Error? {
+        lock.lock()
+        defer { lock.unlock() }
+        return err
+    }
+}
+
+private func runSync(_ block: @Sendable @escaping () async throws -> Void) throws {
+    let sem = DispatchSemaphore(value: 0)
+    let box = ErrorBox()
+    Task {
+        do {
+            try await block()
+        } catch {
+            box.set(error)
+        }
+        sem.signal()
+    }
+    sem.wait()
+    if let err = box.value { throw err }
+}
+
+@objcMembers
+public final class ComputerUseHostTests: XCTestCase {
+    public func test01_LengthPrefixedFraming() throws {
+        try runSync { try await ComputerUseHostTestRunner.run01_LengthPrefixedFraming() }
+    }
+
+    public func test02_OversizedFramingHeaderRejection() throws {
+        try runSync { try await ComputerUseHostTestRunner.run02_OversizedFramingHeaderRejection() }
+    }
+
+    public func test03_DirectoryPreparation() throws {
+        try runSync { try await ComputerUseHostTestRunner.run03_DirectoryPreparation() }
+    }
+
+    public func test04_UDSClientServerRoundTrip() throws {
+        try runSync { try await ComputerUseHostTestRunner.run04_UDSClientServerRoundTrip() }
+    }
+
+    public func test05_PostTimeoutUDSRecovery() throws {
+        try runSync { try await ComputerUseHostTestRunner.run05_PostTimeoutUDSRecovery() }
+    }
+
+    public func test06_SlowDripHeaderTimeout() throws {
+        try runSync { try await ComputerUseHostTestRunner.run06_SlowDripHeaderTimeout() }
+    }
+
+    public func test07_SlowDripBodyTimeout() throws {
+        try runSync { try await ComputerUseHostTestRunner.run07_SlowDripBodyTimeout() }
+    }
+
+    public func test08_BlockedResponseWriteTimeout() throws {
+        try runSync { try await ComputerUseHostTestRunner.run08_BlockedResponseWriteTimeout() }
+    }
+
+    public func test09_PeerCloseAndPartialIO() throws {
+        try runSync { try await ComputerUseHostTestRunner.run09_PeerCloseAndPartialIO() }
+    }
+
+    public func test10_EINTRRetryPath() throws {
+        try runSync { try await ComputerUseHostTestRunner.run10_EINTRRetryPath() }
+    }
+
+    public func test11_TimeoutResponseFollowedByNextClient() throws {
+        try runSync { try await ComputerUseHostTestRunner.run11_TimeoutResponseFollowedByNextClient() }
+    }
+
+    public func test12_LiveSocketCollisionProbe() throws {
+        try runSync { try await ComputerUseHostTestRunner.run12_LiveSocketCollisionProbe() }
+    }
+
+    public func test13_VerifiedStaleSocketRecovery() throws {
+        try runSync { try await ComputerUseHostTestRunner.run13_VerifiedStaleSocketRecovery() }
+    }
+
+    public func test14_ForeignSymlinkNonSocketRefusal() throws {
+        try runSync { try await ComputerUseHostTestRunner.run14_ForeignSymlinkNonSocketRefusal() }
+    }
+
+    public func test15_StopNeverUnlinksReplacementInode() throws {
+        try runSync { try await ComputerUseHostTestRunner.run15_StopNeverUnlinksReplacementInode() }
+    }
+
+    public func test16_IEEE754BitPatternTopologyGoldenVectorAndMutations() throws {
+        try runSync { try await ComputerUseHostTestRunner.run16_IEEE754BitPatternTopologyGoldenVectorAndMutations() }
+    }
+
+    public func test17_HotPlugSafeDisplayEnumerator() throws {
+        try runSync { try await ComputerUseHostTestRunner.run17_HotPlugSafeDisplayEnumerator() }
+    }
+
+    public func test18_PermissionPreflightDeniedZeroLoaderCalls() throws {
+        try runSync { try await ComputerUseHostTestRunner.run18_PermissionPreflightDeniedZeroLoaderCalls() }
+    }
+
+    public func test19_PureJPEGValidatorExactAndNear10MiBBoundaries() throws {
+        try runSync { try await ComputerUseHostTestRunner.run19_PureJPEGValidatorExactAndNear10MiBBoundaries() }
+    }
+
+    public func test20_SOF0AndSOF2MarkerValidation() throws {
+        try runSync { try await ComputerUseHostTestRunner.run20_SOF0AndSOF2MarkerValidation() }
+    }
+
+    public func test21_JPEGInvalidMagicTruncatedSegmentAndMismatchRejection() throws {
+        try runSync { try await ComputerUseHostTestRunner.run21_JPEGInvalidMagicTruncatedSegmentAndMismatchRejection() }
+    }
+
+    public func test22_NoncooperativeLateCompletionGenerationFence() throws {
+        try runSync { try await ComputerUseHostTestRunner.run22_NoncooperativeLateCompletionGenerationFence() }
+    }
+
+    public func test23_StaleOperationGenerationFence() throws {
+        try runSync { try await ComputerUseHostTestRunner.run23_StaleOperationGenerationFence() }
+    }
+
+    public func test24_RequesterCancellation() throws {
+        try runSync { try await ComputerUseHostTestRunner.run24_RequesterCancellation() }
+    }
+
+    public func test25_TimedOutOrphanCapacity() throws {
+        try runSync { try await ComputerUseHostTestRunner.run25_TimedOutOrphanCapacity() }
+    }
+
+    public func test26_TopologyChangeDuringCaptureDiscarded() throws {
+        try runSync { try await ComputerUseHostTestRunner.run26_TopologyChangeDuringCaptureDiscarded() }
+    }
+
+    public func test27_DisabledActionsAndAXTreeRejection() throws {
+        try runSync { try await ComputerUseHostTestRunner.run27_DisabledActionsAndAXTreeRejection() }
+    }
+
+    public func test28_DisplayIdParameterValidation() throws {
+        try runSync { try await ComputerUseHostTestRunner.run28_DisplayIdParameterValidation() }
+    }
+
+    public func test29_CancellationErrorMappedToCancelledCode() throws {
+        try runSync { try await ComputerUseHostTestRunner.run29_CancellationErrorMappedToCancelledCode() }
+    }
+
+    public func test30_PartialStartRollback() throws {
+        try runSync { try await ComputerUseHostTestRunner.run30_PartialStartRollback() }
     }
 }
 #endif

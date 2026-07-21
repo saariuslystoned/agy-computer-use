@@ -89,7 +89,7 @@ private final class OneShotArbiter<T: Sendable>: @unchecked Sendable {
         case .pending(let cont, let cTask, let tTask):
             contToResume = cont
             state = .resolved(result)
-            
+
             switch result {
             case .success:
                 timerToCancel = tTask
@@ -120,6 +120,17 @@ private final class OneShotArbiter<T: Sendable>: @unchecked Sendable {
     }
 }
 
+public protocol Sleeper: Sendable {
+    func sleep(nanoseconds: UInt64) async throws
+}
+
+public struct DefaultSleeper: Sleeper {
+    public init() {}
+    public func sleep(nanoseconds: UInt64) async throws {
+        try await Task.sleep(nanoseconds: nanoseconds)
+    }
+}
+
 public actor HostServer {
     private var isConnected: Bool = false
     private let authorizer: ScreenRecordingAuthorizing
@@ -129,6 +140,7 @@ public actor HostServer {
     private let inputEngine: InputSynthesisEngine
     private let observationTimeoutSec: Double
     private let budget: CaptureBudget
+    private let sleeper: Sleeper
 
     private var latestCapture: CaptureFrameDTO?
     private var activeTopology: DisplayTopology?
@@ -149,7 +161,8 @@ public actor HostServer {
         axEngine: AXInspectionEngine = DisabledAXInspector(),
         inputEngine: InputSynthesisEngine = DisabledInputInjector(),
         observationTimeoutSec: Double = 5.0,
-        budget: CaptureBudget = CaptureBudget(maxConcurrent: 2)
+        budget: CaptureBudget = CaptureBudget(maxConcurrent: 2),
+        sleeper: Sleeper = DefaultSleeper()
     ) {
         self.authorizer = authorizer
         self.topologyProvider = topologyProvider
@@ -158,6 +171,7 @@ public actor HostServer {
         self.inputEngine = inputEngine
         self.observationTimeoutSec = observationTimeoutSec
         self.budget = budget
+        self.sleeper = sleeper
     }
 
     public func handleRequest(_ request: IPCRequest) async -> IPCResponse {
@@ -244,7 +258,8 @@ public actor HostServer {
                         targetDisplayId: targetDisplayId,
                         initialTopology: initialTopology,
                         timeoutSec: self.observationTimeoutSec,
-                        budget: budget
+                        budget: budget,
+                        sleeper: self.sleeper
                     )
                 } catch {
                     throw error
@@ -334,7 +349,8 @@ public actor HostServer {
         targetDisplayId: Int,
         initialTopology: DisplayTopology,
         timeoutSec: Double,
-        budget: CaptureBudget
+        budget: CaptureBudget,
+        sleeper: Sleeper = DefaultSleeper()
     ) async throws -> CaptureFrameDTO {
         guard timeoutSec.isFinite && timeoutSec > 0 && timeoutSec < 100_000_000 else {
             budget.release()
@@ -361,8 +377,12 @@ public actor HostServer {
 
                     let timeoutNano = UInt64(timeoutSec * 1_000_000_000)
                     let timerTask = Task.detached {
-                        try? await Task.sleep(nanoseconds: timeoutNano)
-                        arbiter.resolve(with: .failure(ComputerUseError.timeout(operation: "observe", seconds: timeoutSec)))
+                        do {
+                            try await sleeper.sleep(nanoseconds: timeoutNano)
+                            arbiter.resolve(with: .failure(ComputerUseError.timeout(operation: "observe", seconds: timeoutSec)))
+                        } catch {
+                            // Sleeper cancelled or threw
+                        }
                     }
                     arbiter.installTimerTask(timerTask)
                 }
