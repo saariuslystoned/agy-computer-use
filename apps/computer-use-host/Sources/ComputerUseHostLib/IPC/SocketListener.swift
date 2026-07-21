@@ -57,7 +57,7 @@ public final class SocketListener: @unchecked Sendable {
 
         let res = syscalls.mkdir(targetDir, 0o700)
         if res == 0 || syscalls.lastErrno == EEXIST {
-            let dirFd = syscalls.open(targetDir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, 0)
+            let dirFd = syscalls.open(targetDir, O_RDONLY | O_NOFOLLOW | O_CLOEXEC, 0)
             guard dirFd >= 0 else {
                 let err = syscalls.lastErrno
                 if err == ELOOP {
