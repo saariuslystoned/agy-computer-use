@@ -141,9 +141,9 @@ export class MockHostClient implements HostClient {
 
 const MUTATION_METHODS = new Set(["click", "move", "drag", "type", "shortcut", "scroll"]);
 
-export function getDefaultSocketPath(): String {
+export function getDefaultSocketPath(): string {
   const uid = process.getuid ? process.getuid() : 501;
-  return process.env.AGY_SOCKET_PATH || `/tmp/agy-computer-use-${uid}/host.sock`;
+  return process.env.AGY_SOCKET_PATH || `/private/tmp/agy-computer-use-${uid}/host.sock`;
 }
 
 export class UnixSocketHostClient implements HostClient {
