@@ -2,8 +2,8 @@
 
 - **Date**: 2026-07-21
 - **Branch**: `codex/bobby-computer-use-v0-20260721t174022z-a9ab71173113`
-- **Parent Source Commit**: `88ebe83d2f662c2e6afa669f8998bee57bdec373`
-- **Scope**: Milestone D2 Production-Bounded Native Observation Slice (Exact-Head 9a1 Architecture & Hard-Deadline Research Addendum Closure)
+- **Parent Source Commit**: `a9d8957c562539883446c28afaf3d3bcbd4f0384`
+- **Scope**: Milestone D2 Production-Bounded Native Observation Slice (Exact-Head 9a1 Architecture, Darwin UDS & Topology Addendum Closure)
 
 ---
 
@@ -116,5 +116,8 @@ Executed via `./bin/agy-computer-use canary-ready`:
 
 ## Honesty & Boundary Declarations
 
+- **Darwin Race Boundary**: macOS kernel lacks inode-conditional `unlinkat` or `bindat`. Pre-unlink stat checks, nonblocking `connect`/`poll`/`SO_ERROR` probes, and post-bind inode revalidation reduce but cannot eliminate a hostile same-UID final-check race window.
+- **Topology Observation Stability**: Topology resolution uses a 3-pass list enumeration and 2-set descriptor fingerprint check (`bitPattern` comparison). This proves bounded observational stability across fetches rather than an atomic kernel snapshot, bounding residual ABA risk.
+- **Process Isolation & Hung Captures**: Physical capture execution is bounded by an in-process `CaptureBudget` (default max 2 concurrent captures). If a framework call hangs indefinitely inside ScreenCaptureKit, the in-process budget returns `CAPTURE_BUSY` to new requests. Terminating a permanently hung framework capture requires a separate host process boundary or external `SIGKILL`.
 - **Screen Recording Access**: Tested deterministically using `FakeScreenRecordingAuthorizer` and `SCScreenshotCaptureEngine` test double in `Tests/ComputerUseHostTestRunner`. No prompting `CGRequestScreenCaptureAccess` call or live screen capture was triggered.
 - **Input Synthesis & AX Tree Inspection**: All action dispatch methods (`click`, `move`, `drag`, `type`, `shortcut`, `scroll`) return `MUTATION_DISABLED`. Accessibility tree inspection returns `TARGET_UNREACHABLE`. Real `CGEvent` synthesis is deferred to M9.
