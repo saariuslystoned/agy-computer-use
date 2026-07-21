@@ -2,8 +2,9 @@
 
 - **Date**: 2026-07-21
 - **Branch**: `codex/bobby-computer-use-v0-20260721t174022z-a9ab71173113`
-- **Parent Source Commit**: `3c2a20c9ecb001a1cce8a30dbf2ff6ef7ec3c3c7`
-- **Reviewed Terminal Repair Head**: `a9d8957c562539883446c28afaf3d3bcbd4f0384` / `701fcf91dcf6b990f308648cd1ad575cc3acd45a`
+- **Parent Source Commit**: `38f1fee60e5760fee1590899d8bc43a10e379a4d`
+- **Exact-Head Push CI Run**: `https://github.com/saariuslystoned/agy-computer-use/actions/runs/29872257576` (Status: `completed`, Conclusion: `success`)
+- **Exact-Head PR CI Run**: `https://github.com/saariuslystoned/agy-computer-use/actions/runs/29872260724` (Status: `completed`, Conclusion: `success`)
 - **Scope**: Milestone D2 Terminal Repair & Production-Bounded Native Observation (Exact-Head 9a1 & Terminal Repair A9D Closure)
 
 ---
