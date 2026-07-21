@@ -1767,6 +1767,7 @@ public struct ComputerUseHostTestRunner {
         let parentDir = "/tmp/agy-test-c35-\(UUID().uuidString)"
         let sockPath = "\(parentDir)/host.sock"
         let lockPath = "\(parentDir)/host.lock"
+        try SocketListener.prepareDirectory(at: sockPath)
 
         let scriptedSyscalls = ScriptedPOSIXSyscalls()
         var listenAttempt = 0
