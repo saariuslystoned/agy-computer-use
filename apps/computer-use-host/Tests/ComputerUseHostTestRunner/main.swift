@@ -392,7 +392,7 @@ public struct ComputerUseHostTestRunner {
             captureEngine: slowEngine,
             axEngine: DisabledAXInspector(),
             inputEngine: DisabledInputInjector(),
-            observationTimeoutSec: 0.05 // 50ms timeout
+            observationTimeoutSec: 0.05
         )
 
         let obsTimeoutResp = await timeoutServer.handleRequest(IPCRequest(id: "timeout-1", method: "observe"))

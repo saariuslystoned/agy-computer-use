@@ -31,7 +31,8 @@ let package = Package(
         ),
         .executableTarget(
             name: "ComputerUseHostTestRunner",
-            dependencies: ["ComputerUseHostLib"]
+            dependencies: ["ComputerUseHostLib"],
+            path: "Tests/ComputerUseHostTestRunner"
         ),
         .testTarget(
             name: "ComputerUseHostTests",
