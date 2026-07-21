@@ -233,8 +233,8 @@ public actor HostServer {
             let timeoutNano = UInt64(timeoutSec * 1_000_000_000)
             Task {
                 try? await Task.sleep(nanoseconds: timeoutNano)
-                captureTask.cancel()
                 resolver.resolveFailure(ComputerUseError.timeout(operation: "observe", seconds: timeoutSec))
+                captureTask.cancel()
             }
         }
     }

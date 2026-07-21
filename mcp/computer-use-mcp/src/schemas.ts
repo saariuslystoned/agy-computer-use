@@ -12,34 +12,38 @@ export const TopologyVersionSchema = z
     message: "Topology version must be exact format top-sha256-<64_hex_chars>"
   });
 
+// Single canonical Base64 string schema validator WITHOUT Buffer decoding allocation
 export const Base64ImageSchema = z.string().superRefine((data, ctx) => {
   if (data.length % 4 !== 0) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Base64 image string length must be a multiple of 4" });
     return;
   }
   if (!/^[A-Za-z0-9+/]+={0,2}$/.test(data)) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Base64 image string contains invalid characters" });
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Base64 image string contains invalid characters or misplaced padding" });
     return;
   }
 
-  // Pre-allocation limit check
   let paddingCount = 0;
-  if (data.endsWith("==")) paddingCount = 2;
-  else if (data.endsWith("=")) paddingCount = 1;
-  const decodedLen = Math.floor((data.length * 3) / 4) - paddingCount;
+  if (data.endsWith("==")) {
+    paddingCount = 2;
+    const lastChar = data[data.length - 3];
+    if (!"AQgw".includes(lastChar)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Base64 image string contains invalid unused padding bits" });
+      return;
+    }
+  } else if (data.endsWith("=")) {
+    paddingCount = 1;
+    const lastChar = data[data.length - 2];
+    if (!"AEIMQUYcgkosw048".includes(lastChar)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Base64 image string contains invalid unused padding bits" });
+      return;
+    }
+  }
+
+  const decodedLen = (data.length / 4) * 3 - paddingCount;
   if (decodedLen > 10 * 1024 * 1024) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Decoded image data size exceeds 10 MiB limit" });
     return;
-  }
-
-  try {
-    const buf = Buffer.from(data, "base64");
-    if (buf.toString("base64") !== data) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Base64 image string is not canonically encoded" });
-      return;
-    }
-  } catch {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Failed to decode base64 string" });
   }
 });
 

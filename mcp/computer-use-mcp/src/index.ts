@@ -22,56 +22,110 @@ export function parseJPEGDimensions(buf: Buffer): JPEGDimensions | null {
   let foundSOF = false;
   let foundSOS = false;
   let dimensions: JPEGDimensions | null = null;
+  let eoiOffset = -1;
 
   while (offset < buf.length - 1) {
     if (buf[offset] !== 0xff) {
-      offset++;
-      continue;
+      if (foundSOS) {
+        // Inside entropy data: scan for 0xFF marker
+        offset++;
+        continue;
+      } else {
+        return null;
+      }
     }
 
     const marker = buf[offset + 1];
 
-    // SOF0 (0xC0), SOF1 (0xC1), SOF2 (0xC2)
-    if (marker === 0xc0 || marker === 0xc1 || marker === 0xc2) {
-      if (offset + 8 >= buf.length) return null;
-      const height = (buf[offset + 5] << 8) | buf[offset + 6];
-      const width = (buf[offset + 7] << 8) | buf[offset + 8];
-      if (width <= 0 || height <= 0) return null;
-      dimensions = { width, height };
-      foundSOF = true;
-      offset += 2 + ((buf[offset + 2] << 8) | buf[offset + 3]);
+    // Standalone markers / stuffed bytes
+    if (marker === 0x00) {
+      // Byte stuffing in entropy data
+      offset += 2;
       continue;
     }
 
-    // SOS (0xDA)
-    if (marker === 0xda) {
-      foundSOS = true;
-      break;
+    if (marker >= 0xd0 && marker <= 0xd7) {
+      // Restart markers (RST0..RST7)
+      offset += 2;
+      continue;
     }
 
-    // EOI (0xD9)
+    if (marker === 0xd8) {
+      // SOI
+      offset += 2;
+      continue;
+    }
+
     if (marker === 0xd9) {
+      // EOI
+      eoiOffset = offset;
       break;
     }
 
-    // Skip segment payload
+    if (marker === 0xda) {
+      // SOS: Start of Scan
+      if (offset + 3 >= buf.length) return null;
+      const segLen = (buf[offset + 2] << 8) | buf[offset + 3];
+      if (segLen < 2 || offset + 2 + segLen > buf.length) return null;
+      foundSOS = true;
+      offset += 2 + segLen;
+      continue;
+    }
+
+    // SOF0 (0xC0), SOF1 (0xC1), SOF2 (0xC2)
+    if (marker === 0xc0 || marker === 0xc1 || marker === 0xc2) {
+      if (offset + 9 >= buf.length) return null;
+      const segLen = (buf[offset + 2] << 8) | buf[offset + 3];
+      if (segLen < 8 || offset + 2 + segLen > buf.length) return null;
+
+      const precision = buf[offset + 4];
+      if (precision !== 8) return null; // 8-bit precision required
+
+      const height = (buf[offset + 5] << 8) | buf[offset + 6];
+      const width = (buf[offset + 7] << 8) | buf[offset + 8];
+      const numComponents = buf[offset + 9];
+
+      if (width <= 0 || height <= 0) return null;
+      if (numComponents !== 1 && numComponents !== 3 && numComponents !== 4) return null; // Gray, YCbCr, CMYK/YCCK
+
+      dimensions = { width, height };
+      foundSOF = true;
+      offset += 2 + segLen;
+      continue;
+    }
+
+    // Skip payload marker
     if (offset + 3 < buf.length) {
       const segLen = (buf[offset + 2] << 8) | buf[offset + 3];
-      if (segLen < 2) return null;
+      if (segLen < 2 || offset + 2 + segLen > buf.length) return null;
       offset += 2 + segLen;
     } else {
-      break;
+      return null;
     }
   }
 
-  if (!foundSOF || !foundSOS || !dimensions) {
+  if (!foundSOF || !foundSOS || !dimensions || eoiOffset === -1) {
     return null;
+  }
+
+  // Reject trailing non-zero garbage past EOI
+  for (let i = eoiOffset + 2; i < buf.length; i++) {
+    if (buf[i] !== 0) {
+      return null;
+    }
   }
 
   return dimensions;
 }
 
-export function validateAndDecodeBase64JPEG(base64Data: string, expectedPixelWidth?: number, expectedPixelHeight?: number): Buffer {
+export type BufferDecoder = (str: string, encoding: BufferEncoding) => Buffer;
+
+export function validateAndDecodeBase64JPEG(
+  base64Data: string,
+  expectedPixelWidth?: number,
+  expectedPixelHeight?: number,
+  decoder: BufferDecoder = (str, enc) => Buffer.from(str, enc)
+): Buffer {
   if (!base64Data || typeof base64Data !== "string") {
     throw new Error("Base64 image data is empty or invalid");
   }
@@ -80,24 +134,33 @@ export function validateAndDecodeBase64JPEG(base64Data: string, expectedPixelWid
     throw new Error("Base64 string length must be a multiple of 4");
   }
 
-  const maxEncodedChars = Math.ceil((10 * 1024 * 1024) / 3) * 4;
-  if (base64Data.length > maxEncodedChars) {
-    throw new Error(`Base64 payload length ${base64Data.length} exceeds maximum encoded limit ${maxEncodedChars}`);
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(base64Data)) {
+    throw new Error("Base64 string contains invalid characters or misplaced padding");
   }
 
   let paddingCount = 0;
-  if (base64Data.endsWith("==")) paddingCount = 2;
-  else if (base64Data.endsWith("=")) paddingCount = 1;
-  const decodedLen = Math.floor((base64Data.length * 3) / 4) - paddingCount;
+  if (base64Data.endsWith("==")) {
+    paddingCount = 2;
+    const lastChar = base64Data[base64Data.length - 3];
+    if (!"AQgw".includes(lastChar)) {
+      throw new Error("Base64 image string contains invalid unused padding bits");
+    }
+  } else if (base64Data.endsWith("=")) {
+    paddingCount = 1;
+    const lastChar = base64Data[base64Data.length - 2];
+    if (!"AEIMQUYcgkosw048".includes(lastChar)) {
+      throw new Error("Base64 image string contains invalid unused padding bits");
+    }
+  }
+
+  // Exact byte length calculation before Buffer allocation
+  const decodedLen = (base64Data.length / 4) * 3 - paddingCount;
   if (decodedLen > 10 * 1024 * 1024) {
     throw new Error(`Decoded byte size ${decodedLen} exceeds 10 MiB limit`);
   }
 
-  const imageBuffer = Buffer.from(base64Data, "base64");
-
-  if (imageBuffer.toString("base64") !== base64Data) {
-    throw new Error("Base64 string is not canonically encoded");
-  }
+  // Single canonical decoder invocation
+  const imageBuffer = decoder(base64Data, "base64");
 
   if (imageBuffer.length === 0) {
     throw new Error("Decoded image buffer is empty");
@@ -111,26 +174,12 @@ export function validateAndDecodeBase64JPEG(base64Data: string, expectedPixelWid
     throw new Error("Invalid JPEG magic bytes: buffer must start with 0xFF 0xD8 0xFF");
   }
 
-  // EOI marker check (0xFF 0xD9)
-  const eoiIdx = imageBuffer.lastIndexOf(Buffer.from([0xff, 0xd9]));
-  if (eoiIdx === -1 || eoiIdx < imageBuffer.length - 2) {
-    // Check if trailing bytes past EOI are non-zero
-    if (eoiIdx !== -1) {
-      for (let i = eoiIdx + 2; i < imageBuffer.length; i++) {
-        if (imageBuffer[i] !== 0) {
-          throw new Error("Trailing non-zero garbage bytes after JPEG EOI marker");
-        }
-      }
-    } else {
-      throw new Error("Missing JPEG EOI marker (0xFF 0xD9)");
-    }
+  const dims = parseJPEGDimensions(imageBuffer);
+  if (!dims) {
+    throw new Error("Failed to parse valid JPEG SOF marker or dimensions are absent");
   }
 
   if (expectedPixelWidth !== undefined && expectedPixelHeight !== undefined) {
-    const dims = parseJPEGDimensions(imageBuffer);
-    if (!dims) {
-      throw new Error("Failed to parse valid JPEG SOF marker or dimensions are absent");
-    }
     if (dims.width !== expectedPixelWidth || dims.height !== expectedPixelHeight) {
       throw new Error(`JPEG dimensions (${dims.width}x${dims.height}) do not match declared pixel dimensions (${expectedPixelWidth}x${expectedPixelHeight})`);
     }
@@ -293,10 +342,11 @@ export function createComputerUseServer(hostClient: HostClient): Server {
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
-    const { name, arguments: args } = request.params;
+    const { name, arguments: rawArgs } = request.params;
+    const args = rawArgs || {}; // Normalize omitted arguments to empty object
 
     if (name === "computer_use_status") {
-      const parseRes = StatusInputSchema.safeParse(args || {});
+      const parseRes = StatusInputSchema.safeParse(args);
       if (!parseRes.success) {
         return {
           isError: true,
@@ -318,7 +368,7 @@ export function createComputerUseServer(hostClient: HostClient): Server {
     }
 
     if (name === "computer_use_observe") {
-      const parseRes = ObserveInputSchema.safeParse(args || {});
+      const parseRes = ObserveInputSchema.safeParse(args);
       if (!parseRes.success) {
         return {
           isError: true,
