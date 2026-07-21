@@ -13,6 +13,15 @@ This repository defines the production architecture, protocol specifications, Sw
 - **Human Gate Boundary (`WAITING_FOR_HUMAN`)**: Any operation involving automated financial transactions, sending external emails/RCS/SMS to non-test contacts, deleting system files outside project scope, or installing system-wide launch daemons without approval requires user confirmation (`CODEX_TEAMWORK_ACTION_REQUIRED`).
 - **Sanitisation**: Secrets (`.env`, auth tokens, keychain values) must never be logged, committed, or included in screenshot payloads. Standard output (`stdout`) of the MCP server is reserved exclusively for MCP JSON-RPC protocol transport; all logging goes to `stderr`.
 
+## Antigravity Teamwork Runs
+
+- Codex steering enters this repository through literal `/teamwork-preview`; an ordinary follow-up, `/btw`, or `/side` is not an equivalent teamwork run.
+- The Antigravity parent owns decomposition, integration, verification, commits, pushes, and terminal reporting. Use at most three concurrent helpers by default, assign disjoint scopes, and close completed helpers before spawning replacements.
+- Helper reports, local green tests, commits, pushes, and CI starts are checkpoints, not completion. Keep the parent active with the available task, scheduling, and messaging primitives until the prompt's terminal criteria are satisfied or an irreducible blocker is proved.
+- Emit sanitized phase beacons: `CODEX_TEAMWORK_STATUS` for meaningful phase changes, `CODEX_TEAMWORK_ACTION_REQUIRED` only for an irreducible blocker or human gate, and exactly one `CODEX_TEAMWORK_DONE` only at terminal completion. Never read, copy, or preserve raw Antigravity transcripts.
+- Before `CODEX_TEAMWORK_DONE`, require a clean worktree, verified local/remote/PR identity, completed exact-head CI, and proof claims backed by executed assertions rather than printed case names.
+- For a source/proof milestone, push source `S`; wait for exact-`S` push and PR CI; create proof-only child `P` naming full `S` and both CI runs; assert `P^ == S` and that only the designated proof file changed. Bind final acceptance externally to the exact resulting head rather than creating an infinite proof-commit chain.
+
 ## System Components & Directory Layout
 ```text
 .

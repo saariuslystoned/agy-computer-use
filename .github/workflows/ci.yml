@@ -86,12 +86,22 @@ jobs:
             local target_bin="$1"
             local nm_cmd="${2:-nm}"
             local demangle_cmd="${3:-swift demangle}"
+            local tmp_nm tmp_demangled
+            tmp_nm=$(mktemp)
+            tmp_demangled=$(mktemp)
 
-            NM_OUT=$($nm_cmd "$target_bin")
-            test -n "$NM_OUT"
-            DEMANGLED_OUT=$(echo "$NM_OUT" | $demangle_cmd)
-            test -n "$DEMANGLED_OUT"
-            ! echo "$DEMANGLED_OUT" | grep -iE "Fake|Spy|Scripted|Mock|TestDouble|TestRunner|TestHelper"
+            eval "$nm_cmd \"\$target_bin\"" > "$tmp_nm" || { rm -f "$tmp_nm" "$tmp_demangled"; return 1; }
+            test -s "$tmp_nm" || { rm -f "$tmp_nm" "$tmp_demangled"; return 1; }
+
+            eval "$demangle_cmd" < "$tmp_nm" > "$tmp_demangled" || { rm -f "$tmp_nm" "$tmp_demangled"; return 1; }
+            test -s "$tmp_demangled" || { rm -f "$tmp_nm" "$tmp_demangled"; return 1; }
+
+            local res=0
+            if grep -iE "Fake|Spy|Scripted|Mock|TestDouble|TestRunner|TestHelper" "$tmp_demangled" > /dev/null; then
+              res=1
+            fi
+            rm -f "$tmp_nm" "$tmp_demangled"
+            return $res
           }
 
           # Fail-closed symbol inspection of release binary

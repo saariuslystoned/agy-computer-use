@@ -454,6 +454,12 @@ public final class SocketListener: @unchecked Sendable {
             if tvUsec >= 1_000_000 {
                 tvUsec = 999_999
             }
+            var nosigpipe: Int32 = 1
+            let sigOptRes = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, socklen_t(MemoryLayout<Int32>.size))
+            guard sigOptRes == 0 else {
+                throw ComputerUseError.ipcError(reason: "Failed to enforce SO_NOSIGPIPE option on client socket descriptor \(fd)")
+            }
+
             var tv = timeval(tv_sec: tvSec, tv_usec: tvUsec)
             let optRes = setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
             guard optRes == 0 else {
