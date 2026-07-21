@@ -364,13 +364,16 @@ public actor HostServer {
         initialTopology: DisplayTopology,
         timeoutSec: Double,
         budget: CaptureBudget,
-        sleeper: Sleeper = DefaultSleeper()
+        sleeper: Sleeper = DefaultSleeper(),
+        clock: HostClock = DefaultHostClock()
     ) async throws -> CaptureFrameDTO {
         guard timeoutSec.isFinite && timeoutSec > 0 && timeoutSec < 100_000_000 else {
             budget.release()
             throw ComputerUseError.ipcError(reason: "Invalid observation timeout value: \(timeoutSec)")
         }
 
+        let startInstant = clock.now
+        let absoluteDeadline = startInstant + .seconds(timeoutSec)
         let arbiter = OneShotArbiter<CaptureFrameDTO>()
 
         return try await withTaskCancellationHandler(
@@ -382,9 +385,17 @@ public actor HostServer {
                         defer { budget.release() }
                         do {
                             let frame = try await captureEngine.captureDisplay(displayId: targetDisplayId, topology: initialTopology)
-                            arbiter.resolve(with: .success(frame))
+                            if clock.now >= absoluteDeadline {
+                                arbiter.resolve(with: .failure(ComputerUseError.timeout(operation: "observe", seconds: timeoutSec)))
+                            } else {
+                                arbiter.resolve(with: .success(frame))
+                            }
                         } catch {
-                            arbiter.resolve(with: .failure(error))
+                            if clock.now >= absoluteDeadline {
+                                arbiter.resolve(with: .failure(ComputerUseError.timeout(operation: "observe", seconds: timeoutSec)))
+                            } else {
+                                arbiter.resolve(with: .failure(error))
+                            }
                         }
                     }
                     arbiter.installCaptureTask(captureTask)

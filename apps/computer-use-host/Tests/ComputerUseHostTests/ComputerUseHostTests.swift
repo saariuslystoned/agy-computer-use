@@ -159,5 +159,71 @@ public final class ComputerUseHostTests: XCTestCase {
     public func test30_PartialStartRollback() throws {
         try runSync { try await ComputerUseHostTestRunner.run30_PartialStartRollback() }
     }
+
+    public func test31_AcceptEINTRRetry() throws {
+        try runSync { try await ComputerUseHostTestRunner.run31_AcceptEINTRRetry() }
+    }
+
+    public func test32_ReadHeaderBodyEINTRRetry() throws {
+        try runSync { try await ComputerUseHostTestRunner.run32_ReadHeaderBodyEINTRRetry() }
+    }
+
+    public func test33_WriteResponseEAGAINDeadlineAndSingleAttempt() throws {
+        try runSync { try await ComputerUseHostTestRunner.run33_WriteResponseEAGAINDeadlineAndSingleAttempt() }
+    }
+
+    public func test34_PositiveByteAdvancesClockPastDeadlineReturnsTimeout() throws {
+        try runSync { try await ComputerUseHostTestRunner.run34_PositiveByteAdvancesClockPastDeadlineReturnsTimeout() }
+    }
+
+    public func test35_InjectedListenFailurePostBindRollback() throws {
+        try runSync { try await ComputerUseHostTestRunner.run35_InjectedListenFailurePostBindRollback() }
+    }
+
+    public static var __allTests = [
+        ("test01_LengthPrefixedFraming", test01_LengthPrefixedFraming),
+        ("test02_OversizedFramingHeaderRejection", test02_OversizedFramingHeaderRejection),
+        ("test03_DirectoryPreparation", test03_DirectoryPreparation),
+        ("test04_UDSClientServerRoundTrip", test04_UDSClientServerRoundTrip),
+        ("test05_PostTimeoutUDSRecovery", test05_PostTimeoutUDSRecovery),
+        ("test06_SlowDripHeaderTimeout", test06_SlowDripHeaderTimeout),
+        ("test07_SlowDripBodyTimeout", test07_SlowDripBodyTimeout),
+        ("test08_BlockedResponseWriteTimeout", test08_BlockedResponseWriteTimeout),
+        ("test09_PeerCloseAndPartialIO", test09_PeerCloseAndPartialIO),
+        ("test10_EINTRRetryPath", test10_EINTRRetryPath),
+        ("test11_TimeoutResponseFollowedByNextClient", test11_TimeoutResponseFollowedByNextClient),
+        ("test12_LiveSocketCollisionProbe", test12_LiveSocketCollisionProbe),
+        ("test13_VerifiedStaleSocketRecovery", test13_VerifiedStaleSocketRecovery),
+        ("test14_ForeignSymlinkNonSocketRefusal", test14_ForeignSymlinkNonSocketRefusal),
+        ("test15_StopNeverUnlinksReplacementInode", test15_StopNeverUnlinksReplacementInode),
+        ("test16_IEEE754BitPatternTopologyGoldenVectorAndMutations", test16_IEEE754BitPatternTopologyGoldenVectorAndMutations),
+        ("test17_HotPlugSafeDisplayEnumerator", test17_HotPlugSafeDisplayEnumerator),
+        ("test18_PermissionPreflightDeniedZeroLoaderCalls", test18_PermissionPreflightDeniedZeroLoaderCalls),
+        ("test19_PureJPEGValidatorExactAndNear10MiBBoundaries", test19_PureJPEGValidatorExactAndNear10MiBBoundaries),
+        ("test20_SOF0AndSOF2MarkerValidation", test20_SOF0AndSOF2MarkerValidation),
+        ("test21_JPEGInvalidMagicTruncatedSegmentAndMismatchRejection", test21_JPEGInvalidMagicTruncatedSegmentAndMismatchRejection),
+        ("test22_NoncooperativeLateCompletionGenerationFence", test22_NoncooperativeLateCompletionGenerationFence),
+        ("test23_StaleOperationGenerationFence", test23_StaleOperationGenerationFence),
+        ("test24_RequesterCancellation", test24_RequesterCancellation),
+        ("test25_TimedOutOrphanCapacity", test25_TimedOutOrphanCapacity),
+        ("test26_TopologyChangeDuringCaptureDiscarded", test26_TopologyChangeDuringCaptureDiscarded),
+        ("test27_DisabledActionsAndAXTreeRejection", test27_DisabledActionsAndAXTreeRejection),
+        ("test28_DisplayIdParameterValidation", test28_DisplayIdParameterValidation),
+        ("test29_CancellationErrorMappedToCancelledCode", test29_CancellationErrorMappedToCancelledCode),
+        ("test30_PartialStartRollback", test30_PartialStartRollback),
+        ("test31_AcceptEINTRRetry", test31_AcceptEINTRRetry),
+        ("test32_ReadHeaderBodyEINTRRetry", test32_ReadHeaderBodyEINTRRetry),
+        ("test33_WriteResponseEAGAINDeadlineAndSingleAttempt", test33_WriteResponseEAGAINDeadlineAndSingleAttempt),
+        ("test34_PositiveByteAdvancesClockPastDeadlineReturnsTimeout", test34_PositiveByteAdvancesClockPastDeadlineReturnsTimeout),
+        ("test35_InjectedListenFailurePostBindRollback", test35_InjectedListenFailurePostBindRollback)
+    ]
 }
+
+#if canImport(XCTest) && !os(macOS)
+public func __allTests() -> [XCTestCaseEntry] {
+    return [
+        testCase(ComputerUseHostTests.__allTests)
+    ]
+}
+#endif
 #endif

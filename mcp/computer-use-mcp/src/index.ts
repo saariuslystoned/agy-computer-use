@@ -63,9 +63,8 @@ export function parseJPEGDimensions(buf: Buffer): JPEGDimensions | null {
 
     // Header / Segment state (before SOS)
     if (marker === 0xd8) {
-      // Second SOI unexpected
-      offset += 2;
-      continue;
+      // Second SOI invalid
+      return null;
     }
 
     if (marker === 0xd9) {
@@ -79,6 +78,7 @@ export function parseJPEGDimensions(buf: Buffer): JPEGDimensions | null {
       if (offset + 4 >= buf.length) return null;
       const segLen = (buf[offset + 2] << 8) | buf[offset + 3];
       const numScanComponents = buf[offset + 4];
+      if (numScanComponents < 1 || numScanComponents > 4) return null;
       if (segLen !== 6 + 2 * numScanComponents || offset + 2 + segLen > buf.length) return null;
       foundSOS = true;
       offset += 2 + segLen;
@@ -103,6 +103,18 @@ export function parseJPEGDimensions(buf: Buffer): JPEGDimensions | null {
 
       dimensions = { width, height };
       foundSOF = true;
+      offset += 2 + segLen;
+      continue;
+    }
+
+    // Whitelist legal header/inter-scan segment markers: 0xC4 (DHT), 0xDB (DQT), 0xDD (DRI), 0xE0..0xEF (APP0..APP15)
+    const isWhitelisted = marker === 0xc4 || marker === 0xdb || marker === 0xdd || (marker >= 0xe0 && marker <= 0xef);
+    if (!isWhitelisted) return null;
+
+    if (marker === 0xdd) {
+      if (offset + 3 >= buf.length) return null;
+      const segLen = (buf[offset + 2] << 8) | buf[offset + 3];
+      if (segLen !== 4 || offset + 2 + segLen > buf.length) return null;
       offset += 2 + segLen;
       continue;
     }

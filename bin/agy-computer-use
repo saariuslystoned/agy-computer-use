@@ -117,24 +117,45 @@ async function main() {
     const hostDir = path.join(rootDir, "apps/computer-use-host");
     const manifestPath = path.join(rootDir, "docs/native_test_manifest.txt");
 
-    let hasXCTest = false;
+    let isFallback = false;
     let actualList = "";
     try {
-      const testListRaw = execSync("swift test list 2>&1", { cwd: hostDir, encoding: "utf-8" });
-      actualList = testListRaw.trim().split("\n").map(l => l.trim()).filter(l => l.startsWith("ComputerUseHostTests.")).sort().join("\n");
-      hasXCTest = actualList.length > 0;
+      const testListRaw = execSync("swift test list --enable-xctest 2>&1", { cwd: hostDir, encoding: "utf-8" });
+      actualList = testListRaw
+        .trim()
+        .split("\n")
+        .map(l => l.trim())
+        .filter(l => l.startsWith("ComputerUseHostTests."))
+        .sort()
+        .join("\n");
+
+      if (actualList.length === 0) {
+        fail("'swift test list' returned exit code 0 but discovered zero test cases matching 'ComputerUseHostTests.'");
+      }
     } catch (err) {
       const output = (err.stdout || "") + "\n" + (err.stderr || "") + "\n" + (err.message || "");
-      if (output.includes("no such module 'XCTest'") || output.includes("XCTest is not supported")) {
-        hasXCTest = false;
+      const isRecognizedFallback =
+        output.includes("no such module 'XCTest'") ||
+        output.includes("no such module \"XCTest\"") ||
+        output.includes("XCTest is not supported") ||
+        output.includes("XCTestHelper binary not found");
+
+      if (isRecognizedFallback) {
+        isFallback = true;
       } else {
         fail(`'swift test list' failed closed with build/discovery/manifest error:\n${output}`);
       }
     }
 
-    if (hasXCTest) {
+    if (!isFallback) {
       log("Verifying native test manifest matches 'swift test list'...");
-      const expectedList = fs.readFileSync(manifestPath, "utf-8").trim().split("\n").map(l => l.trim()).filter(Boolean).sort().join("\n");
+      let expectedList = "";
+      try {
+        expectedList = fs.readFileSync(manifestPath, "utf-8").trim().split("\n").map(l => l.trim()).filter(Boolean).sort().join("\n");
+      } catch (err) {
+        fail(`Failed to read native test manifest at ${manifestPath}: ${err.message}`);
+      }
+
       if (actualList !== expectedList) {
         fail(`Native test manifest mismatch!\nExpected:\n${expectedList}\nActual:\n${actualList}`);
       }

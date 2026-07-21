@@ -195,8 +195,7 @@ public actor SCScreenshotCaptureEngine: DisplayCaptureEngine {
             }
 
             if marker == 0xD8 {
-                offset += 2
-                continue
+                return nil
             }
 
             if marker == 0xD9 {
@@ -208,6 +207,7 @@ public actor SCScreenshotCaptureEngine: DisplayCaptureEngine {
                 if offset + 4 >= data.count { return nil }
                 let segLen = (Int(data[offset + 2]) << 8) | Int(data[offset + 3])
                 let numScanComponents = Int(data[offset + 4])
+                if numScanComponents < 1 || numScanComponents > 4 { return nil }
                 if segLen != 6 + 2 * numScanComponents || offset + 2 + segLen > data.count { return nil }
                 foundSOS = true
                 offset += 2 + segLen
@@ -231,6 +231,18 @@ public actor SCScreenshotCaptureEngine: DisplayCaptureEngine {
 
                 dimensions = (width, height)
                 foundSOF = true
+                offset += 2 + segLen
+                continue
+            }
+
+            // Whitelist legal header/inter-scan segment markers: 0xC4 (DHT), 0xDB (DQT), 0xDD (DRI), 0xE0..0xEF (APP0..APP15)
+            let isWhitelisted = marker == 0xC4 || marker == 0xDB || marker == 0xDD || (marker >= 0xE0 && marker <= 0xEF)
+            guard isWhitelisted else { return nil }
+
+            if marker == 0xDD {
+                if offset + 3 >= data.count { return nil }
+                let segLen = (Int(data[offset + 2]) << 8) | Int(data[offset + 3])
+                if segLen != 4 || offset + 2 + segLen > data.count { return nil }
                 offset += 2 + segLen
                 continue
             }

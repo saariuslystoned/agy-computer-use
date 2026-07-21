@@ -16,6 +16,148 @@ private final class ErrorBox: @unchecked Sendable {
     var value: Error? { lock.lock(); defer { lock.unlock() }; return err }
 }
 
+public final class TestManualClock: HostClock, @unchecked Sendable {
+    private let lock = NSLock()
+    private var currentInstant: ContinuousClock.Instant
+
+    public init(initial: ContinuousClock.Instant = ContinuousClock().now) {
+        self.currentInstant = initial
+    }
+
+    public var now: ContinuousClock.Instant {
+        lock.lock(); defer { lock.unlock() }
+        return currentInstant
+    }
+
+    public func advance(by duration: Duration) {
+        lock.lock(); defer { lock.unlock() }
+        currentInstant = currentInstant + duration
+    }
+}
+
+public final class ManualSleeper: Sleeper, @unchecked Sendable {
+    private struct PendingSleep {
+        let continuation: CheckedContinuation<Void, Error>
+    }
+
+    private let lock = NSLock()
+    private var pending: [PendingSleep] = []
+
+    public init() {}
+
+    public func sleep(nanoseconds: UInt64) async throws {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                lock.lock()
+                pending.append(PendingSleep(continuation: continuation))
+                lock.unlock()
+            }
+        } onCancel: {
+            self.cancelAll()
+        }
+    }
+
+    public func advance() {
+        lock.lock()
+        let toResume = pending
+        pending.removeAll()
+        lock.unlock()
+
+        for item in toResume {
+            item.continuation.resume()
+        }
+    }
+
+    public func cancelAll() {
+        lock.lock()
+        let toCancel = pending
+        pending.removeAll()
+        lock.unlock()
+
+        for item in toCancel {
+            item.continuation.resume(throwing: CancellationError())
+        }
+    }
+}
+
+public final class ScriptedPOSIXSyscalls: POSIXSyscallProviding, @unchecked Sendable {
+    private let underlying = DarwinPOSIXSyscalls.shared
+    private let lock = NSLock()
+    private var customErrno: Int32 = 0
+
+    public var acceptHook: ((Int32, UnsafeMutablePointer<sockaddr>?, UnsafeMutablePointer<socklen_t>?) -> Int32?)?
+    public var readHook: ((Int32, UnsafeMutableRawPointer?, Int) -> Int?)?
+    public var writeHook: ((Int32, UnsafeRawPointer?, Int) -> Int?)?
+    public var listenHook: ((Int32, Int32) -> Int32?)?
+
+    public var acceptCallCount: Int = 0
+    public var readCallCount: Int = 0
+    public var writeCallCount: Int = 0
+
+    public init() {}
+
+    public var lastErrno: Int32 {
+        lock.lock(); defer { lock.unlock() }
+        return customErrno != 0 ? customErrno : underlying.lastErrno
+    }
+
+    public func setErrno(_ value: Int32) {
+        lock.lock(); defer { lock.unlock() }
+        customErrno = value
+        underlying.setErrno(value)
+    }
+
+    public func accept(_ socket: Int32, _ address: UnsafeMutablePointer<sockaddr>?, _ addressLen: UnsafeMutablePointer<socklen_t>?) -> Int32 {
+        lock.lock()
+        acceptCallCount += 1
+        let hook = acceptHook
+        lock.unlock()
+        if let res = hook?(socket, address, addressLen) { return res }
+        return underlying.accept(socket, address, addressLen)
+    }
+
+    public func read(_ fd: Int32, _ buf: UnsafeMutableRawPointer?, _ count: Int) -> Int {
+        lock.lock()
+        readCallCount += 1
+        let hook = readHook
+        lock.unlock()
+        if let res = hook?(fd, buf, count) { return res }
+        return underlying.read(fd, buf, count)
+    }
+
+    public func write(_ fd: Int32, _ buf: UnsafeRawPointer?, _ count: Int) -> Int {
+        lock.lock()
+        writeCallCount += 1
+        let hook = writeHook
+        lock.unlock()
+        if let res = hook?(fd, buf, count) { return res }
+        return underlying.write(fd, buf, count)
+    }
+
+    public func listen(_ socket: Int32, _ backlog: Int32) -> Int32 {
+        if let res = listenHook?(socket, backlog) { return res }
+        return underlying.listen(socket, backlog)
+    }
+
+    public func bind(_ socket: Int32, _ address: UnsafePointer<sockaddr>?, _ addressLen: socklen_t) -> Int32 { underlying.bind(socket, address, addressLen) }
+    public func socket(_ domain: Int32, _ type: Int32, _ protocol: Int32) -> Int32 { underlying.socket(domain, type, `protocol`) }
+    public func open(_ path: UnsafePointer<CChar>, _ oflag: Int32, _ mode: mode_t) -> Int32 { underlying.open(path, oflag, mode) }
+    public func fcntl(_ fd: Int32, _ cmd: Int32, _ arg: Int32) -> Int32 { underlying.fcntl(fd, cmd, arg) }
+    public func getsockopt(_ socket: Int32, _ level: Int32, _ optionName: Int32, _ optionValue: UnsafeMutableRawPointer?, _ optionLen: UnsafeMutablePointer<socklen_t>?) -> Int32 { underlying.getsockopt(socket, level, optionName, optionValue, optionLen) }
+    public func lstat(_ path: UnsafePointer<CChar>, _ buf: UnsafeMutablePointer<stat>?) -> Int32 { underlying.lstat(path, buf) }
+    public func fstat(_ fd: Int32, _ buf: UnsafeMutablePointer<stat>?) -> Int32 { underlying.fstat(fd, buf) }
+    public func flock(_ fd: Int32, _ operation: Int32) -> Int32 { underlying.flock(fd, operation) }
+    public func unlink(_ path: UnsafePointer<CChar>) -> Int32 { underlying.unlink(path) }
+    public func rmdir(_ path: UnsafePointer<CChar>) -> Int32 { underlying.rmdir(path) }
+    public func mkdir(_ path: UnsafePointer<CChar>, _ mode: mode_t) -> Int32 { underlying.mkdir(path, mode) }
+    public func close(_ fd: Int32) -> Int32 { underlying.close(fd) }
+    public func getuid() -> uid_t { underlying.getuid() }
+    public func setsockopt(_ socket: Int32, _ level: Int32, _ optionName: Int32, _ optionValue: UnsafeRawPointer?, _ optionLen: socklen_t) -> Int32 { underlying.setsockopt(socket, level, optionName, optionValue, optionLen) }
+    public func connect(_ socket: Int32, _ address: UnsafePointer<sockaddr>?, _ addressLen: socklen_t) -> Int32 { underlying.connect(socket, address, addressLen) }
+    public func poll(_ fds: UnsafeMutablePointer<pollfd>?, _ nfds: nfds_t, _ timeout: Int32) -> Int32 { underlying.poll(fds, nfds, timeout) }
+    public func getpeereid(_ socket: Int32, _ uid: UnsafeMutablePointer<uid_t>?, _ gid: UnsafeMutablePointer<gid_t>?) -> Int32 { underlying.getpeereid(socket, uid, gid) }
+}
+
 public final class FakeScreenRecordingAuthorizer: ScreenRecordingAuthorizing, @unchecked Sendable {
     public let granted: Bool
     public init(granted: Bool = true) { self.granted = granted }
@@ -1069,17 +1211,21 @@ public struct ComputerUseHostTestRunner {
 
     public static func run22_NoncooperativeLateCompletionGenerationFence() async throws {
         let controlledEngine = ControlledCaptureEngine()
+        let sleeper = ManualSleeper()
         let fenceServer = HostServer(
             authorizer: FakeScreenRecordingAuthorizer(granted: true),
             topologyProvider: FakeDisplayTopologyProvider(),
             captureEngine: controlledEngine,
             axEngine: DisabledAXInspector(),
             inputEngine: DisabledInputInjector(),
-            observationTimeoutSec: 0.05
+            observationTimeoutSec: 5.0,
+            sleeper: sleeper
         )
 
         let reqATask = Task { await fenceServer.handleRequest(IPCRequest(id: "fence-A", method: "observe")) }
         await controlledEngine.waitUntilRegistered(count: 1)
+        sleeper.advance()
+
         let respA = await reqATask.value
         assertTrue(!respA.success)
         assertEqual(respA.error?.code, "TIMEOUT")
@@ -1171,18 +1317,21 @@ public struct ComputerUseHostTestRunner {
     public static func run25_TimedOutOrphanCapacity() async throws {
         let budget = CaptureBudget(maxConcurrent: 1)
         let controlledEngine = ControlledCaptureEngine()
+        let sleeper = ManualSleeper()
         let server = HostServer(
             authorizer: FakeScreenRecordingAuthorizer(granted: true),
             topologyProvider: FakeDisplayTopologyProvider(),
             captureEngine: controlledEngine,
             axEngine: DisabledAXInspector(),
             inputEngine: DisabledInputInjector(),
-            observationTimeoutSec: 0.05,
-            budget: budget
+            observationTimeoutSec: 5.0,
+            budget: budget,
+            sleeper: sleeper
         )
 
         let taskA = Task { await server.handleRequest(IPCRequest(id: "orphan-A", method: "observe")) }
         await controlledEngine.waitUntilRegistered(count: 1)
+        sleeper.advance()
 
         let respA = await taskA.value
         assertTrue(!respA.success)
@@ -1201,6 +1350,10 @@ public struct ComputerUseHostTestRunner {
         let frameA = try FakeCaptureEngine().generateDTO(topology: FakeDisplayTopologyProvider().getTopology())
         try await controlledEngine.complete(index: 0, with: .success(frameA))
         await controlledEngine.waitUntilExited(count: 1)
+        for _ in 0..<100 {
+            if budget.count == 0 { break }
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
         assertEqual(budget.count, 0, "Budget must be released after orphan task A exits")
 
         let taskC = Task { await server.handleRequest(IPCRequest(id: "orphan-C", method: "observe")) }
@@ -1330,6 +1483,199 @@ public struct ComputerUseHostTestRunner {
         listener30.stop()
     }
 
+    public static func run31_AcceptEINTRRetry() async throws {
+        let parentDir = "/tmp/agy-test-c31-\(UUID().uuidString)"
+        let sockPath = "\(parentDir)/host.sock"
+        try SocketListener.prepareDirectory(at: sockPath)
+
+        let scriptedSyscalls = ScriptedPOSIXSyscalls()
+        var acceptAttempts = 0
+        scriptedSyscalls.acceptHook = { fd, saPtr, lenPtr in
+            acceptAttempts += 1
+            if acceptAttempts == 1 {
+                scriptedSyscalls.setErrno(EINTR)
+                return -1
+            }
+            return nil
+        }
+
+        let listener = SocketListener(
+            socketPath: sockPath,
+            server: HostServer(authorizer: FakeScreenRecordingAuthorizer(), topologyProvider: FakeDisplayTopologyProvider(), captureEngine: FakeCaptureEngine(), axEngine: DisabledAXInspector(), inputEngine: DisabledInputInjector()),
+            syscalls: scriptedSyscalls
+        )
+        try listener.start()
+        defer { listener.stop() }
+
+        let clientFd = try connectToSocket(at: sockPath)
+        defer { close(clientFd) }
+
+        let handled = try await listener.acceptAndHandleOneConnection()
+        assertTrue(handled)
+        assertEqual(scriptedSyscalls.acceptCallCount, 2, "accept must be called exactly 2 times (1 EINTR retry + 1 success)")
+    }
+
+    public static func run32_ReadHeaderBodyEINTRRetry() async throws {
+        let parentDir = "/tmp/agy-test-c32-\(UUID().uuidString)"
+        let sockPath = "\(parentDir)/host.sock"
+        try SocketListener.prepareDirectory(at: sockPath)
+
+        let scriptedSyscalls = ScriptedPOSIXSyscalls()
+        var headerReadAttempts = 0
+        var bodyReadAttempts = 0
+
+        scriptedSyscalls.readHook = { fd, buf, count in
+            if count == 4 {
+                headerReadAttempts += 1
+                if headerReadAttempts == 1 {
+                    scriptedSyscalls.setErrno(EINTR)
+                    return -1
+                }
+            } else if count > 4 {
+                bodyReadAttempts += 1
+                if bodyReadAttempts == 1 {
+                    scriptedSyscalls.setErrno(EINTR)
+                    return -1
+                }
+            }
+            return nil
+        }
+
+        let listener = SocketListener(
+            socketPath: sockPath,
+            server: HostServer(authorizer: FakeScreenRecordingAuthorizer(), topologyProvider: FakeDisplayTopologyProvider(), captureEngine: FakeCaptureEngine(), axEngine: DisabledAXInspector(), inputEngine: DisabledInputInjector()),
+            syscalls: scriptedSyscalls
+        )
+        try listener.start()
+        defer { listener.stop() }
+
+        let clientFd = try connectToSocket(at: sockPath)
+        defer { close(clientFd) }
+
+        try sendIPCRequest(IPCRequest(id: "test-eintr", method: "observe"), to: clientFd)
+        let handled = try await listener.acceptAndHandleOneConnection()
+        assertTrue(handled)
+
+        assertTrue(headerReadAttempts >= 2, "Header read must retry after EINTR")
+        assertTrue(bodyReadAttempts >= 2, "Body read must retry after EINTR")
+    }
+
+    public static func run33_WriteResponseEAGAINDeadlineAndSingleAttempt() async throws {
+        let parentDir = "/tmp/agy-test-c33-\(UUID().uuidString)"
+        let sockPath = "\(parentDir)/host.sock"
+        try SocketListener.prepareDirectory(at: sockPath)
+
+        let scriptedSyscalls = ScriptedPOSIXSyscalls()
+        var writeCallSequence = 0
+
+        scriptedSyscalls.writeHook = { fd, buf, count in
+            writeCallSequence += 1
+            if writeCallSequence == 1 {
+                return 2
+            }
+            scriptedSyscalls.setErrno(EAGAIN)
+            return -1
+        }
+
+        let listener = SocketListener(
+            socketPath: sockPath,
+            server: HostServer(authorizer: FakeScreenRecordingAuthorizer(), topologyProvider: FakeDisplayTopologyProvider(), captureEngine: FakeCaptureEngine(), axEngine: DisabledAXInspector(), inputEngine: DisabledInputInjector()),
+            perFrameTimeoutSec: 0.1,
+            syscalls: scriptedSyscalls
+        )
+        try listener.start()
+        defer { listener.stop() }
+
+        let clientFd = try connectToSocket(at: sockPath)
+        defer { close(clientFd) }
+
+        try sendIPCRequest(IPCRequest(id: "test-write-eagain", method: "observe"), to: clientFd)
+        let handled = try await listener.acceptAndHandleOneConnection()
+        assertTrue(handled)
+
+        assertTrue(writeCallSequence > 1, "Write must retry on EAGAIN until deadline")
+        assertEqual(scriptedSyscalls.writeCallCount, writeCallSequence, "No secondary response write must be initiated in catch block")
+    }
+
+    public static func run34_PositiveByteAdvancesClockPastDeadlineReturnsTimeout() async throws {
+        let parentDir = "/tmp/agy-test-c34-\(UUID().uuidString)"
+        let sockPath = "\(parentDir)/host.sock"
+        try SocketListener.prepareDirectory(at: sockPath)
+
+        let manualClock = TestManualClock()
+        let scriptedSyscalls = ScriptedPOSIXSyscalls()
+
+        scriptedSyscalls.readHook = { fd, buf, count in
+            manualClock.advance(by: .seconds(5))
+            return 2
+        }
+
+        let listener = SocketListener(
+            socketPath: sockPath,
+            server: HostServer(authorizer: FakeScreenRecordingAuthorizer(), topologyProvider: FakeDisplayTopologyProvider(), captureEngine: FakeCaptureEngine(), axEngine: DisabledAXInspector(), inputEngine: DisabledInputInjector()),
+            syscalls: scriptedSyscalls,
+            clock: manualClock
+        )
+        try listener.start()
+        defer { listener.stop() }
+
+        let clientFd = try connectToSocket(at: sockPath)
+        defer { close(clientFd) }
+
+        let handled = try await listener.acceptAndHandleOneConnection()
+        assertTrue(handled)
+        let resp = try readIPCResponse(from: clientFd)
+        assertTrue(!resp.success)
+        assertEqual(resp.error?.code, "TIMEOUT")
+    }
+
+    public static func run35_InjectedListenFailurePostBindRollback() async throws {
+        let parentDir = "/tmp/agy-test-c35-\(UUID().uuidString)"
+        let sockPath = "\(parentDir)/host.sock"
+        let lockPath = "\(parentDir)/host.lock"
+        try SocketListener.prepareDirectory(at: sockPath)
+
+        let scriptedSyscalls = ScriptedPOSIXSyscalls()
+        var listenAttempt = 0
+        scriptedSyscalls.listenHook = { fd, backlog in
+            listenAttempt += 1
+            if listenAttempt == 1 {
+                scriptedSyscalls.setErrno(EOPNOTSUPP)
+                return -1
+            }
+            return nil
+        }
+
+        let listener = SocketListener(
+            socketPath: sockPath,
+            server: HostServer(authorizer: FakeScreenRecordingAuthorizer(), topologyProvider: FakeDisplayTopologyProvider(), captureEngine: FakeCaptureEngine(), axEngine: DisabledAXInspector(), inputEngine: DisabledInputInjector()),
+            syscalls: scriptedSyscalls
+        )
+
+        var threwListenError = false
+        do {
+            try listener.start()
+        } catch let err as ComputerUseError {
+            if case .ipcError = err { threwListenError = true }
+        }
+        assertTrue(threwListenError, "start() must fail when listen returns non-zero")
+
+        var statBuf = stat()
+        assertTrue(lstat(sockPath, &statBuf) != 0, "Bound socket file must be unlinked on listen rollback")
+
+        assertTrue(lstat(lockPath, &statBuf) == 0, "host.lock must persist on disk after listen failure")
+        let initialLockInode = statBuf.st_ino
+
+        try listener.start()
+        defer { listener.stop() }
+
+        assertTrue(lstat(lockPath, &statBuf) == 0)
+        assertEqual(statBuf.st_ino, initialLockInode, "host.lock inode must remain unchanged")
+
+        let clientFd = try connectToSocket(at: listener.socketPath)
+        close(clientFd)
+    }
+
     private static func runWithWatchdog(name: String, timeoutSec: Double = 10.0, _ block: @Sendable @escaping () async throws -> Void) async throws {
         let sem = DispatchSemaphore(value: 0)
         let errorBox = ErrorBox()
@@ -1388,6 +1734,11 @@ public struct ComputerUseHostTestRunner {
         try await runWithWatchdog(name: "test28_DisplayIdParameterValidation") { try await run28_DisplayIdParameterValidation() }
         try await runWithWatchdog(name: "test29_CancellationErrorMappedToCancelledCode") { try await run29_CancellationErrorMappedToCancelledCode() }
         try await runWithWatchdog(name: "test30_PartialStartRollback") { try await run30_PartialStartRollback() }
-        fputs("[ComputerUseHostTestRunner] Executed 30 native test cases successfully. ALL PASSED.\n", stderr)
+        try await runWithWatchdog(name: "test31_AcceptEINTRRetry") { try await run31_AcceptEINTRRetry() }
+        try await runWithWatchdog(name: "test32_ReadHeaderBodyEINTRRetry") { try await run32_ReadHeaderBodyEINTRRetry() }
+        try await runWithWatchdog(name: "test33_WriteResponseEAGAINDeadlineAndSingleAttempt") { try await run33_WriteResponseEAGAINDeadlineAndSingleAttempt() }
+        try await runWithWatchdog(name: "test34_PositiveByteAdvancesClockPastDeadlineReturnsTimeout") { try await run34_PositiveByteAdvancesClockPastDeadlineReturnsTimeout() }
+        try await runWithWatchdog(name: "test35_InjectedListenFailurePostBindRollback") { try await run35_InjectedListenFailurePostBindRollback() }
+        fputs("[ComputerUseHostTestRunner] Executed 35 native test cases successfully. ALL PASSED.\n", stderr)
     }
 }

@@ -34,7 +34,9 @@ jobs:
       - name: Run Source & Formatting Safety Guards
         run: |
           set -euo pipefail
-          git fetch origin main:refs/remotes/origin/main || true
+          git fetch origin main:refs/remotes/origin/main
+          git rev-parse --verify origin/main > /dev/null
+
           BASE=$(git merge-base HEAD origin/main 2>/dev/null || echo "")
           if [ -z "$BASE" ]; then
             echo "Error: Failed to resolve non-empty merge-base between HEAD and origin/main" >&2
@@ -42,13 +44,35 @@ jobs:
           fi
           git diff --check "$BASE" HEAD
 
-          check_no_match() {
-            local pattern="$1"
-            local path_spec="$2"
-            if git grep -n "$pattern" -- "$path_spec" > /dev/null 2>&1; then
+          validate_pathspec() {
+            local path_spec="$1"
+            local tracked_files
+            tracked_files=$(git ls-files -- "$path_spec")
+            if [ -z "$tracked_files" ]; then
+              echo "Error: Pathspec '$path_spec' does not resolve to any tracked files in git" >&2
               return 1
             fi
             return 0
+          }
+
+          check_no_match() {
+            local pattern="$1"
+            local path_spec="$2"
+
+            validate_pathspec "$path_spec"
+
+            local status=0
+            git grep -q "$pattern" -- "$path_spec" || status=$?
+
+            if [ "$status" -eq 0 ]; then
+              echo "Forbidden match found for pattern '$pattern' in '$path_spec'" >&2
+              return 1
+            elif [ "$status" -eq 1 ]; then
+              return 0
+            else
+              echo "Error: 'git grep' failed with status $status for pattern '$pattern' in '$path_spec'" >&2
+              return "$status"
+            fi
           }
 
           check_no_match "CGRequestScreenCaptureAccess" 'apps/computer-use-host/Sources/'
@@ -56,14 +80,20 @@ jobs:
           check_no_match "Fake" 'apps/computer-use-host/Sources/'
           check_no_match "recordCase(" 'apps/computer-use-host/Tests/'
 
-          # Negative self-probes proving each guard fails closed independently
+          # Self-probes proving guards fail closed independently
+          # 1. Positive match probe
           ! check_no_match "import" 'apps/computer-use-host/Sources/'
-          ! check_no_match "func" 'apps/computer-use-host/Tests/'
+          # 2. Clean no-match probe
+          check_no_match "NONEXISTENT_SECURITY_FORBIDDEN_PATTERN_98765" 'apps/computer-use-host/Sources/'
+          # 3. Missing/renamed scope probe
+          ! check_no_match "import" 'nonexistent/scope/path/'
+          # 4. Forced command failure probe (invalid regex returns exit status 2)
+          ! check_no_match "[invalid-regex-unclosed-bracket" 'apps/computer-use-host/Sources/'
 
       - name: Build & Run Native Swift Test Authority
         run: |
           set -euo pipefail
-          diff -u <(cd apps/computer-use-host && swift test list | sort) docs/native_test_manifest.txt
+          diff -u <(cd apps/computer-use-host && swift test list --enable-xctest | sort) docs/native_test_manifest.txt
           TEST_OUT=$(./bin/agy-computer-use test-native 2>&1 | tee /dev/stderr)
           echo "$TEST_OUT" | grep -F "test01_LengthPrefixedFraming"
           echo "$TEST_OUT" | grep -F "test02_OversizedFramingHeaderRejection"
@@ -95,6 +125,11 @@ jobs:
           echo "$TEST_OUT" | grep -F "test28_DisplayIdParameterValidation"
           echo "$TEST_OUT" | grep -F "test29_CancellationErrorMappedToCancelledCode"
           echo "$TEST_OUT" | grep -F "test30_PartialStartRollback"
+          echo "$TEST_OUT" | grep -F "test31_AcceptEINTRRetry"
+          echo "$TEST_OUT" | grep -F "test32_ReadHeaderBodyEINTRRetry"
+          echo "$TEST_OUT" | grep -F "test33_WriteResponseEAGAINDeadlineAndSingleAttempt"
+          echo "$TEST_OUT" | grep -F "test34_PositiveByteAdvancesClockPastDeadlineReturnsTimeout"
+          echo "$TEST_OUT" | grep -F "test35_InjectedListenFailurePostBindRollback"
 
       - name: Build Release Executable & Guard Binary Symbols
         run: |
