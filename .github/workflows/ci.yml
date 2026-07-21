@@ -93,7 +93,7 @@ jobs:
       - name: Build & Run Native Swift Test Authority
         run: |
           set -euo pipefail
-          diff -u <(cd apps/computer-use-host && swift test list --enable-xctest | sort) docs/native_test_manifest.txt
+          diff -u <(cd apps/computer-use-host && swift test --enable-xctest list | sort) docs/native_test_manifest.txt
           TEST_OUT=$(./bin/agy-computer-use test-native 2>&1 | tee /dev/stderr)
           echo "$TEST_OUT" | grep -F "test01_LengthPrefixedFraming"
           echo "$TEST_OUT" | grep -F "test02_OversizedFramingHeaderRejection"

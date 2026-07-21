@@ -120,7 +120,7 @@ async function main() {
     let isFallback = false;
     let actualList = "";
     try {
-      const testListRaw = execSync("swift test list --enable-xctest 2>&1", { cwd: hostDir, encoding: "utf-8" });
+      const testListRaw = execSync("swift test --enable-xctest list 2>&1", { cwd: hostDir, encoding: "utf-8" });
       actualList = testListRaw
         .trim()
         .split("\n")
