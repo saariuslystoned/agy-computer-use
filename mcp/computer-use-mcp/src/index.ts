@@ -1,7 +1,7 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { HostClient, UnixSocketHostClient, MockHostClient, IPCResponsePayload } from "./host-client.js";
+import { HostClient, UnixSocketHostClient, IPCResponsePayload } from "./host-client.js";
 import { Logger } from "./logger.js";
 import {
   ObserveSchema,
@@ -13,6 +13,34 @@ import {
   ShortcutSchema,
   ScrollSchema
 } from "./schemas.js";
+
+const MAX_DECODED_BYTES = 10 * 1024 * 1024; // 10 MiB limit
+
+function validateAndDecodeBase64Image(base64Str: string): Buffer {
+  if (!base64Str || typeof base64Str !== "string") {
+    throw new Error("CANARY_RESPONSE_INVALID: Missing base64 image payload");
+  }
+
+  // Pre-allocation guard & canonical padding/character check
+  if (base64Str.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(base64Str)) {
+    throw new Error("CANARY_RESPONSE_INVALID: Invalid canonical base64 format");
+  }
+
+  const buf = Buffer.from(base64Str, "base64");
+  if (buf.length === 0) {
+    throw new Error("CANARY_EMPTY_DECODED_BUFFER: Decoded image buffer is empty");
+  }
+  if (buf.length > MAX_DECODED_BYTES) {
+    throw new Error("CANARY_SIZE_EXCEEDED: Decoded image exceeds 10 MiB limit");
+  }
+
+  // Validate JPEG magic bytes 0xFF, 0xD8, 0xFF
+  if (buf.length < 3 || buf[0] !== 0xff || buf[1] !== 0xd8 || buf[2] !== 0xff) {
+    throw new Error("CANARY_MAGIC_MISMATCH: Image payload magic bytes do not match image/jpeg header");
+  }
+
+  return buf;
+}
 
 function formatToolResponse(resp: IPCResponsePayload) {
   if (!resp.success) {
@@ -30,14 +58,12 @@ function formatToolResponse(resp: IPCResponsePayload) {
   const data = resp.data ?? {};
   let imageBase64: string | undefined;
 
-  // Extract pixel base64 from observe or post_action_observation
   if (typeof data.image_data_base64 === "string") {
     imageBase64 = data.image_data_base64;
   } else if (data.post_action_observation && typeof (data.post_action_observation as any).image_data_base64 === "string") {
     imageBase64 = (data.post_action_observation as any).image_data_base64;
   }
 
-  // Create clean metadata text payload WITHOUT raw base64 image strings
   const cleanData = JSON.parse(JSON.stringify(data));
   delete cleanData.image_data_base64;
   if (cleanData.post_action_observation) {
@@ -52,11 +78,25 @@ function formatToolResponse(resp: IPCResponsePayload) {
   ];
 
   if (imageBase64) {
-    content.push({
-      type: "image" as const,
-      data: imageBase64,
-      mimeType: (cleanData.image_format || cleanData.post_action_observation?.image_format) === "png" ? "image/png" : "image/jpeg"
-    });
+    try {
+      validateAndDecodeBase64Image(imageBase64);
+      content.push({
+        type: "image" as const,
+        data: imageBase64,
+        mimeType: "image/jpeg"
+      });
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ error: { code: "INVALID_IMAGE_PAYLOAD", message: errMsg } }, null, 2)
+          }
+        ]
+      };
+    }
   }
 
   return { content };
@@ -82,7 +122,7 @@ export function createComputerUseServer(hostClient?: HostClient): Server {
       tools: [
         {
           name: "computer_use_status",
-          description: "Gets active display topology, host connection status, and TCC permissions.",
+          description: "Gets active display topology, host connection status, TCC permission state, and mutation state.",
           inputSchema: {
             type: "object",
             properties: {},
@@ -96,120 +136,6 @@ export function createComputerUseServer(hostClient?: HostClient): Server {
             type: "object",
             properties: {
               display_id: { type: "integer" }
-            },
-            additionalProperties: false
-          }
-        },
-        {
-          name: "computer_use_ax_tree",
-          description: "Queries macOS accessibility element tree graph with depth limit and redaction.",
-          inputSchema: {
-            type: "object",
-            properties: {
-              max_depth: { type: "integer", minimum: 1, maximum: 10, default: 10 },
-              app_id: { type: "string" }
-            },
-            additionalProperties: false
-          }
-        },
-        {
-          name: "computer_use_click",
-          description: "Performs mouse click at 0...999 grid coordinates.",
-          inputSchema: {
-            type: "object",
-            required: ["x", "y", "capture_id", "topology_version", "intent"],
-            properties: {
-              x: { type: "integer", minimum: 0, maximum: 999 },
-              y: { type: "integer", minimum: 0, maximum: 999 },
-              button: { type: "string", enum: ["left", "right", "middle"], default: "left" },
-              click_count: { type: "integer", minimum: 1, maximum: 3, default: 1 },
-              capture_id: { type: "string" },
-              topology_version: { type: "string" },
-              intent: { type: "string", minLength: 1, maxLength: 200, pattern: "^.*\\S.*$" }
-            },
-            additionalProperties: false
-          }
-        },
-        {
-          name: "computer_use_move",
-          description: "Moves cursor to 0...999 grid coordinates.",
-          inputSchema: {
-            type: "object",
-            required: ["x", "y", "capture_id", "topology_version", "intent"],
-            properties: {
-              x: { type: "integer", minimum: 0, maximum: 999 },
-              y: { type: "integer", minimum: 0, maximum: 999 },
-              capture_id: { type: "string" },
-              topology_version: { type: "string" },
-              intent: { type: "string", minLength: 1, maxLength: 200, pattern: "^.*\\S.*$" }
-            },
-            additionalProperties: false
-          }
-        },
-        {
-          name: "computer_use_drag",
-          description: "Performs drag and drop from start to end 0...999 grid coordinates.",
-          inputSchema: {
-            type: "object",
-            required: ["start_x", "start_y", "end_x", "end_y", "capture_id", "topology_version", "intent"],
-            properties: {
-              start_x: { type: "integer", minimum: 0, maximum: 999 },
-              start_y: { type: "integer", minimum: 0, maximum: 999 },
-              end_x: { type: "integer", minimum: 0, maximum: 999 },
-              end_y: { type: "integer", minimum: 0, maximum: 999 },
-              capture_id: { type: "string" },
-              topology_version: { type: "string" },
-              intent: { type: "string", minLength: 1, maxLength: 200, pattern: "^.*\\S.*$" }
-            },
-            additionalProperties: false
-          }
-        },
-        {
-          name: "computer_use_type",
-          description: "Types text into currently focused input element.",
-          inputSchema: {
-            type: "object",
-            required: ["text", "capture_id", "topology_version", "intent"],
-            properties: {
-              text: { type: "string", minLength: 1, maxLength: 1000 },
-              press_enter: { type: "boolean", default: false },
-              capture_id: { type: "string" },
-              topology_version: { type: "string" },
-              intent: { type: "string", minLength: 1, maxLength: 200, pattern: "^.*\\S.*$" }
-            },
-            additionalProperties: false
-          }
-        },
-        {
-          name: "computer_use_shortcut",
-          description: "Triggers keyboard shortcut key combination.",
-          inputSchema: {
-            type: "object",
-            required: ["keys", "capture_id", "topology_version", "intent"],
-            properties: {
-              keys: { type: "array", items: { type: "string" }, minItems: 1 },
-              capture_id: { type: "string" },
-              topology_version: { type: "string" },
-              intent: { type: "string", minLength: 1, maxLength: 200, pattern: "^.*\\S.*$" }
-            },
-            additionalProperties: false
-          }
-        },
-        {
-          name: "computer_use_scroll",
-          description: "Scrolls scrollable container at target 0...999 location.",
-          inputSchema: {
-            type: "object",
-            required: ["x", "y", "capture_id", "topology_version", "intent"],
-            properties: {
-              x: { type: "integer", minimum: 0, maximum: 999 },
-              y: { type: "integer", minimum: 0, maximum: 999 },
-              delta_x: { type: "integer", default: 0 },
-              delta_y: { type: "integer", default: 0 },
-              direction: { type: "string", enum: ["up", "down", "left", "right"] },
-              capture_id: { type: "string" },
-              topology_version: { type: "string" },
-              intent: { type: "string", minLength: 1, maxLength: 200, pattern: "^.*\\S.*$" }
             },
             additionalProperties: false
           }
@@ -296,7 +222,6 @@ export function createComputerUseServer(hostClient?: HostClient): Server {
   return server;
 }
 
-// Server startup if executed directly
 if (import.meta.url === `file://${process.argv[1]}`) {
   Logger.info("Starting Computer Use MCP Server over stdio...");
   const server = createComputerUseServer();

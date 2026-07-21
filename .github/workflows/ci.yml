@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [ main, codex/** ]
-  pull_request:
     branches: [ main ]
+  pull_request:
+    branches: [ main, "codex/**" ]
 
 jobs:
   swift-tests:
@@ -16,10 +16,10 @@ jobs:
       - name: Set up Swift
         run: swift --version
 
-      - name: Build and Run Swift Host Unit & Integration Tests
+      - name: Build and Run Swift Host Unit & Integration Tests (Strict Concurrency)
         run: |
           cd apps/computer-use-host
-          swift test
+          swift test -Xswiftc -strict-concurrency=complete
 
   node-tests:
     name: TypeScript MCP Server Tests

@@ -20,7 +20,7 @@ Work is partitioned into dependency-ordered milestones (M0–M9 & Dogfood D1–D
 | **M7** | Antigravity Skill Definition & Safety Guardrails | `IMPLEMENTED & TESTED` | `.agents/skills/computer-use/SKILL.md` |
 | **M8** | Continuous Integration & End-to-End Verification Suite | `IMPLEMENTED & TESTED` | `swift test`, `pnpm test`, `.github/workflows/ci.yml` |
 | **D1** | Dogfood Harness Canary & Read-Only Vision Verification | `IMPLEMENTED & TESTED` | `computer_use_canary_screenshot`, `proof/v0.1_verification.md` |
-| **D2** | Production-Bounded Native Observation Slice | `IMPLEMENTED & TESTED` | `SCScreenshotCaptureEngine`, `SystemDisplayTopologyProvider`, `HostServer` sequence gate, `DisabledInputInjector`, `DisabledAXInspector`, `proof/d2_verification.md` |
+| **D2** | Production-Bounded Native Observation Slice (Repair 1) | `IMPLEMENTED & TESTED` | `SCScreenshotCaptureEngine`, `SystemDisplayTopologyProvider`, `HostServer` generation gate, `DisabledInputInjector`, `DisabledAXInspector`, `proof/d2_verification.md` |
 | **M9** | Production Input Synthesis (CGEvent) & Signed App Bundle | `GATED / FUTURE` | Requires signed `ComputerUseHost.app` bundle and active TCC authorization |
 
 ---
@@ -58,17 +58,20 @@ Work is partitioned into dependency-ordered milestones (M0–M9 & Dogfood D1–D
 - **Status**: Implemented & Tested
 - Read-only Calculator capture proof via Peekaboo bridge and `computer_use_canary_screenshot`.
 
-### D2: Production-Bounded Native Observation Slice
+### D2: Production-Bounded Native Observation Slice (Repair Packet 1)
 - **Status**: Implemented & Tested
-- **Key Deliverables**:
-  - Nonprompting `ScreenRecordingAuthorizing` protocol calling only `CGPreflightScreenCaptureAccess()`.
-  - `DisplayTopologyProviding` protocol and `SystemDisplayTopologyProvider` using `CGGetActiveDisplayList`, `CGMainDisplayID`, `CGDisplayBounds`, `CGDisplayCopyDisplayMode`, `CGDisplayRotation`, and order-independent SHA-256 topology versioning.
-  - Async/Sendable `SCScreenshotCaptureEngine` with macOS 14 `SCScreenshotManager.captureImage`, process filtering (`excludingApplications`), in-process ImageIO JPEG encoding, and 10 MiB frame bounds check.
-  - `HostServer` actor reentrancy sequence gate preventing stale/out-of-order capture lease promotion.
-  - `DisabledInputInjector` returning stable `MUTATION_DISABLED` error for all input actions without consuming capture lease.
-  - `DisabledAXInspector` returning `TARGET_UNREACHABLE` for `ax_tree`.
-  - Real drivers wired in production `main.swift`.
-  - Zero `CGEvent` code and zero `CGRequestScreenCaptureAccess` calls.
+- **Key Deliverables & Repairs**:
+  - Anchored `#filePath` Swift source check resolving `apps/computer-use-host/Sources` accurately.
+  - Strict-concurrency compilation with warnings as errors (`swift test -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors`).
+  - Separation of test fakes into test target only. Production executable contains zero `Fake*` symbols.
+  - Generation allocation counter (`latestIssuedGeneration`) with immediate lease invalidation before await.
+  - Generation promotion guard returning stable `STALE_OPERATION` error code for out-of-order completions.
+  - Triple-topology validation and integer checking on `display_id` parameters.
+  - Per-frame socket timeouts via `setsockopt` with `EINTR` retry handling.
+  - `SCScreenshotCaptureEngine` as a Swift actor with strict `CGImage` dimension verification and 10 MiB raw JPEG bounds guard.
+  - Full 64-character lowercase SHA-256 topology digest calculation.
+  - D2 observation-only MCP tool inventory (`computer_use_status` and `computer_use_observe`).
+  - 100% skill package recursive sync between `.agents/skills` and `skills/`.
 
 ### M9: Real OS Driver Integration & Signed Production App (Future / Gated)
 - **Status**: Gated & Future Work

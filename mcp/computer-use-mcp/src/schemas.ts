@@ -18,7 +18,7 @@ export const IntentSchema = z.string()
   .regex(/^.*\S.*$/, "Intent must contain at least one non-whitespace character")
   .describe("Non-empty, bounded description of action intent (max 200 chars)");
 
-export const TopologyVersionSchema = z.string().min(1).default("top-v1").describe("Display topology version token");
+export const TopologyVersionSchema = z.string().min(1).describe("Display topology version token");
 
 export const ClickSchema = z.object({
   x: GridCoordinateSchema.describe("Target X coordinate on normalized 0...999 grid"),
@@ -72,4 +72,54 @@ export const ScrollSchema = z.object({
   capture_id: z.string().min(1).describe("Capture ID from prior computer_use_observe action"),
   topology_version: TopologyVersionSchema,
   intent: IntentSchema
+}).strict();
+
+export const DisplayInfoSchema = z.object({
+  id: z.number().int(),
+  width_points: z.number().positive(),
+  height_points: z.number().positive(),
+  scale_factor: z.number().positive(),
+  origin_x: z.number(),
+  origin_y: z.number(),
+  pixel_width: z.number().int().positive(),
+  pixel_height: z.number().int().positive(),
+  rotation: z.number()
+}).strict();
+
+export const DisplayTopologySchema = z.object({
+  version: z.string().min(1),
+  primary_display_id: z.number().int(),
+  displays: z.array(DisplayInfoSchema).min(1)
+}).strict();
+
+export const StatusDataSchema = z.object({
+  connected: z.boolean(),
+  tcc_permission_state: z.enum(["granted", "denied"]),
+  accessibility_available: z.boolean(),
+  accessibility_trusted: z.boolean(),
+  input_mutation_state: z.enum(["enabled", "disabled"]),
+  topology_version: z.string().min(1),
+  primary_display_id: z.number().int(),
+  display_count: z.number().int().min(1),
+  topology: DisplayTopologySchema
+}).strict();
+
+export const ObserveDataSchema = z.object({
+  capture_id: z.string().min(1),
+  timestamp: z.number().int().positive(),
+  topology_version: z.string().min(1),
+  display_id: z.number().int(),
+  width_points: z.number().positive(),
+  height_points: z.number().positive(),
+  scale_factor: z.number().positive(),
+  pixel_width: z.number().int().positive(),
+  pixel_height: z.number().int().positive(),
+  image_format: z.string().min(1),
+  image_data_base64: z.string().min(1),
+  normalized_bounds: z.object({
+    min_x: z.number().int(),
+    min_y: z.number().int(),
+    max_x: z.number().int(),
+    max_y: z.number().int()
+  }).strict()
 }).strict();

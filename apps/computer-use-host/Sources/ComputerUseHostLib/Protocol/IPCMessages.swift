@@ -1,6 +1,6 @@
 import Foundation
 
-public struct IPCRequest: Codable {
+public struct IPCRequest: Codable, Sendable {
     public let id: String
     public let method: String
     public let params: [String: AnyCodable]?
@@ -12,7 +12,7 @@ public struct IPCRequest: Codable {
     }
 }
 
-public struct IPCResponse: Codable {
+public struct IPCResponse: Codable, Sendable {
     public let id: String
     public let success: Bool
     public let data: [String: AnyCodable]?
@@ -26,7 +26,7 @@ public struct IPCResponse: Codable {
     }
 }
 
-public struct IPCErrorPayload: Codable {
+public struct IPCErrorPayload: Codable, Sendable {
     public let code: String
     public let message: String
     public let details: [String: String]?
@@ -39,7 +39,7 @@ public struct IPCErrorPayload: Codable {
 }
 
 // AnyCodable helper for heterogeneous JSON payloads in IPC
-public enum AnyCodable: Codable, Equatable {
+public enum AnyCodable: Codable, Equatable, Sendable {
     case string(String)
     case int(Int)
     case double(Double)

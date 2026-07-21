@@ -3,6 +3,7 @@ import Foundation
 public enum ComputerUseError: Error, Equatable, Codable, Sendable {
     case staleTopology(current: String, received: String)
     case staleCapture(current: String, received: String)
+    case staleOperation(reason: String)
     case outOfBounds(x: Int, y: Int, limitX: Int, limitY: Int)
     case velocityExceeded(requestedSpeed: Double, maxSpeed: Double)
     case targetUnreachable(reason: String)
@@ -16,6 +17,7 @@ public enum ComputerUseError: Error, Equatable, Codable, Sendable {
         switch self {
         case .staleTopology: return "STALE_TOPOLOGY"
         case .staleCapture: return "STALE_CAPTURE"
+        case .staleOperation: return "STALE_OPERATION"
         case .outOfBounds: return "OUT_OF_BOUNDS"
         case .velocityExceeded: return "VELOCITY_EXCEEDED"
         case .targetUnreachable: return "TARGET_UNREACHABLE"
@@ -33,6 +35,8 @@ public enum ComputerUseError: Error, Equatable, Codable, Sendable {
             return "Display topology version mismatch. Current: \(current), received: \(received)."
         case .staleCapture(let current, let received):
             return "Capture precondition failed. Current capture: \(current), received: \(received)."
+        case .staleOperation(let reason):
+            return "Operation discarded due to newer state generation or stale completion: \(reason)."
         case .outOfBounds(let x, let y, let limitX, let limitY):
             return "Coordinates (\(x), \(y)) exceed valid bounds [0...\(limitX), 0...\(limitY)]."
         case .velocityExceeded(let speed, let maxSpeed):

@@ -1,6 +1,6 @@
 import Foundation
 
-public class SocketListener {
+public final class SocketListener: @unchecked Sendable {
     public let socketPath: String
     private let server: HostServer
     private var listeningSocket: Int32 = -1
@@ -69,7 +69,6 @@ public class SocketListener {
                 throw ComputerUseError.ipcError(reason: "Existing socket \(socketPath) owned by another user")
             }
 
-            // Distinguish live listener from stale socket file using fail-closed connect probe
             var isLive = false
             var isStale = false
             var probeErrno: Int32 = 0
@@ -118,7 +117,6 @@ public class SocketListener {
                 throw ComputerUseError.ipcError(reason: "Socket path probe returned ambiguous error (errno: \(probeErrno)); failing closed without unlinking socket")
             }
 
-            // Socket is confirmed stale. Re-verify path identity and owner before unlinking
             var statRecheck = stat()
             guard lstat(socketPath, &statRecheck) == 0,
                   (statRecheck.st_mode & S_IFMT) == S_IFSOCK,
@@ -211,6 +209,11 @@ public class SocketListener {
             close(clientFd)
         }
 
+        // Configure per-frame 5-second socket read and write timeouts
+        var tv = timeval(tv_sec: 5, tv_usec: 0)
+        _ = setsockopt(clientFd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        _ = setsockopt(clientFd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+
         // Validate peer credentials on Darwin via getpeereid
         var peuid: uid_t = 0
         var pegid: gid_t = 0
@@ -222,7 +225,7 @@ public class SocketListener {
             throw ComputerUseError.permissionDenied(permission: "Peer UID \(peuid) does not match host UID \(getuid())")
         }
 
-        // Read length-prefixed request header with EINTR retry handling
+        // Read length-prefixed request header with EINTR and timeout mapping
         var headerBuf = [UInt8](repeating: 0, count: 4)
         var headerRead = 0
         while headerRead < 4 {
@@ -231,6 +234,9 @@ public class SocketListener {
             }
             if n < 0 {
                 if errno == EINTR { continue }
+                if errno == EAGAIN || errno == EWOULDBLOCK {
+                    throw ComputerUseError.timeout(operation: "socket_read_header", seconds: 5.0)
+                }
                 throw ComputerUseError.ipcError(reason: "Socket header read error: \(String(cString: strerror(errno)))")
             }
             if n == 0 { break }
@@ -246,7 +252,7 @@ public class SocketListener {
             throw ComputerUseError.ipcError(reason: "Invalid payload length \(payloadLen)")
         }
 
-        // Read payload bytes with EINTR retry handling
+        // Read payload bytes with EINTR and timeout mapping
         var payloadBuf = [UInt8](repeating: 0, count: payloadLen)
         var totalRead = 0
         while totalRead < payloadLen {
@@ -255,6 +261,9 @@ public class SocketListener {
             }
             if bytesRead < 0 {
                 if errno == EINTR { continue }
+                if errno == EAGAIN || errno == EWOULDBLOCK {
+                    throw ComputerUseError.timeout(operation: "socket_read_payload", seconds: 5.0)
+                }
                 throw ComputerUseError.ipcError(reason: "Socket payload read error: \(String(cString: strerror(errno)))")
             }
             if bytesRead == 0 { break }
@@ -274,7 +283,7 @@ public class SocketListener {
 
         let encodedResponse = try LengthPrefixedFramer.encode(payload: responseData)
 
-        // Robust write loop handling partial writes and EINTR
+        // Write response frame with timeout mapping
         try writeAll(fd: clientFd, data: encodedResponse)
 
         return true
@@ -289,6 +298,9 @@ public class SocketListener {
                 let res = write(fd, basePtr + written, total - written)
                 if res < 0 {
                     if errno == EINTR { continue }
+                    if errno == EAGAIN || errno == EWOULDBLOCK {
+                        throw ComputerUseError.timeout(operation: "socket_write_response", seconds: 5.0)
+                    }
                     throw ComputerUseError.ipcError(reason: "Socket write error: \(String(cString: strerror(errno)))")
                 }
                 if res == 0 {

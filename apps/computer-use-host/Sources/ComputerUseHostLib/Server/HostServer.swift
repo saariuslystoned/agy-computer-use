@@ -10,8 +10,7 @@ public actor HostServer {
 
     private var latestCapture: CaptureFrameDTO?
     private var activeTopology: DisplayTopology?
-    private var currentOperationSequence: UInt64 = 0
-    private var latestCompletedSequence: UInt64 = 0
+    private var latestIssuedGeneration: UInt64 = 0
 
     public init(
         authorizer: ScreenRecordingAuthorizing = CGScreenRecordingAuthorizer(),
@@ -30,20 +29,8 @@ public actor HostServer {
     public func handleRequest(_ request: IPCRequest) async -> IPCResponse {
         do {
             switch request.method {
-            case "handshake":
-                self.isConnected = true
-                let topVer = (try? topologyProvider.getTopology().version) ?? "top-v1"
-                return IPCResponse(
-                    id: request.id,
-                    success: true,
-                    data: [
-                        "protocol_version": .string("1.0"),
-                        "host_version": .string("0.1.0"),
-                        "topology_version": .string(topVer)
-                    ]
-                )
-
             case "status":
+                self.isConnected = true
                 let currentTopology = try topologyProvider.getTopology()
                 self.activeTopology = currentTopology
                 let isGranted = authorizer.isScreenCaptureAccessGranted
@@ -72,7 +59,8 @@ public actor HostServer {
                     data: [
                         "connected": .bool(isConnected),
                         "tcc_permission_state": .string(isGranted ? "granted" : "denied"),
-                        "accessibility_trusted": .bool(axEngine.isAccessibilityTrusted()),
+                        "accessibility_available": .bool(axEngine.isAvailable),
+                        "accessibility_trusted": .bool(axEngine.isAvailable && axEngine.isAccessibilityTrusted()),
                         "input_mutation_state": .string(inputEngine.isMutationEnabled ? "enabled" : "disabled"),
                         "topology_version": .string(currentTopology.version),
                         "primary_display_id": .int(currentTopology.primaryDisplayId),
@@ -82,24 +70,60 @@ public actor HostServer {
                 )
 
             case "observe":
-                let currentTopology = try topologyProvider.getTopology()
-                self.activeTopology = currentTopology
-                let displayId = request.params?["display_id"]?.rawValue as? Int ?? currentTopology.primaryDisplayId
+                let initialTopology = try topologyProvider.getTopology()
+                self.activeTopology = initialTopology
 
-                currentOperationSequence += 1
-                let opSeq = currentOperationSequence
+                // Strict display_id validation: only absent value selects primary; present non-integer fails immediately
+                let targetDisplayId: Int
+                if let rawDisplayParam = request.params?["display_id"] {
+                    switch rawDisplayParam {
+                    case .int(let dId):
+                        targetDisplayId = dId
+                    default:
+                        throw ComputerUseError.ipcError(reason: "display_id parameter must be an integer")
+                    }
+                } else {
+                    targetDisplayId = initialTopology.primaryDisplayId
+                }
 
-                let frame = try await captureEngine.captureDisplay(displayId: displayId, topology: currentTopology)
+                guard let targetDisplay = initialTopology.displays.first(where: { $0.id == targetDisplayId }) else {
+                    throw ComputerUseError.targetUnreachable(reason: "Display ID \(targetDisplayId) not found in initial topology")
+                }
+
+                // Increment generation counter and immediately invalidate existing capture lease
+                latestIssuedGeneration += 1
+                let generation = latestIssuedGeneration
+                self.latestCapture = nil
+
+                let frame = try await captureEngine.captureDisplay(displayId: targetDisplayId, topology: initialTopology)
 
                 if Task.isCancelled {
                     throw ComputerUseError.cancelled(reason: "Observation operation cancelled during execution")
                 }
 
-                guard opSeq >= self.latestCompletedSequence else {
-                    throw ComputerUseError.ipcError(reason: "Stale out-of-order capture completion discarded")
+                // Re-read current topology once after capture completes
+                let currentTopology = try topologyProvider.getTopology()
+
+                // Generation promotion guard: require issued generation to match latest generation
+                guard generation == self.latestIssuedGeneration else {
+                    throw ComputerUseError.staleOperation(reason: "Newer observation generation issued while generation \(generation) was in flight")
                 }
 
-                self.latestCompletedSequence = opSeq
+                // Triple topology & DTO dimension validation
+                guard initialTopology.version == frame.topologyVersion && frame.topologyVersion == currentTopology.version else {
+                    throw ComputerUseError.staleTopology(current: currentTopology.version, received: frame.topologyVersion)
+                }
+
+                guard frame.displayId == targetDisplayId &&
+                      frame.widthPoints == targetDisplay.widthPoints &&
+                      frame.heightPoints == targetDisplay.heightPoints &&
+                      frame.scaleFactor == targetDisplay.scaleFactor &&
+                      frame.pixelWidth == targetDisplay.pixelWidth &&
+                      frame.pixelHeight == targetDisplay.pixelHeight else {
+                    throw ComputerUseError.staleTopology(current: currentTopology.version, received: frame.topologyVersion)
+                }
+
+                self.activeTopology = currentTopology
                 self.latestCapture = frame
 
                 let dataDict: [String: AnyCodable] = [
@@ -110,6 +134,8 @@ public actor HostServer {
                     "width_points": .double(frame.widthPoints),
                     "height_points": .double(frame.heightPoints),
                     "scale_factor": .double(frame.scaleFactor),
+                    "pixel_width": .int(frame.pixelWidth),
+                    "pixel_height": .int(frame.pixelHeight),
                     "image_format": .string(frame.imageFormat),
                     "image_data_base64": .string(frame.imageDataBase64),
                     "normalized_bounds": .dictionary([
@@ -335,39 +361,57 @@ public actor HostServer {
             throw ComputerUseError.ipcError(reason: "Missing or empty capture_id parameter")
         }
 
-        let currentTopVer = (try? topologyProvider.getTopology().version) ?? "top-v1"
-        guard let topVer = params["topology_version"]?.rawValue as? String, topVer == currentTopVer else {
-            throw ComputerUseError.staleTopology(current: currentTopVer, received: params["topology_version"]?.rawValue as? String ?? "")
-        }
-
-        guard let intent = params["intent"]?.rawValue as? String, !intent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw ComputerUseError.ipcError(reason: "Missing non-empty action intent description")
+        let currentTopology = try topologyProvider.getTopology()
+        guard let reqTopVer = params["topology_version"]?.rawValue as? String else {
+            throw ComputerUseError.ipcError(reason: "Missing topology_version parameter")
         }
 
         guard let activeCap = self.latestCapture else {
             throw ComputerUseError.staleCapture(current: "none", received: capId)
         }
 
+        // Strict topology requirement: request topology == active capture topology == current topology
+        guard reqTopVer == activeCap.topologyVersion && activeCap.topologyVersion == currentTopology.version else {
+            throw ComputerUseError.staleTopology(current: currentTopology.version, received: reqTopVer)
+        }
+
+        guard let intent = params["intent"]?.rawValue as? String, !intent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ComputerUseError.ipcError(reason: "Missing non-empty action intent description")
+        }
+
         guard activeCap.captureId == capId else {
             throw ComputerUseError.staleCapture(current: activeCap.captureId, received: capId)
         }
 
-        let activeCapId = activeCap.captureId
-
-        // Atomically consume capture lease BEFORE dispatching input
-        self.latestCapture = nil
-
-        let topology = try topologyProvider.getTopology()
-        guard let display = topology.displays.first(where: { $0.id == activeCap.displayId }) else {
+        guard let display = currentTopology.displays.first(where: { $0.id == activeCap.displayId }) else {
             throw ComputerUseError.targetUnreachable(reason: "Display ID \(activeCap.displayId) not found in topology")
         }
+
+        let activeCapId = activeCap.captureId
+
+        // Atomically consume capture lease ONLY AFTER all validations pass
+        self.latestCapture = nil
 
         return (capId, activeCapId, display)
     }
 
     private func createPostActionObservation(displayId: Int) async throws -> [String: AnyCodable] {
-        let topology = try topologyProvider.getTopology()
-        let frame = try await captureEngine.captureDisplay(displayId: displayId, topology: topology)
+        let initialTopology = try topologyProvider.getTopology()
+        latestIssuedGeneration += 1
+        let generation = latestIssuedGeneration
+        self.latestCapture = nil
+
+        let frame = try await captureEngine.captureDisplay(displayId: displayId, topology: initialTopology)
+        let currentTopology = try topologyProvider.getTopology()
+
+        guard generation == self.latestIssuedGeneration else {
+            throw ComputerUseError.staleOperation(reason: "Newer operation generation issued during post-action observation")
+        }
+
+        guard initialTopology.version == frame.topologyVersion && frame.topologyVersion == currentTopology.version else {
+            throw ComputerUseError.staleTopology(current: currentTopology.version, received: frame.topologyVersion)
+        }
+
         self.latestCapture = frame
 
         return [
@@ -375,15 +419,13 @@ public actor HostServer {
             "timestamp": .int(Int(frame.timestamp)),
             "topology_version": .string(frame.topologyVersion),
             "display_id": .int(frame.displayId),
+            "width_points": .double(frame.widthPoints),
+            "height_points": .double(frame.heightPoints),
+            "scale_factor": .double(frame.scaleFactor),
+            "pixel_width": .int(frame.pixelWidth),
+            "pixel_height": .int(frame.pixelHeight),
             "image_format": .string(frame.imageFormat),
             "image_data_base64": .string(frame.imageDataBase64)
         ]
-    }
-
-    public func getInputHistory() -> [String] {
-        if let fakeInjector = inputEngine as? FakeInputInjector {
-            return fakeInjector.actionHistory
-        }
-        return []
     }
 }

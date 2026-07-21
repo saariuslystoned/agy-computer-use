@@ -1,30 +1,26 @@
 ---
 name: computer-use
-description: Provides dual-perception (Accessibility AXUIElement + Screen perception) and keyboard/mouse control for macOS desktop interactions. Contract Version v0.1.0-dogfood-d1.
+description: Provides observation-only desktop screen perception (computer_use_status and computer_use_observe) for macOS desktop interactions. Contract Version v0.1.0-dogfood-d2.
 ---
 
-# Antigravity Computer Use Skill (`v0.1.0-dogfood-d1`)
+# Antigravity Computer Use Skill (`v0.1.0-dogfood-d2`)
 
 This skill teaches Google Antigravity agents (and Gemini models) how to reliably and safely interact with macOS graphical user interfaces using the `computer-use-mcp` tool suite.
 
 > [!NOTE]
-> **Dogfood Harness Canary (D1 Procedure)**: The `computer_use_canary_screenshot` tool is an observation-only test harness proof for dogfood verification, explicitly non-production. When only the canary is available, invoke `computer_use_canary_screenshot` once, do not call production action tools, and report a concrete visible feature only after `ImageContent` is actually received. Full production acceptance requires native host dual-perception via `computer_use_observe` and `computer_use_ax_tree`.
+> **Observation-Only Slice (D2 Procedure)**: In Milestone D2, native host screen observation via `computer_use_observe` and status reporting via `computer_use_status` are active. Input mutation actions (`computer_use_click`, `computer_use_move`, etc.) and AX tree inspection (`computer_use_ax_tree`) are disabled in this build phase. Agents MUST NOT attempt disabled input or AX tools during D2.
 
 ---
 
 ## Operational Core Principles
 
-### 1. Observe-One-Action-Observe Loop
-- **ALWAYS** call `computer_use_observe` first to capture current desktop screen state and receive a valid `capture_id` and `topology_version`.
-- Execute **EXACTLY ONE** input action (`computer_use_click`, `computer_use_move`, `computer_use_drag`, `computer_use_type`, `computer_use_shortcut`, `computer_use_scroll`) referencing that exact `capture_id`, `topology_version`, and non-whitespace `intent`.
-- **NEVER** batch multiple input actions against a stale `capture_id`.
+### 1. Status & Observation
+- **ALWAYS** call `computer_use_status` to verify host connection, TCC permission state (`granted`), and display topology.
+- Call `computer_use_observe` to capture current desktop screen state and receive a valid `capture_id` and `topology_version`.
+- Dynamic topology versions (`topology_version`) are required tokens returned from observation.
 
-### 2. AX-First, Vision-Fallback Strategy
-1. **Query AX Element Tree First**: Call `computer_use_ax_tree` to inspect exact window hierarchies, element titles, roles, and bounding boxes.
-2. **Fallback to Visual Snapshot**: Use the visual JPEG image payload from `computer_use_observe` when elements are unlabelled, canvas-rendered, or missing from the accessibility DOM.
-
-### 3. Coordinate System (`0...999`)
-- All coordinates in tool calls are normalized to an integer grid from `0` to `999`.
+### 2. Coordinate System (`0...999`)
+- All coordinates in visual layout analysis are normalized to an integer grid from `0` to `999`.
 - `x = 0, y = 0` is Top-Left; `x = 999, y = 999` is Bottom-Right of the active display.
 
 ---

@@ -29,6 +29,7 @@ function getRecursiveFiles(dir: string): string[] {
 describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () => {
   test("Exercises listTools and callTool using official SDK Client and InMemoryTransport linked pair", async () => {
     const mockHost = new MockHostClient();
+    mockHost.inputMutationState = "disabled";
     const server = createComputerUseServer(mockHost);
 
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -43,28 +44,20 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
       client.connect(clientTransport)
     ]);
 
-    // 1. List tools
+    // 1. List tools (D2 observation-only slice lists computer_use_status and computer_use_observe)
     const toolsResult = await client.listTools();
     assert.ok(toolsResult.tools);
-    assert.equal(toolsResult.tools.length, 9);
+    assert.equal(toolsResult.tools.length, 2);
 
-    // Verify all 6 action tools publish maxLength: 200 and pattern: ^.*\S.*$ on intent in inputSchema
-    const actionTools = ["computer_use_click", "computer_use_move", "computer_use_drag", "computer_use_type", "computer_use_shortcut", "computer_use_scroll"];
-    for (const toolName of actionTools) {
-      const tool = toolsResult.tools.find(t => t.name === toolName);
-      assert.ok(tool, `Tool ${toolName} must be listed`);
-      const intentProp = (tool.inputSchema.properties as any).intent;
-      assert.ok(intentProp, `Tool ${toolName} must have intent property`);
-      assert.equal(intentProp.maxLength, 200, `Tool ${toolName} intent property must declare maxLength: 200`);
-      assert.equal(intentProp.pattern, "^.*\\S.*$", `Tool ${toolName} intent property must declare non-whitespace regex pattern`);
-    }
+    const toolNames = toolsResult.tools.map(t => t.name).sort();
+    assert.deepEqual(toolNames, ["computer_use_observe", "computer_use_status"]);
 
     // 2. Call status
     const statusCall = await client.callTool({ name: "computer_use_status", arguments: {} });
     assert.ok(statusCall.content);
     const statusText = JSON.parse((statusCall.content as any[])[0].text);
     assert.equal(statusText.connected, true);
-    assert.equal(statusText.input_mutation_state, "enabled");
+    assert.equal(statusText.input_mutation_state, "disabled");
     assert.ok(statusText.topology);
 
     // 3. Call observe
@@ -76,7 +69,7 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
     const cap1 = textMeta.capture_id;
     assert.ok(cap1);
 
-    // 4. Call click action
+    // 4. Direct call to disabled click action returns MUTATION_DISABLED
     const clickCall = await client.callTool({
       name: "computer_use_click",
       arguments: {
@@ -85,49 +78,14 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
         button: "left",
         click_count: 1,
         capture_id: cap1,
-        topology_version: "top-v1",
+        topology_version: "top-sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         intent: "Click target button in test"
       }
     });
 
-    const clickContent = clickCall.content as any[];
-    const clickMeta = JSON.parse(clickContent[0].text);
-    assert.equal(clickMeta.status, "dispatched");
-    const cap2 = clickMeta.post_action_observation.capture_id;
-    assert.ok(cap2);
-
-    // 5. Call type action with press_enter: true adapter
-    const typeCall = await client.callTool({
-      name: "computer_use_type",
-      arguments: {
-        text: "search query",
-        press_enter: true,
-        capture_id: cap2,
-        topology_version: "top-v1",
-        intent: "Type search query and press enter"
-      }
-    });
-    const typeContent = typeCall.content as any[];
-    const typeMeta = JSON.parse(typeContent[0].text);
-    assert.equal(typeMeta.status, "dispatched");
-    const cap3 = typeMeta.post_action_observation.capture_id;
-    assert.ok(cap3);
-
-    // 6. Call scroll action with direction adapter
-    const scrollCall = await client.callTool({
-      name: "computer_use_scroll",
-      arguments: {
-        x: 500,
-        y: 500,
-        direction: "down",
-        capture_id: cap3,
-        topology_version: "top-v1",
-        intent: "Scroll down page"
-      }
-    });
-    const scrollContent = scrollCall.content as any[];
-    const scrollMeta = JSON.parse(scrollContent[0].text);
-    assert.equal(scrollMeta.status, "dispatched");
+    assert.equal((clickCall as any).isError, true);
+    const clickMeta = JSON.parse((clickCall.content as any[])[0].text);
+    assert.equal(clickMeta.error.code, "MUTATION_DISABLED");
 
     await client.close();
     await server.close();
@@ -158,7 +116,7 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
         button: "left",
         click_count: 1,
         capture_id: "cap-dummy",
-        topology_version: "top-v1",
+        topology_version: "top-sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         intent: "Test disabled click"
       }
     });
@@ -183,7 +141,7 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
             const respObj = {
               id: reqObj.id,
               success: true,
-              data: { connected: true, topology_version: "top-v1", input_mutation_state: "disabled" }
+              data: { connected: true, topology_version: "top-sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", input_mutation_state: "disabled" }
             };
             const respJson = JSON.stringify(respObj);
             const respBuf = Buffer.from(respJson, "utf-8");
@@ -213,7 +171,7 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
     assert.ok(statusCall.content);
     const textRes = JSON.parse((statusCall.content as any[])[0].text);
     assert.equal(textRes.connected, true);
-    assert.equal(textRes.topology_version, "top-v1");
+    assert.equal(textRes.topology_version, "top-sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
 
     await mcpClient.close();
     await mcpServer.close();
@@ -355,13 +313,13 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
     // Pre-dispatch abort
     const controller1 = new AbortController();
     controller1.abort();
-    const resp1 = await client.request("click", { x: 500, y: 500, capture_id: "cap-1", topology_version: "top-v1", intent: "Click" }, controller1.signal);
+    const resp1 = await client.request("click", { x: 500, y: 500, capture_id: "cap-1", topology_version: "top-sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", intent: "Click" }, controller1.signal);
     assert.equal(resp1.success, false);
     assert.equal(resp1.error?.code, "CANCELLED");
 
     // Post-dispatch mutation abort
     const controller2 = new AbortController();
-    const reqPromise = client.request("click", { x: 500, y: 500, capture_id: "cap-1", topology_version: "top-v1", intent: "Click" }, controller2.signal);
+    const reqPromise = client.request("click", { x: 500, y: 500, capture_id: "cap-1", topology_version: "top-sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", intent: "Click" }, controller2.signal);
 
     setTimeout(() => {
       controller2.abort();

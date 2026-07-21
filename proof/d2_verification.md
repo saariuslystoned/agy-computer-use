@@ -1,79 +1,44 @@
-# Milestone D2 Verification Summary: Production-Bounded Native Observation Slice
+# Milestone D2 Verification Report (Repair Packet 1)
 
-## Overview
-This document records empirical test verification for Milestone D2 in `agy-computer-use`.
-Milestone D2 establishes the native macOS observation slice without real input synthesis (`MUTATION_DISABLED`) or live prompt generation during implementation.
-
----
-
-## Architectural Boundaries Implemented
-
-1. **Non-Prompting Permission Preflight**:
-   - `ScreenRecordingAuthorizing` protocol and `CGScreenRecordingAuthorizer`.
-   - Calls ONLY `CGPreflightScreenCaptureAccess()`.
-   - Zero calls to `CGRequestScreenCaptureAccess()`.
-
-2. **Deterministic Display Topology**:
-   - `DisplayTopologyProviding` protocol and `SystemDisplayTopologyProvider`.
-   - Queries `CGGetActiveDisplayList`, `CGMainDisplayID`, `CGDisplayBounds`, `CGDisplayCopyDisplayMode`, `CGDisplayRotation`.
-   - Derives Retina scale factor (`pixelWidth / bounds.width`).
-   - Computes deterministic, order-independent SHA-256 topology version string (`top-sha256-...`).
-
-3. **Native ScreenCaptureKit Engine (`SCScreenshotCaptureEngine`)**:
-   - Async/Sendable implementation utilizing macOS 14 `SCShareableContent` and `SCScreenshotManager.captureImage`.
-   - Excludes host app (`excludingApplications: [currentApp]`).
-   - In-process ImageIO JPEG encoding (`UTType.jpeg`).
-   - Bounded image size guard (rejects payloads >10 MiB before base64).
-
-4. **HostServer Sequence Gate & Reentrancy Lock**:
-   - Monotonic sequence counter gating capture lease installation.
-   - Prevents stale/out-of-order completions from overwriting newer observations.
-   - Cancelled/timed out tasks never install a lease.
-
-5. **Mutation Lockout & AX Seam**:
-   - `DisabledInputInjector`: all 6 action methods (`click`, `move`, `drag`, `type`, `shortcut`, `scroll`) return stable `MUTATION_DISABLED` error before lease consumption.
-   - `DisabledAXInspector`: returns `TARGET_UNREACHABLE` for `ax_tree`.
+## Executive Summary
+This document records the verification results for Milestone D2 (Repair Packet 1). All required code repairs, strict concurrency compilation fixes, IPC generation and topology lease safety, actor encapsulation, D2 observation-only contract alignment, and unit/integration test suites have been completed and verified deterministically.
 
 ---
 
-## Verification Test Run Outputs
+## Verification Commands & Execution Log
 
-### 1. Swift Host Unit & Integration Test Suite
-```text
-[TEST] Running Swift Host Unit & Integration Tests (Milestone D2)...
-[ALL TESTS PASSED] Swift Host unit & integration tests (D2) executed cleanly.
-Command: swift build && swift test
-Status: SUCCESS (Exit Code 0)
-```
+### 1. Swift Host Unit & Integration Tests (Strict Concurrency & Warnings as Errors)
+- **Command**: `swift test -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors`
+- **Working Directory**: `apps/computer-use-host`
+- **Result**: `SUCCESS` (Exit code 0, 0 compilation warnings, 0 errors).
+- **Coverage**:
+  - `Framing`: Length-prefixed encoding/decoding, fragmented/coalesced framing, >16MB payload rejection.
+  - `Permissions`: Preflight permission check with `FakeScreenRecordingAuthorizer(granted: false)` verifies 0 calls to `ShareableContentLoader`.
+  - `Topology`: SystemDisplayTopologyProvider produces deterministic full 64-character SHA-256 string (`top-sha256-...`); order-independent hashing across display arrays; single-field mutation test confirms distinct digests for origin, bounds, scale, pixel dimensions, and rotation.
+  - `Capture Engine`: Synthetic CGImage JPEG encoding and decoding round-trip with exact dimension assertion; 10 MiB limit boundary check; actor encapsulation of ScreenCaptureKit engine.
+  - `HostServer Generation & Lease Safety`: Invalidation of old lease prior to await; generation promotion guard discarding stale completions (`STALE_OPERATION`); triple-topology validation; integer checking on `display_id` parameter.
+  - `Disabled Actions & AX`: Direct calls to all 6 action methods return `MUTATION_DISABLED`; `ax_tree` returns `TARGET_UNREACHABLE`.
+  - `Production Symbol Guard`: `#filePath` anchored source check verifies 0 occurrences of `CGRequestScreenCaptureAccess`, `CGEvent`, or `Fake*` symbols in production `Sources/ComputerUseHostLib`.
 
-### 2. TypeScript MCP Server & HostClient Test Suite
-```text
-TAP version 13
-# Subtest: Computer Use Canary MCP Server Protocol & Hardening Test Suite
-ok 1 - Computer Use Canary MCP Server Protocol & Hardening Test Suite
-# Subtest: Computer Use MCP Server & HostClient Test Suite (Milestone D2)
-ok 2 - Computer Use MCP Server & HostClient Test Suite (Milestone D2)
+### 2. TypeScript MCP Server Test Suite & TypeScript Check
+- **Commands**: `pnpm check && pnpm test`
+- **Working Directory**: `mcp/computer-use-mcp`
+- **Result**: `SUCCESS` (Exit code 0, 23/23 TAP tests passed).
+- **Coverage**:
+  - `listTools`: D2 MCP inventory returns `length === 2` (`computer_use_status` and `computer_use_observe`).
+  - `callTool`: `computer_use_status` reports `connected: true`, `input_mutation_state: "disabled"`, `accessibility_available: false`, `accessibility_trusted: false`.
+  - `computer_use_observe`: Validates canonical base64 formatting, 10 MiB byte limits, JPEG magic bytes (`0xFF 0xD8 0xFF`), and returns clean text metadata (no raw base64 string in text).
+  - `UnixSocketHostClient`: UDS socket connection, request timeout (100ms), >16MB frame rejection, EOF on close, cancellation handling.
+  - `Skill Parity`: 100% file hierarchy and content parity verified between `.agents/skills/computer-use` and `skills/computer-use`.
+  - `Golden Fixtures`: 5 golden JSON fixtures validated against `docs/protocol_schema.json` via Ajv and Zod schemas.
 
-# tests 23
-# pass 23
-# fail 0
-Command: pnpm check && pnpm test
-Status: SUCCESS (Exit Code 0)
-```
+### 3. Dogfood Canary Readiness Check
+- **Command**: `./bin/agy-computer-use canary-ready`
+- **Result**: `ALL CANARY READINESS CHECKS PASSED!`
 
-### 3. Canary Readiness Verification Script
-```text
-[bin/agy-computer-use] Validating canary readiness for Dogfood D1...
-[bin/agy-computer-use] Node.js version: v22.23.1
-[bin/agy-computer-use] Verified .agents/mcp_config.json command, args, cwd, and target existence.
-[bin/agy-computer-use] Verified public MCP tool inventory: Exactly 1 tool ('computer_use_canary_screenshot')
-[bin/agy-computer-use] ALL CANARY READINESS CHECKS PASSED!
-Command: ./bin/agy-computer-use canary-ready
-Status: SUCCESS (Exit Code 0)
-```
+---
 
-### 4. Source Safety Checks
-```text
-Verified 0 occurrences of CGRequestScreenCaptureAccess across Swift sources.
-Verified 0 occurrences of CGEvent across Swift sources.
-```
+## Honesty & Boundary Declarations
+- **Live Native Screen Capture**: Not executed during this repair turn (simulated via synthetic JPEG encoding and deterministic unit test fakes).
+- **TCC Ownership / Signing**: App bundle signing and TCC prompt handling are scheduled for later integration milestones.
+- **CI Success**: Pending GitHub Actions workflow run on pushed exact head commit.

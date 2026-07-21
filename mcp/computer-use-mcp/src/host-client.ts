@@ -37,6 +37,7 @@ export interface HostClient {
 const MAX_FRAME_SIZE = 16 * 1024 * 1024; // 16 MB max payload limit
 const MUTATION_METHODS = new Set(["click", "move", "drag", "type", "shortcut", "scroll"]);
 const VALID_DUMMY_JPEG_BASE64 = "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=";
+const MOCK_TOPOLOGY_VERSION = "top-sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 /**
  * MockHostClient provides a deterministic test host implementation
@@ -45,7 +46,8 @@ const VALID_DUMMY_JPEG_BASE64 = "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP/////////////
 export class MockHostClient implements HostClient {
   private latestCaptureId: string | null = null;
   private reqCounter = 1;
-  public inputMutationState: "enabled" | "disabled" = "enabled";
+  public inputMutationState: "enabled" | "disabled" = "disabled";
+  public axAvailable = false;
 
   public async request(method: string, params?: Record<string, unknown>, signal?: AbortSignal): Promise<IPCResponsePayload> {
     const id = `req-${this.reqCounter++}`;
@@ -53,7 +55,7 @@ export class MockHostClient implements HostClient {
       return {
         id,
         success: false,
-        error: { code: "CANCELLED", message: "Operation cancelled before execution" }
+        error: { code: "CANCELLED", message: "IPC request cancelled before execution" }
       };
     }
 
@@ -64,13 +66,14 @@ export class MockHostClient implements HostClient {
         data: {
           connected: true,
           tcc_permission_state: "granted",
-          accessibility_trusted: true,
+          accessibility_available: this.axAvailable,
+          accessibility_trusted: false,
           input_mutation_state: this.inputMutationState,
-          topology_version: "top-v1",
+          topology_version: MOCK_TOPOLOGY_VERSION,
           primary_display_id: 1,
           display_count: 1,
           topology: {
-            version: "top-v1",
+            version: MOCK_TOPOLOGY_VERSION,
             primary_display_id: 1,
             displays: [
               {
@@ -91,6 +94,10 @@ export class MockHostClient implements HostClient {
     }
 
     if (method === "observe") {
+      if (params?.display_id !== undefined && (typeof params.display_id !== "number" || !Number.isInteger(params.display_id))) {
+        return { id, success: false, error: { code: "IPC_ERROR", message: "display_id parameter must be an integer" } };
+      }
+
       const capId = `cap-mock-${Date.now()}`;
       this.latestCaptureId = capId;
       return {
@@ -99,11 +106,13 @@ export class MockHostClient implements HostClient {
         data: {
           capture_id: capId,
           timestamp: Date.now(),
-          topology_version: "top-v1",
+          topology_version: MOCK_TOPOLOGY_VERSION,
           display_id: 1,
           width_points: 1920,
           height_points: 1080,
           scale_factor: 2.0,
+          pixel_width: 3840,
+          pixel_height: 2160,
           image_format: "jpeg",
           image_data_base64: VALID_DUMMY_JPEG_BASE64,
           normalized_bounds: { min_x: 0, min_y: 0, max_x: 999, max_y: 999 }
@@ -112,6 +121,13 @@ export class MockHostClient implements HostClient {
     }
 
     if (method === "ax_tree") {
+      if (!this.axAvailable) {
+        return {
+          id,
+          success: false,
+          error: { code: "TARGET_UNREACHABLE", message: "AX tree inspection is unavailable in this build phase" }
+        };
+      }
       return {
         id,
         success: true,
@@ -148,8 +164,8 @@ export class MockHostClient implements HostClient {
       if (!reqCapId) {
         return { id, success: false, error: { code: "IPC_ERROR", message: "Missing or empty capture_id parameter" } };
       }
-      if (reqTopVer !== "top-v1") {
-        return { id, success: false, error: { code: "STALE_TOPOLOGY", message: `Display topology version mismatch. Current: top-v1, received: ${reqTopVer ?? "none"}.` } };
+      if (reqTopVer !== MOCK_TOPOLOGY_VERSION) {
+        return { id, success: false, error: { code: "STALE_TOPOLOGY", message: `Display topology version mismatch. Current: ${MOCK_TOPOLOGY_VERSION}, received: ${reqTopVer ?? "none"}.` } };
       }
       if (!reqIntent || reqIntent.trim().length === 0) {
         return { id, success: false, error: { code: "IPC_ERROR", message: "Missing non-empty action intent description" } };
@@ -158,7 +174,7 @@ export class MockHostClient implements HostClient {
         return { id, success: false, error: { code: "STALE_CAPTURE", message: `Capture precondition failed. Current capture: ${this.latestCaptureId ?? "none"}, received: ${reqCapId}.` } };
       }
 
-      this.latestCaptureId = null; // Atomically consume lease
+      this.latestCaptureId = null; // Atomically consume lease ONLY AFTER all validations pass
       const freshCapId = `cap-mock-post-${Date.now()}`;
       this.latestCaptureId = freshCapId;
 
@@ -173,8 +189,13 @@ export class MockHostClient implements HostClient {
           post_action_observation: {
             capture_id: freshCapId,
             timestamp: Date.now(),
-            topology_version: "top-v1",
+            topology_version: MOCK_TOPOLOGY_VERSION,
             display_id: 1,
+            width_points: 1920,
+            height_points: 1080,
+            scale_factor: 2.0,
+            pixel_width: 3840,
+            pixel_height: 2160,
             image_format: "jpeg",
             image_data_base64: VALID_DUMMY_JPEG_BASE64
           }
@@ -226,14 +247,14 @@ export class UnixSocketHostClient implements HostClient {
             success: false,
             error: {
               code: "ACTION_OUTCOME_UNKNOWN",
-              message: `Mutation '${method}' was written to native host before cancellation. Action state is unknown; a fresh computer_use_observe snapshot is required.`
+              message: `Client IPC socket for '${method}' was destroyed during cancellation. Native host state is unconfirmed; a fresh computer_use_observe snapshot is required.`
             }
           });
         } else {
           settle({
             id,
             success: false,
-            error: { code: "CANCELLED", message: "In-flight IPC request cancelled before dispatch completed" }
+            error: { code: "CANCELLED", message: "IPC request cancelled before completion" }
           });
         }
       };

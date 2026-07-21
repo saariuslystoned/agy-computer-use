@@ -12,15 +12,3 @@ public struct CGScreenRecordingAuthorizer: ScreenRecordingAuthorizing {
         return CGPreflightScreenCaptureAccess()
     }
 }
-
-public struct FakeScreenRecordingAuthorizer: ScreenRecordingAuthorizing {
-    public let granted: Bool
-
-    public init(granted: Bool = true) {
-        self.granted = granted
-    }
-
-    public var isScreenCaptureAccessGranted: Bool {
-        return granted
-    }
-}
