@@ -2,8 +2,8 @@
 
 - **Date**: 2026-07-21
 - **Branch**: `codex/bobby-computer-use-v0-20260721t174022z-a9ab71173113`
-- **Parent Source Commit**: `e06527716c2280550a2760a9b9359b0117ee5ae2`
-- **Scope**: Milestone D2 Production-Bounded Native Observation Slice (Exact-Head 9a1 Architecture & Research Addendum Closure)
+- **Parent Source Commit**: `88ebe83d2f662c2e6afa669f8998bee57bdec373`
+- **Scope**: Milestone D2 Production-Bounded Native Observation Slice (Exact-Head 9a1 Architecture & Hard-Deadline Research Addendum Closure)
 
 ---
 
@@ -41,7 +41,8 @@ Executed via `./bin/agy-computer-use test-native` (Swift 5.10 strict concurrency
 [TEST CASE 26] testNoncooperativeObservationDeadlineElapsedTime - PASSED
 [TEST CASE 27] test64MegapixelSafetyPreCheckRejection - PASSED
 [TEST CASE 28] testCancellationErrorMappedToCancelledCode - PASSED
-[ComputerUseHostTestRunner] Executed 28 native test cases successfully. ALL PASSED.
+[TEST CASE 29] testCaptureBudgetCapacityLimitAndFastFailure - PASSED
+[ComputerUseHostTestRunner] Executed 29 native test cases successfully. ALL PASSED.
 ```
 
 ---
