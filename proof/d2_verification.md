@@ -2,7 +2,8 @@
 
 - **Date**: 2026-07-21
 - **Branch**: `codex/bobby-computer-use-v0-20260721t174022z-a9ab71173113`
-- **Scope**: Milestone D2 Production-Bounded Native Observation Slice (Hardening & Closure Addendum)
+- **Parent Source Commit**: `681aaab9f1b71da024313188aa5f34dde13f4925`
+- **Scope**: Milestone D2 Production-Bounded Native Observation Slice (Exact-Head 9a1 Architecture & Test-Authority Closure)
 
 ---
 
@@ -17,17 +18,30 @@ Executed via `./bin/agy-computer-use test-native` (Swift 5.10 strict concurrency
 [TEST CASE 3] testDirectoryPreparation - PASSED
 [TEST CASE 4] testUDSClientServerRoundTrip - PASSED
 [TEST CASE 5] testPostTimeoutUDSRecovery - PASSED
-[TEST CASE 6] testIEEE754BitPatternTopologyGoldenVectorAndMutations - PASSED
-[TEST CASE 7] testHotPlugSafeDisplayEnumerator - PASSED
-[TEST CASE 8] testPermissionPreflightDeniedZeroLoaderCalls - PASSED
-[TEST CASE 9] testPureJPEGValidatorExactAndNear10MiBBoundaries - PASSED
-[TEST CASE 10] testNoncooperativeLateCompletionGenerationFence - PASSED
-[TEST CASE 11] testTopologyChangeDuringCaptureDiscarded - PASSED
-[TEST CASE 12] testDisabledActionsAndAXTreeRejection - PASSED
-[TEST CASE 13] testDisplayIdParameterValidation - PASSED
-[TEST CASE 14] testNoncooperativeObservationDeadlineElapsedTime - PASSED
-[TEST CASE 15] test64MegapixelSafetyPreCheckRejection - PASSED
-[ComputerUseHostTestRunner] Executed 15 native test cases successfully. ALL PASSED.
+[TEST CASE 6] testSlowDripHeaderTimeout - PASSED
+[TEST CASE 7] testSlowDripBodyTimeout - PASSED
+[TEST CASE 8] testBlockedResponseWriteTimeout - PASSED
+[TEST CASE 9] testPeerCloseAndPartialIO - PASSED
+[TEST CASE 10] testEINTRRetryPath - PASSED
+[TEST CASE 11] testTimeoutResponseFollowedByNextClient - PASSED
+[TEST CASE 12] testLiveSocketCollisionRefusal - PASSED
+[TEST CASE 13] testVerifiedStaleSocketRecovery - PASSED
+[TEST CASE 14] testForeignSymlinkNonSocketRefusal - PASSED
+[TEST CASE 15] testStopNeverUnlinksReplacementInode - PASSED
+[TEST CASE 16] testIEEE754BitPatternTopologyGoldenVectorAndMutations - PASSED
+[TEST CASE 17] testHotPlugSafeDisplayEnumerator - PASSED
+[TEST CASE 18] testPermissionPreflightDeniedZeroLoaderCalls - PASSED
+[TEST CASE 19] testPureJPEGValidatorExactAndNear10MiBBoundaries - PASSED
+[TEST CASE 20] testSOF0AndSOF2MarkerValidation - PASSED
+[TEST CASE 21] testJPEGInvalidMagicTruncatedSegmentAndMismatchRejection - PASSED
+[TEST CASE 22] testNoncooperativeLateCompletionGenerationFence - PASSED
+[TEST CASE 23] testTopologyChangeDuringCaptureDiscarded - PASSED
+[TEST CASE 24] testDisabledActionsAndAXTreeRejection - PASSED
+[TEST CASE 25] testDisplayIdParameterValidation - PASSED
+[TEST CASE 26] testNoncooperativeObservationDeadlineElapsedTime - PASSED
+[TEST CASE 27] test64MegapixelSafetyPreCheckRejection - PASSED
+[TEST CASE 28] testCancellationErrorMappedToCancelledCode - PASSED
+[ComputerUseHostTestRunner] Executed 28 native test cases successfully. ALL PASSED.
 ```
 
 ---
@@ -38,21 +52,23 @@ Executed via `./bin/agy-computer-use test-native` (Swift 5.10 strict concurrency
    - `! git grep -n "CGRequestScreenCaptureAccess" -- 'apps/computer-use-host/Sources/'`: **0 matches** (Passed)
    - `! git grep -n "CGEvent" -- 'apps/computer-use-host/Sources/'`: **0 matches** (Passed)
    - `! git grep -n "Fake" -- 'apps/computer-use-host/Sources/'`: **0 matches** (Passed)
-2. **Release Binary Symbol Guard**:
+2. **Release Binary Symbol Guard & Negative Probe**:
    - `BIN_PATH=$(swift build -c release --show-bin-path)/ComputerUseHost`
-   - `! nm "$BIN_PATH" | swift demangle | grep -iE "Fake|Spy|Scripted|Mock|TestDouble|TestRunner|TestHelper"`: **0 matches** (`ZERO_TEST_DOUBLE_SYMBOLS` in shipped binary).
+   - `test -f "$BIN_PATH"`: Binary exists (Passed)
+   - `! nm "$BIN_PATH" | swift demangle | grep -iE "Fake|Spy|Scripted|Mock|TestDouble|TestRunner|TestHelper"`: **0 matches** (`ZERO_TEST_DOUBLE_SYMBOLS` in shipped binary, `UnsafeContinuation` allowed).
+   - `! nm /nonexistent/path/ComputerUseHost`: Negative missing binary probe fails closed (Passed).
 
 ---
 
 ## 3. Protocol Schema, Golden Fixtures & SOF Image Verification
 
 1. **Protocol Schema Definition**:
-   - `docs/protocol_schema.json` defines strict D2 status and observe request/response/error contracts with `additionalProperties: false`.
+   - `docs/protocol_schema.json` defines method-specific strict status, observe, and error request/response subschemas with `additionalProperties: false`.
 2. **Golden JSON Fixture Suite**:
-   - `status_response.json`: Validated against Ajv protocol schema and Zod `StatusDataSchema`.
-   - `observe_response.json`: Validated against Ajv protocol schema, Zod `ObserveDataSchema`, and `validateAndDecodeBase64JPEG` asserting embedded JPEG SOF0 markers match `100x100` declared pixel dimensions.
+   - `status_request.json` & `status_response.json`: Validated against Ajv protocol schema and Zod `StatusDataSchema`.
+   - `observe_request.json` & `observe_response.json`: Validated against Ajv protocol schema, Zod `ObserveDataSchema`, and `validateAndDecodeBase64JPEG` asserting embedded JPEG SOF0 markers match `100x100` declared pixel dimensions.
    - `permission_denied_response.json`, `stale_topology_response.json`, `timeout_response.json`: Validated as error response fixtures.
-   - Quarantined disabled action/AX fixtures (`click_request_disabled.json`, `ax_tree_response_quarantined.json`, `invalid_click_request_negative.json`) verified to fail active D2 protocol schema validation.
+   - Quarantined disabled action/AX fixtures (`click_request_disabled.json`, `invalid_click_request_negative.json`) verified.
 
 ---
 
@@ -72,8 +88,8 @@ Executed via `cd mcp/computer-use-mcp && pnpm check && pnpm test`:
 
 - **Tool Inventory**: `computer_use_status` and `computer_use_observe` (Exactly 2 tools).
 - **Adversarial & Hardening Tests**:
-  - `parseJPEGDimensions` strict SOF validation and dimension match.
-  - Base64 exact upper bound: 13,981,016 characters accepted; 13,981,017 unpadded and 13,981,020 padded characters rejected before decode allocation.
+  - `parseJPEGDimensions` strict SOF/SOS/EOI validation and dimension match.
+  - Base64 pre-allocation size check: Decoded length verified <= 10 MiB before `Buffer.from()` allocation.
   - Host client response ID matching (`parsedResp.id === reqId`).
   - Post-dispatch mutation error mapping to `ACTION_OUTCOME_UNKNOWN`.
   - Signal propagation and `display_id` argument runtime Zod checks.
