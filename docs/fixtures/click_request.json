@@ -1,0 +1,11 @@
+{
+  "id": "req-1003",
+  "method": "click",
+  "params": {
+    "x": 500,
+    "y": 500,
+    "button": "left",
+    "click_count": 1,
+    "capture_id": "cap-20260721-001"
+  }
+}

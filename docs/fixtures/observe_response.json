@@ -1,0 +1,25 @@
+{
+  "id": "req-1001",
+  "success": true,
+  "data": {
+    "capture_id": "cap-20260721-001",
+    "timestamp": 1784656800000,
+    "topology_version": "top-v1",
+    "display": {
+      "id": 1,
+      "width_points": 1920,
+      "height_points": 1080,
+      "scale_factor": 2.0,
+      "origin_x": 0,
+      "origin_y": 0
+    },
+    "image_format": "jpeg",
+    "base64_data": "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP...",
+    "normalized_bounds": {
+      "min_x": 0,
+      "min_y": 0,
+      "max_x": 999,
+      "max_y": 999
+    }
+  }
+}

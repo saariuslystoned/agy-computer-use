@@ -1,0 +1,65 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ComputerUseIPCProtocol",
+  "description": "IPC Request and Response Schemas between MCP Server and ComputerUseHost Native App",
+  "type": "object",
+  "definitions": {
+    "IPCRequest": {
+      "type": "object",
+      "required": ["id", "method"],
+      "properties": {
+        "id": { "type": "string" },
+        "method": {
+          "type": "string",
+          "enum": ["status", "observe", "ax_tree", "click", "move", "drag", "type", "shortcut", "scroll"]
+        },
+        "params": { "type": "object" }
+      }
+    },
+    "IPCResponse": {
+      "type": "object",
+      "required": ["id", "success"],
+      "properties": {
+        "id": { "type": "string" },
+        "success": { "type": "boolean" },
+        "data": { "type": "object" },
+        "error": {
+          "type": "object",
+          "required": ["code", "message"],
+          "properties": {
+            "code": { "type": "string" },
+            "message": { "type": "string" },
+            "details": { "type": "object" }
+          }
+        }
+      }
+    },
+    "AXNode": {
+      "type": "object",
+      "required": ["role", "bounds"],
+      "properties": {
+        "id": { "type": "string" },
+        "role": { "type": "string" },
+        "subrole": { "type": "string" },
+        "title": { "type": "string" },
+        "value": { "type": "string" },
+        "enabled": { "type": "boolean" },
+        "focused": { "type": "boolean" },
+        "bounds": {
+          "type": "object",
+          "required": ["x", "y", "width", "height"],
+          "properties": {
+            "x": { "type": "number" },
+            "y": { "type": "number" },
+            "width": { "type": "number" },
+            "height": { "type": "number" }
+          }
+        },
+        "children": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/AXNode" }
+        }
+      }
+    }
+  }
+}

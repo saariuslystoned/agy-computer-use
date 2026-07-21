@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, codex/** ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  swift-tests:
+    name: Swift Host Tests (macOS 14)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Swift
+        run: swift --version
+
+      - name: Build and Run Swift Host Unit Tests
+        run: |
+          cd apps/computer-use-host
+          swift run ComputerUseHostTests
+
+  node-tests:
+    name: TypeScript MCP Server Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 10.33.0
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.23.1"
+          cache: "pnpm"
+          cache-dependency-path: mcp/computer-use-mcp/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: |
+          cd mcp/computer-use-mcp
+          pnpm install --frozen-lockfile
+
+      - name: TypeScript Check
+        run: |
+          cd mcp/computer-use-mcp
+          pnpm check
+
+      - name: Run MCP Server Unit & Integration Tests
+        run: |
+          cd mcp/computer-use-mcp
+          pnpm test
