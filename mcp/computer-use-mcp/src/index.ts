@@ -37,20 +37,25 @@ function formatToolResponse(resp: IPCResponsePayload) {
     imageBase64 = (data.post_action_observation as any).image_data_base64;
   }
 
-  // Create clean metadata text without pixel base64 strings
+  // Create clean metadata text payload WITHOUT raw base64 image strings
   const cleanData = JSON.parse(JSON.stringify(data));
-  if (cleanData.image_data_base64) delete cleanData.image_data_base64;
-  if (cleanData.post_action_observation?.image_data_base64) delete cleanData.post_action_observation.image_data_base64;
+  delete cleanData.image_data_base64;
+  if (cleanData.post_action_observation) {
+    delete cleanData.post_action_observation.image_data_base64;
+  }
 
   const content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [
-    { type: "text", text: JSON.stringify(cleanData, null, 2) }
+    {
+      type: "text" as const,
+      text: JSON.stringify(cleanData, null, 2)
+    }
   ];
 
   if (imageBase64) {
     content.push({
-      type: "image",
+      type: "image" as const,
       data: imageBase64,
-      mimeType: "image/jpeg"
+      mimeType: (cleanData.image_format || cleanData.post_action_observation?.image_format) === "png" ? "image/png" : "image/jpeg"
     });
   }
 
@@ -58,7 +63,7 @@ function formatToolResponse(resp: IPCResponsePayload) {
 }
 
 export function createComputerUseServer(hostClient?: HostClient): Server {
-  const client = hostClient ?? (process.env.USE_MOCK_HOST === "1" ? new MockHostClient() : new UnixSocketHostClient());
+  const client = hostClient ?? new UnixSocketHostClient();
 
   const server = new Server(
     {
@@ -77,7 +82,7 @@ export function createComputerUseServer(hostClient?: HostClient): Server {
       tools: [
         {
           name: "computer_use_status",
-          description: "Returns host connectivity, active display topology, and TCC permission state.",
+          description: "Gets active display topology, host connection status, and TCC permissions.",
           inputSchema: {
             type: "object",
             properties: {},
@@ -86,23 +91,23 @@ export function createComputerUseServer(hostClient?: HostClient): Server {
         },
         {
           name: "computer_use_observe",
-          description: "Captures current desktop display screenshot, metadata, and assigns a capture_id.",
+          description: "Captures primary or target display snapshot and yields fresh capture_id and topology_version.",
           inputSchema: {
             type: "object",
             properties: {
-              display_id: { type: "integer", description: "Target display ID" }
+              display_id: { type: "integer" }
             },
             additionalProperties: false
           }
         },
         {
           name: "computer_use_ax_tree",
-          description: "Returns bounded macOS Accessibility element graph with redacted sensitive input fields.",
+          description: "Queries macOS accessibility element tree graph with depth limit and redaction.",
           inputSchema: {
             type: "object",
             properties: {
-              max_depth: { type: "integer", default: 10, description: "Max traversal depth" },
-              app_id: { type: "string", description: "Target app bundle or title" }
+              max_depth: { type: "integer", minimum: 1, maximum: 10, default: 10 },
+              app_id: { type: "string" }
             },
             additionalProperties: false
           }
@@ -161,12 +166,12 @@ export function createComputerUseServer(hostClient?: HostClient): Server {
         },
         {
           name: "computer_use_type",
-          description: "Types text string into active focused element.",
+          description: "Types text into currently focused input element.",
           inputSchema: {
             type: "object",
             required: ["text", "capture_id", "topology_version", "intent"],
             properties: {
-              text: { type: "string", minLength: 1 },
+              text: { type: "string", minLength: 1, maxLength: 1000 },
               press_enter: { type: "boolean", default: false },
               capture_id: { type: "string" },
               topology_version: { type: "string" },
@@ -195,12 +200,12 @@ export function createComputerUseServer(hostClient?: HostClient): Server {
           description: "Scrolls scrollable container at target 0...999 location.",
           inputSchema: {
             type: "object",
-            required: ["x", "y", "delta_x", "delta_y", "capture_id", "topology_version", "intent"],
+            required: ["x", "y", "capture_id", "topology_version", "intent"],
             properties: {
               x: { type: "integer", minimum: 0, maximum: 999 },
               y: { type: "integer", minimum: 0, maximum: 999 },
-              delta_x: { type: "integer" },
-              delta_y: { type: "integer" },
+              delta_x: { type: "integer", default: 0 },
+              delta_y: { type: "integer", default: 0 },
               direction: { type: "string", enum: ["up", "down", "left", "right"] },
               capture_id: { type: "string" },
               topology_version: { type: "string" },
@@ -215,16 +220,7 @@ export function createComputerUseServer(hostClient?: HostClient): Server {
 
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const { name, arguments: args } = request.params;
-    const signal = extra?.signal;
-    Logger.info(`Tool called: ${name}`);
-
-    if (signal?.aborted) {
-      Logger.warn(`Request for tool ${name} aborted before execution.`);
-      return {
-        isError: true,
-        content: [{ type: "text", text: "Tool request cancelled by client signal." }]
-      };
-    }
+    const signal = extra.signal;
 
     try {
       switch (name) {
