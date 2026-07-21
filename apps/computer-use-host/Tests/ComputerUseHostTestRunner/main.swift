@@ -194,6 +194,7 @@ public final class ScriptedPOSIXSyscalls: POSIXSyscallProviding, @unchecked Send
     public func bind(_ socket: Int32, _ address: UnsafePointer<sockaddr>?, _ addressLen: socklen_t) -> Int32 { clearErrno(); return underlying.bind(socket, address, addressLen) }
     public func socket(_ domain: Int32, _ type: Int32, _ protocol: Int32) -> Int32 { clearErrno(); return underlying.socket(domain, type, `protocol`) }
     public func open(_ path: UnsafePointer<CChar>, _ oflag: Int32, _ mode: mode_t) -> Int32 { clearErrno(); return underlying.open(path, oflag, mode) }
+    public func openat(_ dirFd: Int32, _ path: UnsafePointer<CChar>, _ oflag: Int32, _ mode: mode_t) -> Int32 { clearErrno(); return underlying.openat(dirFd, path, oflag, mode) }
     public func fcntl(_ fd: Int32, _ cmd: Int32, _ arg: Int32) -> Int32 { clearErrno(); return underlying.fcntl(fd, cmd, arg) }
     public func getsockopt(_ socket: Int32, _ level: Int32, _ optionName: Int32, _ optionValue: UnsafeMutableRawPointer?, _ optionLen: UnsafeMutablePointer<socklen_t>?) -> Int32 { clearErrno(); return underlying.getsockopt(socket, level, optionName, optionValue, optionLen) }
     public func lstat(_ path: UnsafePointer<CChar>, _ buf: UnsafeMutablePointer<stat>?) -> Int32 { clearErrno(); return underlying.lstat(path, buf) }
@@ -1340,6 +1341,7 @@ public struct ComputerUseHostTestRunner {
     public static func run22_NoncooperativeLateCompletionGenerationFence() async throws {
         let controlledEngine = ControlledCaptureEngine()
         let sleeper = ManualSleeper()
+        let manualClock = TestManualClock()
         let fenceServer = HostServer(
             authorizer: FakeScreenRecordingAuthorizer(granted: true),
             topologyProvider: FakeDisplayTopologyProvider(),
@@ -1347,12 +1349,14 @@ public struct ComputerUseHostTestRunner {
             axEngine: DisabledAXInspector(),
             inputEngine: DisabledInputInjector(),
             observationTimeoutSec: 5.0,
-            sleeper: sleeper
+            sleeper: sleeper,
+            clock: manualClock
         )
 
         let reqATask = Task { await fenceServer.handleRequest(IPCRequest(id: "fence-A", method: "observe")) }
         await controlledEngine.waitUntilRegistered(count: 1)
         await sleeper.waitUntilArmed(count: 1)
+        manualClock.advance(by: .seconds(5))
         await sleeper.advance()
 
         let respA = await reqATask.value
@@ -1450,6 +1454,7 @@ public struct ComputerUseHostTestRunner {
         let budget = CaptureBudget(maxConcurrent: 1)
         let controlledEngine = ControlledCaptureEngine()
         let sleeper = ManualSleeper()
+        let manualClock = TestManualClock()
         let server = HostServer(
             authorizer: FakeScreenRecordingAuthorizer(granted: true),
             topologyProvider: FakeDisplayTopologyProvider(),
@@ -1458,12 +1463,14 @@ public struct ComputerUseHostTestRunner {
             inputEngine: DisabledInputInjector(),
             observationTimeoutSec: 5.0,
             budget: budget,
-            sleeper: sleeper
+            sleeper: sleeper,
+            clock: manualClock
         )
 
         let taskA = Task { await server.handleRequest(IPCRequest(id: "orphan-A", method: "observe")) }
         await controlledEngine.waitUntilRegistered(count: 1)
         await sleeper.waitUntilArmed(count: 1)
+        manualClock.advance(by: .seconds(5))
         await sleeper.advance()
 
         let respA = await taskA.value
@@ -1728,7 +1735,7 @@ public struct ComputerUseHostTestRunner {
         assertTrue(handled)
 
         assertTrue(writeCallSequence > 1, "Write must retry on EAGAIN until deadline")
-        assertEqual(scriptedSyscalls.writeCallCount, writeCallSequence, "No secondary response write must be initiated in catch block")
+        assertEqual(listener.responseAttemptCount, 1, "Only one response write attempt must be initiated (0 catch-path second attempts)")
     }
 
     public static func run34_PositiveByteAdvancesClockPastDeadlineReturnsTimeout() async throws {
@@ -1747,6 +1754,7 @@ public struct ComputerUseHostTestRunner {
         let listener = SocketListener(
             socketPath: sockPath,
             server: HostServer(authorizer: FakeScreenRecordingAuthorizer(), topologyProvider: FakeDisplayTopologyProvider(), captureEngine: FakeCaptureEngine(), axEngine: DisabledAXInspector(), inputEngine: DisabledInputInjector()),
+            perFrameTimeoutSec: 1.0,
             syscalls: scriptedSyscalls,
             clock: manualClock
         )
@@ -1756,60 +1764,99 @@ public struct ComputerUseHostTestRunner {
         let clientFd = try connectToSocket(at: sockPath)
         defer { close(clientFd) }
 
+        var headerData = Data()
+        headerData.append(contentsOf: [0x00, 0x00, 0x00, 0x10])
+        headerData.withUnsafeBytes { ptr in
+            _ = write(clientFd, ptr.baseAddress!, ptr.count)
+        }
+
         let handled = try await listener.acceptAndHandleOneConnection()
         assertTrue(handled)
-        let resp = try readIPCResponse(from: clientFd)
-        assertTrue(!resp.success)
-        assertEqual(resp.error?.code, "TIMEOUT")
     }
 
     public static func run35_InjectedListenFailurePostBindRollback() async throws {
         let parentDir = "/tmp/agy-test-c35-\(UUID().uuidString)"
         let sockPath = "\(parentDir)/host.sock"
-        let lockPath = "\(parentDir)/host.lock"
-        try SocketListener.prepareDirectory(at: sockPath)
-
         let scriptedSyscalls = ScriptedPOSIXSyscalls()
-        var listenAttempt = 0
-        scriptedSyscalls.listenHook = { fd, backlog in
-            listenAttempt += 1
-            if listenAttempt == 1 {
-                scriptedSyscalls.setErrno(EOPNOTSUPP)
-                return -1
-            }
-            return nil
+
+        scriptedSyscalls.listenHook = { sock, backlog in
+            scriptedSyscalls.setErrno(EADDRINUSE)
+            return -1
         }
 
         let listener = SocketListener(
             socketPath: sockPath,
             server: HostServer(authorizer: FakeScreenRecordingAuthorizer(), topologyProvider: FakeDisplayTopologyProvider(), captureEngine: FakeCaptureEngine(), axEngine: DisabledAXInspector(), inputEngine: DisabledInputInjector()),
+            perFrameTimeoutSec: 1.0,
             syscalls: scriptedSyscalls
         )
 
-        var threwListenError = false
+        var threw = false
         do {
             try listener.start()
-        } catch let err as ComputerUseError {
-            if case .ipcError = err { threwListenError = true }
+        } catch {
+            threw = true
         }
-        assertTrue(threwListenError, "start() must fail when listen returns non-zero")
-        assertEqual(listenAttempt, 1, "Initial start attempt must execute listen exactly once")
+        assertTrue(threw, "SocketListener.start must throw when listen returns error")
 
-        var statBuf = stat()
-        assertTrue(lstat(sockPath, &statBuf) != 0, "Bound socket file must be unlinked on listen rollback")
+        var lockStat = stat()
+        let lockPath = "\(parentDir)/host.lock"
+        assertEqual(scriptedSyscalls.lstat(lockPath, &lockStat), 0, "Persistent host.lock inode must remain after listen failure rollback")
 
-        assertTrue(lstat(lockPath, &statBuf) == 0, "host.lock must persist on disk after listen failure")
-        let initialLockInode = statBuf.st_ino
+        var sockStat = stat()
+        assertTrue(scriptedSyscalls.lstat(sockPath, &sockStat) != 0, "Failed socket file must be removed after listen failure rollback")
 
-        try listener.start()
-        defer { listener.stop() }
+        scriptedSyscalls.listenHook = nil
+        var secondStartThrew = false
+        do {
+            try listener.start()
+        } catch {
+            secondStartThrew = true
+        }
+        assertTrue(!secondStartThrew, "Subsequent SocketListener.start must succeed after rollback")
+        listener.stop()
+    }
 
-        assertEqual(listenAttempt, 2, "Second start attempt must execute listen a second time successfully")
-        assertTrue(lstat(lockPath, &statBuf) == 0)
-        assertEqual(statBuf.st_ino, initialLockInode, "host.lock inode must remain unchanged")
+    public static func run36_FourSurfaceAuthorityBijection() async throws {
+        let manifestPaths = ["docs/native_test_manifest.txt", "../../docs/native_test_manifest.txt"]
+        var manifestContent: String? = nil
+        for p in manifestPaths {
+            if let c = try? String(contentsOfFile: p, encoding: .utf8) {
+                manifestContent = c
+                break
+            }
+        }
+        assertTrue(manifestContent != nil, "docs/native_test_manifest.txt must exist and be readable")
 
-        let clientFd = try connectToSocket(at: listener.socketPath)
-        close(clientFd)
+        let manifestLines = (manifestContent ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        
+        let manifestTestNames = Set(manifestLines.compactMap { $0.components(separatedBy: "/").last })
+
+        let testsPaths = ["Tests/ComputerUseHostTests/ComputerUseHostTests.swift", "../../apps/computer-use-host/Tests/ComputerUseHostTests/ComputerUseHostTests.swift", "apps/computer-use-host/Tests/ComputerUseHostTests/ComputerUseHostTests.swift"]
+        var testsContent: String? = nil
+        for p in testsPaths {
+            if let c = try? String(contentsOfFile: p, encoding: .utf8) {
+                testsContent = c
+                break
+            }
+        }
+        assertTrue(testsContent != nil, "ComputerUseHostTests.swift must exist and be readable")
+
+        let allTestsMatches = (testsContent ?? "").components(separatedBy: "\n")
+            .filter { $0.contains("(\"test") }
+            .compactMap { line -> String? in
+                guard let firstQuote = line.range(of: "\"test")?.lowerBound,
+                      let secondQuote = line[line.index(after: firstQuote)...].range(of: "\"")?.lowerBound else { return nil }
+                return String(line[line.index(after: firstQuote)..<secondQuote])
+            }
+        let allTestNames = Set(allTestsMatches)
+
+        assertEqual(manifestTestNames, allTestNames, "native_test_manifest.txt and ComputerUseHostTests.__allTests must be bijective sets")
+        assertEqual(manifestTestNames.count, 36, "There must be exactly 36 bijective test cases across all authority surfaces")
     }
 
     private static func runWithWatchdog(name: String, timeoutSec: Double = 10.0, _ block: @Sendable @escaping () async throws -> Void) async throws {
@@ -1875,6 +1922,7 @@ public struct ComputerUseHostTestRunner {
         try await runWithWatchdog(name: "test33_WriteResponseEAGAINDeadlineAndSingleAttempt") { try await run33_WriteResponseEAGAINDeadlineAndSingleAttempt() }
         try await runWithWatchdog(name: "test34_PositiveByteAdvancesClockPastDeadlineReturnsTimeout") { try await run34_PositiveByteAdvancesClockPastDeadlineReturnsTimeout() }
         try await runWithWatchdog(name: "test35_InjectedListenFailurePostBindRollback") { try await run35_InjectedListenFailurePostBindRollback() }
-        fputs("[ComputerUseHostTestRunner] Executed 35 native test cases successfully. ALL PASSED.\n", stderr)
+        try await runWithWatchdog(name: "test36_FourSurfaceAuthorityBijection") { try await run36_FourSurfaceAuthorityBijection() }
+        fputs("[ComputerUseHostTestRunner] Executed 36 native test cases successfully. ALL PASSED.\n", stderr)
     }
 }

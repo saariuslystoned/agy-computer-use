@@ -130,7 +130,12 @@ async function main() {
         .join("\n");
 
       if (actualList.length === 0) {
-        isFallback = true;
+        if (testListRaw.includes("Build complete!") || testListRaw.includes("XCTest discovery unavailable") || testListRaw.includes("XCTestHelper")) {
+          log("XCTest discovery unavailable in environment; using executable test runner authority...");
+          isFallback = true;
+        } else {
+          fail("'swift test list' returned status 0 with 0 discovered tests. Failing closed.");
+        }
       }
     } catch (err) {
       const output = (err.stdout || "") + "\n" + (err.stderr || "") + "\n" + (err.message || "");

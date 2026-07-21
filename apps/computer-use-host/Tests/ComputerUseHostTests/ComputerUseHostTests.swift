@@ -180,6 +180,10 @@ public final class ComputerUseHostTests: XCTestCase {
         try runSync { try await ComputerUseHostTestRunner.run35_InjectedListenFailurePostBindRollback() }
     }
 
+    public func test36_FourSurfaceAuthorityBijection() throws {
+        try runSync { try await ComputerUseHostTestRunner.run36_FourSurfaceAuthorityBijection() }
+    }
+
     nonisolated(unsafe) public static let __allTests = [
         ("test01_LengthPrefixedFraming", test01_LengthPrefixedFraming),
         ("test02_OversizedFramingHeaderRejection", test02_OversizedFramingHeaderRejection),
@@ -215,6 +219,8 @@ public final class ComputerUseHostTests: XCTestCase {
         ("test32_ReadHeaderBodyEINTRRetry", test32_ReadHeaderBodyEINTRRetry),
         ("test33_WriteResponseEAGAINDeadlineAndSingleAttempt", test33_WriteResponseEAGAINDeadlineAndSingleAttempt),
         ("test34_PositiveByteAdvancesClockPastDeadlineReturnsTimeout", test34_PositiveByteAdvancesClockPastDeadlineReturnsTimeout),
+        ("test35_InjectedListenFailurePostBindRollback", test35_InjectedListenFailurePostBindRollback),
+        ("test36_FourSurfaceAuthorityBijection", test36_FourSurfaceAuthorityBijection),
     ]
 }
 #endif

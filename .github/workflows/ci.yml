@@ -113,10 +113,12 @@ jobs:
       - name: Build & Run Native Swift Test Authority
         run: |
           set -euo pipefail
-          DISCOVERED=$(cd apps/computer-use-host && swift test list 2>/dev/null | grep -F "ComputerUseHostTests." | sort || true)
-          if [ -n "$DISCOVERED" ]; then
-            diff -u <(echo "$DISCOVERED") docs/native_test_manifest.txt
+          DISCOVERED=$(cd apps/computer-use-host && swift test list 2>&1 | grep -F "ComputerUseHostTests." | sort)
+          if [ -z "$DISCOVERED" ]; then
+            echo "Error: 'swift test list' returned 0 discovered tests in CI" >&2
+            exit 1
           fi
+          diff -u <(echo "$DISCOVERED") docs/native_test_manifest.txt
           TEST_OUT=$(./bin/agy-computer-use test-native 2>&1 | tee /dev/stderr)
           echo "$TEST_OUT" | grep -F "test01_LengthPrefixedFraming"
           echo "$TEST_OUT" | grep -F "test02_OversizedFramingHeaderRejection"
@@ -153,6 +155,7 @@ jobs:
           echo "$TEST_OUT" | grep -F "test33_WriteResponseEAGAINDeadlineAndSingleAttempt"
           echo "$TEST_OUT" | grep -F "test34_PositiveByteAdvancesClockPastDeadlineReturnsTimeout"
           echo "$TEST_OUT" | grep -F "test35_InjectedListenFailurePostBindRollback"
+          echo "$TEST_OUT" | grep -F "test36_FourSurfaceAuthorityBijection"
 
       - name: Build Release Executable & Guard Binary Symbols
         run: |
