@@ -261,6 +261,9 @@ private func connectToSocket(at socketPath: String) throws -> Int32 {
     let clientFd = socket(AF_UNIX, SOCK_STREAM, 0)
     assertTrue(clientFd >= 0)
 
+    var nosigpipe: Int32 = 1
+    _ = setsockopt(clientFd, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, socklen_t(MemoryLayout<Int32>.size))
+
     var addr = sockaddr_un()
     let pathBytes = socketPath.utf8CString
     addr.sun_len = UInt8(MemoryLayout<sa_family_t>.size + pathBytes.count)
@@ -1324,6 +1327,7 @@ public struct ComputerUseHostTestRunner {
     }
 
     public static func main() async throws {
+        signal(SIGPIPE, SIG_IGN)
         fputs("[ComputerUseHostTestRunner] Starting Native Test Runner Authority...\n", stderr)
         try await runWithWatchdog(name: "test01_LengthPrefixedFraming") { try await run01_LengthPrefixedFraming() }
         try await runWithWatchdog(name: "test02_OversizedFramingHeaderRejection") { try await run02_OversizedFramingHeaderRejection() }
