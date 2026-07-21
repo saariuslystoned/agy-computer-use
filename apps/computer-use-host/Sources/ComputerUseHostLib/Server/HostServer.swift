@@ -2,27 +2,29 @@ import Foundation
 
 public actor HostServer {
     private var isConnected: Bool = false
+    private let authorizer: ScreenRecordingAuthorizing
+    private let topologyProvider: DisplayTopologyProviding
     private let captureEngine: DisplayCaptureEngine
     private let axEngine: AXInspectionEngine
     private let inputEngine: InputSynthesisEngine
+
     private var latestCapture: CaptureFrameDTO?
-    private var activeTopology: DisplayTopology
+    private var activeTopology: DisplayTopology?
+    private var currentOperationSequence: UInt64 = 0
+    private var latestCompletedSequence: UInt64 = 0
 
     public init(
-        captureEngine: DisplayCaptureEngine = FakeCaptureEngine(),
-        axEngine: AXInspectionEngine = FakeAXInspector(),
-        inputEngine: InputSynthesisEngine = FakeInputInjector()
+        authorizer: ScreenRecordingAuthorizing = CGScreenRecordingAuthorizer(),
+        topologyProvider: DisplayTopologyProviding = SystemDisplayTopologyProvider(),
+        captureEngine: DisplayCaptureEngine? = nil,
+        axEngine: AXInspectionEngine = DisabledAXInspector(),
+        inputEngine: InputSynthesisEngine = DisabledInputInjector()
     ) {
-        self.captureEngine = captureEngine
+        self.authorizer = authorizer
+        self.topologyProvider = topologyProvider
+        self.captureEngine = captureEngine ?? SCScreenshotCaptureEngine(authorizer: authorizer)
         self.axEngine = axEngine
         self.inputEngine = inputEngine
-        self.activeTopology = DisplayTopology(
-            version: "top-v1",
-            primaryDisplayId: 1,
-            displays: [
-                DisplayInfo(id: 1, widthPoints: 1920, heightPoints: 1080, scaleFactor: 2.0, originX: 0, originY: 0)
-            ]
-        )
     }
 
     public func handleRequest(_ request: IPCRequest) async -> IPCResponse {
@@ -30,33 +32,74 @@ public actor HostServer {
             switch request.method {
             case "handshake":
                 self.isConnected = true
+                let topVer = (try? topologyProvider.getTopology().version) ?? "top-v1"
                 return IPCResponse(
                     id: request.id,
                     success: true,
                     data: [
                         "protocol_version": .string("1.0"),
                         "host_version": .string("0.1.0"),
-                        "topology_version": .string(activeTopology.version)
+                        "topology_version": .string(topVer)
                     ]
                 )
 
             case "status":
+                let currentTopology = try topologyProvider.getTopology()
+                self.activeTopology = currentTopology
+                let isGranted = authorizer.isScreenCaptureAccessGranted
+
+                let topologyDict: [String: AnyCodable] = [
+                    "version": .string(currentTopology.version),
+                    "primary_display_id": .int(currentTopology.primaryDisplayId),
+                    "displays": .array(currentTopology.displays.map { display in
+                        .dictionary([
+                            "id": .int(display.id),
+                            "width_points": .double(display.widthPoints),
+                            "height_points": .double(display.heightPoints),
+                            "scale_factor": .double(display.scaleFactor),
+                            "origin_x": .double(display.originX),
+                            "origin_y": .double(display.originY),
+                            "pixel_width": .int(display.pixelWidth),
+                            "pixel_height": .int(display.pixelHeight),
+                            "rotation": .double(display.rotation)
+                        ])
+                    })
+                ]
+
                 return IPCResponse(
                     id: request.id,
                     success: true,
                     data: [
                         "connected": .bool(isConnected),
-                        "topology_version": .string(activeTopology.version),
-                        "primary_display_id": .int(activeTopology.primaryDisplayId),
-                        "display_count": .int(activeTopology.displays.count),
-                        "tcc_permission_state": .string("fake_granted"),
-                        "accessibility_trusted": .bool(axEngine.isAccessibilityTrusted())
+                        "tcc_permission_state": .string(isGranted ? "granted" : "denied"),
+                        "accessibility_trusted": .bool(axEngine.isAccessibilityTrusted()),
+                        "input_mutation_state": .string(inputEngine.isMutationEnabled ? "enabled" : "disabled"),
+                        "topology_version": .string(currentTopology.version),
+                        "primary_display_id": .int(currentTopology.primaryDisplayId),
+                        "display_count": .int(currentTopology.displays.count),
+                        "topology": .dictionary(topologyDict)
                     ]
                 )
 
             case "observe":
-                let displayId = request.params?["display_id"]?.rawValue as? Int ?? activeTopology.primaryDisplayId
-                let frame = try captureEngine.captureDisplay(displayId: displayId, topology: activeTopology)
+                let currentTopology = try topologyProvider.getTopology()
+                self.activeTopology = currentTopology
+                let displayId = request.params?["display_id"]?.rawValue as? Int ?? currentTopology.primaryDisplayId
+
+                currentOperationSequence += 1
+                let opSeq = currentOperationSequence
+
+                let frame = try await captureEngine.captureDisplay(displayId: displayId, topology: currentTopology)
+
+                if Task.isCancelled {
+                    throw ComputerUseError.cancelled(reason: "Observation operation cancelled during execution")
+                }
+
+                guard opSeq >= self.latestCompletedSequence else {
+                    throw ComputerUseError.ipcError(reason: "Stale out-of-order capture completion discarded")
+                }
+
+                self.latestCompletedSequence = opSeq
                 self.latestCapture = frame
 
                 let dataDict: [String: AnyCodable] = [
@@ -79,6 +122,9 @@ public actor HostServer {
                 return IPCResponse(id: request.id, success: true, data: dataDict)
 
             case "ax_tree":
+                guard axEngine.isAvailable else {
+                    throw ComputerUseError.targetUnreachable(reason: "AX tree inspection is unavailable in this build phase")
+                }
                 let maxDepth = request.params?["max_depth"]?.rawValue as? Int ?? 10
                 let appId = request.params?["app_id"]?.rawValue as? String ?? "Finder"
                 let tree = try axEngine.inspectTree(maxDepth: maxDepth, appId: appId)
@@ -88,6 +134,9 @@ public actor HostServer {
                 return IPCResponse(id: request.id, success: true, data: treeDict)
 
             case "click":
+                guard inputEngine.isMutationEnabled else {
+                    throw ComputerUseError.mutationDisabled
+                }
                 let (capId, activeCapId, display) = try consumeAndValidateCaptureLease(params: request.params)
                 let x = request.params?["x"]?.rawValue as? Int ?? 0
                 let y = request.params?["y"]?.rawValue as? Int ?? 0
@@ -99,7 +148,7 @@ public actor HostServer {
                     gridX: x, gridY: y, button: button, clickCount: clickCount,
                     captureId: capId, currentCaptureId: activeCapId, display: display
                 )
-                let postObs = try createPostActionObservation(displayId: display.id)
+                let postObs = try await createPostActionObservation(displayId: display.id)
 
                 return IPCResponse(
                     id: request.id,
@@ -114,6 +163,9 @@ public actor HostServer {
                 )
 
             case "move":
+                guard inputEngine.isMutationEnabled else {
+                    throw ComputerUseError.mutationDisabled
+                }
                 let (capId, activeCapId, display) = try consumeAndValidateCaptureLease(params: request.params)
                 let x = request.params?["x"]?.rawValue as? Int ?? 0
                 let y = request.params?["y"]?.rawValue as? Int ?? 0
@@ -121,7 +173,7 @@ public actor HostServer {
                 let result = try inputEngine.performMove(
                     gridX: x, gridY: y, captureId: capId, currentCaptureId: activeCapId, display: display
                 )
-                let postObs = try createPostActionObservation(displayId: display.id)
+                let postObs = try await createPostActionObservation(displayId: display.id)
 
                 return IPCResponse(
                     id: request.id,
@@ -136,6 +188,9 @@ public actor HostServer {
                 )
 
             case "drag":
+                guard inputEngine.isMutationEnabled else {
+                    throw ComputerUseError.mutationDisabled
+                }
                 let (capId, activeCapId, display) = try consumeAndValidateCaptureLease(params: request.params)
                 let sx = request.params?["start_x"]?.rawValue as? Int ?? 0
                 let sy = request.params?["start_y"]?.rawValue as? Int ?? 0
@@ -146,7 +201,7 @@ public actor HostServer {
                     startX: sx, startY: sy, endX: ex, endY: ey,
                     captureId: capId, currentCaptureId: activeCapId, display: display
                 )
-                let postObs = try createPostActionObservation(displayId: display.id)
+                let postObs = try await createPostActionObservation(displayId: display.id)
 
                 return IPCResponse(
                     id: request.id,
@@ -161,6 +216,9 @@ public actor HostServer {
                 )
 
             case "type":
+                guard inputEngine.isMutationEnabled else {
+                    throw ComputerUseError.mutationDisabled
+                }
                 let (capId, activeCapId, display) = try consumeAndValidateCaptureLease(params: request.params)
                 let rawText = request.params?["text"]?.rawValue as? String ?? ""
                 let pressEnter = request.params?["press_enter"]?.rawValue as? Bool ?? false
@@ -168,7 +226,7 @@ public actor HostServer {
                 let result = try inputEngine.performType(
                     text: rawText, pressEnter: pressEnter, captureId: capId, currentCaptureId: activeCapId
                 )
-                let postObs = try createPostActionObservation(displayId: display.id)
+                let postObs = try await createPostActionObservation(displayId: display.id)
 
                 return IPCResponse(
                     id: request.id,
@@ -183,6 +241,9 @@ public actor HostServer {
                 )
 
             case "shortcut":
+                guard inputEngine.isMutationEnabled else {
+                    throw ComputerUseError.mutationDisabled
+                }
                 let (capId, activeCapId, display) = try consumeAndValidateCaptureLease(params: request.params)
                 let keysRaw = request.params?["keys"]?.rawValue as? [Any] ?? []
                 let keys = keysRaw.compactMap { $0 as? String }
@@ -190,7 +251,7 @@ public actor HostServer {
                 let result = try inputEngine.performShortcut(
                     keys: keys, captureId: capId, currentCaptureId: activeCapId
                 )
-                let postObs = try createPostActionObservation(displayId: display.id)
+                let postObs = try await createPostActionObservation(displayId: display.id)
 
                 return IPCResponse(
                     id: request.id,
@@ -205,6 +266,9 @@ public actor HostServer {
                 )
 
             case "scroll":
+                guard inputEngine.isMutationEnabled else {
+                    throw ComputerUseError.mutationDisabled
+                }
                 let (capId, activeCapId, display) = try consumeAndValidateCaptureLease(params: request.params)
                 let x = request.params?["x"]?.rawValue as? Int ?? 0
                 let y = request.params?["y"]?.rawValue as? Int ?? 0
@@ -226,7 +290,7 @@ public actor HostServer {
                     gridX: x, gridY: y, deltaX: dx, deltaY: dy,
                     captureId: capId, currentCaptureId: activeCapId, display: display
                 )
-                let postObs = try createPostActionObservation(displayId: display.id)
+                let postObs = try await createPostActionObservation(displayId: display.id)
 
                 return IPCResponse(
                     id: request.id,
@@ -271,8 +335,9 @@ public actor HostServer {
             throw ComputerUseError.ipcError(reason: "Missing or empty capture_id parameter")
         }
 
-        guard let topVer = params["topology_version"]?.rawValue as? String, topVer == activeTopology.version else {
-            throw ComputerUseError.staleTopology(current: activeTopology.version, received: params["topology_version"]?.rawValue as? String ?? "")
+        let currentTopVer = (try? topologyProvider.getTopology().version) ?? "top-v1"
+        guard let topVer = params["topology_version"]?.rawValue as? String, topVer == currentTopVer else {
+            throw ComputerUseError.staleTopology(current: currentTopVer, received: params["topology_version"]?.rawValue as? String ?? "")
         }
 
         guard let intent = params["intent"]?.rawValue as? String, !intent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -292,15 +357,17 @@ public actor HostServer {
         // Atomically consume capture lease BEFORE dispatching input
         self.latestCapture = nil
 
-        guard let display = activeTopology.displays.first(where: { $0.id == activeCap.displayId }) else {
+        let topology = try topologyProvider.getTopology()
+        guard let display = topology.displays.first(where: { $0.id == activeCap.displayId }) else {
             throw ComputerUseError.targetUnreachable(reason: "Display ID \(activeCap.displayId) not found in topology")
         }
 
         return (capId, activeCapId, display)
     }
 
-    private func createPostActionObservation(displayId: Int) throws -> [String: AnyCodable] {
-        let frame = try captureEngine.captureDisplay(displayId: displayId, topology: activeTopology)
+    private func createPostActionObservation(displayId: Int) async throws -> [String: AnyCodable] {
+        let topology = try topologyProvider.getTopology()
+        let frame = try await captureEngine.captureDisplay(displayId: displayId, topology: topology)
         self.latestCapture = frame
 
         return [

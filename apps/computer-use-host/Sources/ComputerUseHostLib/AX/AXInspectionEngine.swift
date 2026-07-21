@@ -1,7 +1,7 @@
 import Foundation
 import ApplicationServices
 
-public struct AXRect: Codable, Equatable {
+public struct AXRect: Codable, Equatable, Sendable {
     public let x: Double
     public let y: Double
     public let width: Double
@@ -15,7 +15,7 @@ public struct AXRect: Codable, Equatable {
     }
 }
 
-public struct AXNodeDTO: Codable, Equatable {
+public struct AXNodeDTO: Codable, Equatable, Sendable {
     public let id: String
     public let role: String
     public let subrole: String?
@@ -39,12 +39,27 @@ public struct AXNodeDTO: Codable, Equatable {
     }
 }
 
-public protocol AXInspectionEngine {
+public protocol AXInspectionEngine: Sendable {
+    var isAvailable: Bool { get }
     func inspectTree(maxDepth: Int, appId: String?) throws -> AXNodeDTO
     func isAccessibilityTrusted() -> Bool
 }
 
-public class BoundedAXTraverser {
+public struct DisabledAXInspector: AXInspectionEngine {
+    public init() {}
+
+    public var isAvailable: Bool { false }
+
+    public func isAccessibilityTrusted() -> Bool {
+        return false
+    }
+
+    public func inspectTree(maxDepth: Int = 10, appId: String? = nil) throws -> AXNodeDTO {
+        throw ComputerUseError.targetUnreachable(reason: "AX tree inspection is unavailable in this build phase")
+    }
+}
+
+public enum BoundedAXTraverser {
     public static let defaultMaxDepth = 10
     public static let defaultMaxNodes = 500
     public static let maxStringLength = 256
@@ -68,8 +83,6 @@ public class BoundedAXTraverser {
         visited.insert(node.id)
         nodeCount += 1
 
-        // Official macOS AX classifier: detect kAXSubroleAttribute == kAXSecureTextFieldSubrole ("AXSecureTextField")
-        // Title matching is NOT used as a classifier per Apple AX guidelines.
         let isSecureRole = (node.subrole == "AXSecureTextField" || node.subrole == (kAXSecureTextFieldSubrole as String))
         let cleanValue = sanitizeText(node.value, isSecure: isSecureRole)
         let cleanTitle = sanitizeText(node.title, isSecure: false)
@@ -97,11 +110,12 @@ public class BoundedAXTraverser {
     }
 }
 
-public class FakeAXInspector: AXInspectionEngine {
+public class FakeAXInspector: AXInspectionEngine, @unchecked Sendable {
     public init() {}
 
+    public var isAvailable: Bool { true }
+
     public func isAccessibilityTrusted() -> Bool {
-        // macOS AXIsProcessTrustedWithOptions async trust check API reference
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: false]
         return AXIsProcessTrustedWithOptions(options as CFDictionary)
     }

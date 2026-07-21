@@ -45,6 +45,7 @@ const VALID_DUMMY_JPEG_BASE64 = "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP/////////////
 export class MockHostClient implements HostClient {
   private latestCaptureId: string | null = null;
   private reqCounter = 1;
+  public inputMutationState: "enabled" | "disabled" = "enabled";
 
   public async request(method: string, params?: Record<string, unknown>, signal?: AbortSignal): Promise<IPCResponsePayload> {
     const id = `req-${this.reqCounter++}`;
@@ -62,11 +63,29 @@ export class MockHostClient implements HostClient {
         success: true,
         data: {
           connected: true,
+          tcc_permission_state: "granted",
+          accessibility_trusted: true,
+          input_mutation_state: this.inputMutationState,
           topology_version: "top-v1",
           primary_display_id: 1,
           display_count: 1,
-          tcc_permission_state: "fake_granted",
-          accessibility_trusted: true
+          topology: {
+            version: "top-v1",
+            primary_display_id: 1,
+            displays: [
+              {
+                id: 1,
+                width_points: 1920,
+                height_points: 1080,
+                scale_factor: 2.0,
+                origin_x: 0,
+                origin_y: 0,
+                pixel_width: 3840,
+                pixel_height: 2160,
+                rotation: 0
+              }
+            ]
+          }
         }
       };
     }
@@ -114,6 +133,14 @@ export class MockHostClient implements HostClient {
     }
 
     if (MUTATION_METHODS.has(method)) {
+      if (this.inputMutationState === "disabled") {
+        return {
+          id,
+          success: false,
+          error: { code: "MUTATION_DISABLED", message: "Input mutations are disabled in this build phase." }
+        };
+      }
+
       const reqCapId = params?.capture_id as string | undefined;
       const reqTopVer = params?.topology_version as string | undefined;
       const reqIntent = params?.intent as string | undefined;
@@ -164,7 +191,7 @@ export class MockHostClient implements HostClient {
 }
 
 export class UnixSocketHostClient implements HostClient {
-  private socketPath: String;
+  private socketPath: string;
   private reqCounter = 1;
   private timeoutMs: number;
 
@@ -232,7 +259,7 @@ export class UnixSocketHostClient implements HostClient {
         });
       }, this.timeoutMs);
 
-      client = net.createConnection({ path: this.socketPath as string }, () => {
+      client = net.createConnection({ path: this.socketPath }, () => {
         const payloadObj: IPCRequestPayload = { id, method, params };
         const jsonStr = JSON.stringify(payloadObj);
         const payloadBuf = Buffer.from(jsonStr, "utf-8");

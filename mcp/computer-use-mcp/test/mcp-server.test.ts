@@ -26,7 +26,7 @@ function getRecursiveFiles(dir: string): string[] {
   return results;
 }
 
-describe("Computer Use MCP Server & HostClient Test Suite", () => {
+describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () => {
   test("Exercises listTools and callTool using official SDK Client and InMemoryTransport linked pair", async () => {
     const mockHost = new MockHostClient();
     const server = createComputerUseServer(mockHost);
@@ -59,7 +59,15 @@ describe("Computer Use MCP Server & HostClient Test Suite", () => {
       assert.equal(intentProp.pattern, "^.*\\S.*$", `Tool ${toolName} intent property must declare non-whitespace regex pattern`);
     }
 
-    // 2. Call observe
+    // 2. Call status
+    const statusCall = await client.callTool({ name: "computer_use_status", arguments: {} });
+    assert.ok(statusCall.content);
+    const statusText = JSON.parse((statusCall.content as any[])[0].text);
+    assert.equal(statusText.connected, true);
+    assert.equal(statusText.input_mutation_state, "enabled");
+    assert.ok(statusText.topology);
+
+    // 3. Call observe
     const obsCall = await client.callTool({ name: "computer_use_observe", arguments: {} });
     assert.ok(obsCall.content);
     const obsContent = obsCall.content as any[];
@@ -68,7 +76,7 @@ describe("Computer Use MCP Server & HostClient Test Suite", () => {
     const cap1 = textMeta.capture_id;
     assert.ok(cap1);
 
-    // 3. Call click action
+    // 4. Call click action
     const clickCall = await client.callTool({
       name: "computer_use_click",
       arguments: {
@@ -88,7 +96,7 @@ describe("Computer Use MCP Server & HostClient Test Suite", () => {
     const cap2 = clickMeta.post_action_observation.capture_id;
     assert.ok(cap2);
 
-    // 4. Call type action with press_enter: true adapter
+    // 5. Call type action with press_enter: true adapter
     const typeCall = await client.callTool({
       name: "computer_use_type",
       arguments: {
@@ -105,7 +113,7 @@ describe("Computer Use MCP Server & HostClient Test Suite", () => {
     const cap3 = typeMeta.post_action_observation.capture_id;
     assert.ok(cap3);
 
-    // 5. Call scroll action with direction adapter
+    // 6. Call scroll action with direction adapter
     const scrollCall = await client.callTool({
       name: "computer_use_scroll",
       arguments: {
@@ -125,6 +133,44 @@ describe("Computer Use MCP Server & HostClient Test Suite", () => {
     await server.close();
   });
 
+  test("Verifies MUTATION_DISABLED response behavior when input mutations are locked out", async () => {
+    const mockHost = new MockHostClient();
+    mockHost.inputMutationState = "disabled";
+    const server = createComputerUseServer(mockHost);
+
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+
+    const client = new Client(
+      { name: "test-client-disabled", version: "1.0.0" },
+      { capabilities: {} }
+    );
+
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport)
+    ]);
+
+    const clickCall = await client.callTool({
+      name: "computer_use_click",
+      arguments: {
+        x: 500,
+        y: 500,
+        button: "left",
+        click_count: 1,
+        capture_id: "cap-dummy",
+        topology_version: "top-v1",
+        intent: "Test disabled click"
+      }
+    });
+
+    assert.equal((clickCall as any).isError, true);
+    const errContent = JSON.parse(((clickCall.content as any[])[0] as any).text);
+    assert.equal(errContent.error.code, "MUTATION_DISABLED");
+
+    await client.close();
+    await server.close();
+  });
+
   test("Integration path: Official MCP Client -> createComputerUseServer -> UnixSocketHostClient -> UDS Socket", async () => {
     const sockPath = `/tmp/test-mcp-uds-${Date.now()}.sock`;
     const socketServer = net.createServer((socket) => {
@@ -137,7 +183,7 @@ describe("Computer Use MCP Server & HostClient Test Suite", () => {
             const respObj = {
               id: reqObj.id,
               success: true,
-              data: { connected: true, topology_version: "top-v1" }
+              data: { connected: true, topology_version: "top-v1", input_mutation_state: "disabled" }
             };
             const respJson = JSON.stringify(respObj);
             const respBuf = Buffer.from(respJson, "utf-8");

@@ -1,27 +1,61 @@
 import Foundation
 
-public struct DisplayInfo: Codable, Equatable {
+public struct DisplayInfo: Codable, Equatable, Sendable {
     public let id: Int
     public let widthPoints: Double
     public let heightPoints: Double
     public let scaleFactor: Double
     public let originX: Double
     public let originY: Double
+    public let pixelWidth: Int
+    public let pixelHeight: Int
+    public let rotation: Double
 
-    public init(id: Int, widthPoints: Double, heightPoints: Double, scaleFactor: Double, originX: Double, originY: Double) {
+    enum CodingKeys: String, CodingKey {
+        case id
+        case widthPoints = "width_points"
+        case heightPoints = "height_points"
+        case scaleFactor = "scale_factor"
+        case originX = "origin_x"
+        case originY = "origin_y"
+        case pixelWidth = "pixel_width"
+        case pixelHeight = "pixel_height"
+        case rotation
+    }
+
+    public init(
+        id: Int,
+        widthPoints: Double,
+        heightPoints: Double,
+        scaleFactor: Double,
+        originX: Double = 0.0,
+        originY: Double = 0.0,
+        pixelWidth: Int? = nil,
+        pixelHeight: Int? = nil,
+        rotation: Double = 0.0
+    ) {
         self.id = id
         self.widthPoints = widthPoints
         self.heightPoints = heightPoints
         self.scaleFactor = scaleFactor
         self.originX = originX
         self.originY = originY
+        self.pixelWidth = pixelWidth ?? Int((widthPoints * scaleFactor).rounded())
+        self.pixelHeight = pixelHeight ?? Int((heightPoints * scaleFactor).rounded())
+        self.rotation = rotation
     }
 }
 
-public struct DisplayTopology: Codable, Equatable {
+public struct DisplayTopology: Codable, Equatable, Sendable {
     public let version: String
     public let primaryDisplayId: Int
     public let displays: [DisplayInfo]
+
+    enum CodingKeys: String, CodingKey {
+        case version
+        case primaryDisplayId = "primary_display_id"
+        case displays
+    }
 
     public init(version: String, primaryDisplayId: Int, displays: [DisplayInfo]) {
         self.version = version
@@ -30,7 +64,7 @@ public struct DisplayTopology: Codable, Equatable {
     }
 }
 
-public struct Point2D: Codable, Equatable {
+public struct Point2D: Codable, Equatable, Sendable {
     public let x: Double
     public let y: Double
 
@@ -40,7 +74,7 @@ public struct Point2D: Codable, Equatable {
     }
 }
 
-public struct CoordinateMapper {
+public struct CoordinateMapper: Sendable {
     public static let gridMin = 0
     public static let gridMax = 999
     public static let gridDivisor = 1000.0
