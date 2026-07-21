@@ -13,7 +13,28 @@
           "type": "string",
           "enum": ["status", "observe", "ax_tree", "click", "move", "drag", "type", "shortcut", "scroll"]
         },
-        "params": { "type": "object" }
+        "params": {
+          "type": "object",
+          "properties": {
+            "x": { "type": "integer", "minimum": 0, "maximum": 999 },
+            "y": { "type": "integer", "minimum": 0, "maximum": 999 },
+            "start_x": { "type": "integer", "minimum": 0, "maximum": 999 },
+            "start_y": { "type": "integer", "minimum": 0, "maximum": 999 },
+            "end_x": { "type": "integer", "minimum": 0, "maximum": 999 },
+            "end_y": { "type": "integer", "minimum": 0, "maximum": 999 },
+            "button": { "type": "string", "enum": ["left", "right", "middle"] },
+            "click_count": { "type": "integer", "minimum": 1, "maximum": 3 },
+            "text": { "type": "string" },
+            "press_enter": { "type": "boolean" },
+            "keys": { "type": "array", "items": { "type": "string" } },
+            "delta_x": { "type": "integer" },
+            "delta_y": { "type": "integer" },
+            "direction": { "type": "string", "enum": ["up", "down", "left", "right"] },
+            "capture_id": { "type": "string" },
+            "topology_version": { "type": "string" },
+            "intent": { "type": "string" }
+          }
+        }
       }
     },
     "IPCResponse": {

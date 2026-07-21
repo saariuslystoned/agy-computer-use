@@ -2,38 +2,37 @@
   "id": "req-1002",
   "success": true,
   "data": {
-    "root": {
-      "id": "node-root",
-      "role": "AXApplication",
-      "title": "Finder",
-      "bounds": { "x": 0, "y": 0, "width": 1920, "height": 1080 },
-      "children": [
-        {
-          "id": "node-win-1",
-          "role": "AXWindow",
-          "title": "Documents",
-          "bounds": { "x": 100, "y": 100, "width": 800, "height": 600 },
-          "children": [
-            {
-              "id": "node-btn-1",
-              "role": "AXButton",
-              "title": "Open",
-              "enabled": true,
-              "focused": false,
-              "bounds": { "x": 200, "y": 500, "width": 80, "height": 30 }
-            },
-            {
-              "id": "node-input-1",
-              "role": "AXTextField",
-              "title": "Password",
-              "value": "[REDACTED]",
-              "enabled": true,
-              "focused": false,
-              "bounds": { "x": 300, "y": 500, "width": 200, "height": 30 }
-            }
-          ]
-        }
-      ]
-    }
+    "id": "app-root",
+    "role": "AXApplication",
+    "title": "Finder",
+    "bounds": { "x": 0, "y": 0, "width": 1920, "height": 1080 },
+    "children": [
+      {
+        "id": "win-1",
+        "role": "AXWindow",
+        "title": "Documents",
+        "bounds": { "x": 100, "y": 100, "width": 800, "height": 600 },
+        "children": [
+          {
+            "id": "btn-1",
+            "role": "AXButton",
+            "title": "Open",
+            "enabled": true,
+            "focused": false,
+            "bounds": { "x": 200, "y": 500, "width": 80, "height": 30 }
+          },
+          {
+            "id": "input-1",
+            "role": "AXTextField",
+            "subrole": "AXSecureTextField",
+            "title": "Password",
+            "value": "[REDACTED]",
+            "enabled": true,
+            "focused": false,
+            "bounds": { "x": 300, "y": 500, "width": 200, "height": 30 }
+          }
+        ]
+      }
+    ]
   }
 }

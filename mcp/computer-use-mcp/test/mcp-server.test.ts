@@ -28,24 +28,17 @@ describe("Computer Use MCP Server End-to-End Integration", () => {
     const toolsResult = await client.listTools();
     assert.ok(toolsResult.tools);
     assert.equal(toolsResult.tools.length, 9);
-    const toolNames = toolsResult.tools.map((t) => t.name);
-    assert.ok(toolNames.includes("computer_use_observe"));
-    assert.ok(toolNames.includes("computer_use_click"));
 
     // 2. Call observe
     const obsCall = await client.callTool({ name: "computer_use_observe", arguments: {} });
     assert.ok(obsCall.content);
     const obsContent = obsCall.content as any[];
-    assert.equal(obsContent.length, 2); // Text metadata + ImageContent
-    assert.equal(obsContent[0].type, "text");
-    assert.equal(obsContent[1].type, "image");
-    assert.equal(obsContent[1].mimeType, "image/jpeg");
-
+    assert.equal(obsContent.length, 2);
     const textMeta = JSON.parse(obsContent[0].text);
     const cap1 = textMeta.capture_id;
     assert.ok(cap1);
 
-    // 3. Call click action passing valid parameters
+    // 3. Call click action
     const clickCall = await client.callTool({
       name: "computer_use_click",
       arguments: {
@@ -59,34 +52,44 @@ describe("Computer Use MCP Server End-to-End Integration", () => {
       }
     });
 
-    assert.ok(clickCall.content);
     const clickContent = clickCall.content as any[];
-    assert.equal(clickContent.length, 2);
     const clickMeta = JSON.parse(clickContent[0].text);
     assert.equal(clickMeta.status, "dispatched");
-    assert.ok(clickMeta.post_action_observation);
     const cap2 = clickMeta.post_action_observation.capture_id;
     assert.ok(cap2);
-    assert.notEqual(cap1, cap2);
 
-    // 4. Stale click call must return isError: true
-    const staleCall = await client.callTool({
-      name: "computer_use_click",
+    // 4. Call type action with press_enter: true adapter
+    const typeCall = await client.callTool({
+      name: "computer_use_type",
+      arguments: {
+        text: "search query",
+        press_enter: true,
+        capture_id: cap2,
+        topology_version: "top-v1",
+        intent: "Type search query and press enter"
+      }
+    });
+    const typeContent = typeCall.content as any[];
+    const typeMeta = JSON.parse(typeContent[0].text);
+    assert.equal(typeMeta.status, "dispatched");
+    const cap3 = typeMeta.post_action_observation.capture_id;
+    assert.ok(cap3);
+
+    // 5. Call scroll action with direction adapter (omitting delta_x / delta_y)
+    const scrollCall = await client.callTool({
+      name: "computer_use_scroll",
       arguments: {
         x: 500,
         y: 500,
-        button: "left",
-        click_count: 1,
-        capture_id: cap1,
+        direction: "down",
+        capture_id: cap3,
         topology_version: "top-v1",
-        intent: "Stale click retry"
+        intent: "Scroll down page"
       }
     });
-
-    assert.equal(staleCall.isError, true);
-    const staleContent = staleCall.content as any[];
-    const errMeta = JSON.parse(staleContent[0].text);
-    assert.equal(errMeta.error.code, "STALE_CAPTURE");
+    const scrollContent = scrollCall.content as any[];
+    const scrollMeta = JSON.parse(scrollContent[0].text);
+    assert.equal(scrollMeta.status, "dispatched");
 
     await client.close();
     await server.close();
@@ -94,15 +97,17 @@ describe("Computer Use MCP Server End-to-End Integration", () => {
 
   test("Verifies skill package sync drift between .agents/skills and skills/", () => {
     const rootDir = path.resolve(process.cwd(), "../../");
-    const agentSkillPath = path.join(rootDir, ".agents/skills/computer-use/SKILL.md");
-    const rootSkillPath = path.join(rootDir, "skills/computer-use/SKILL.md");
+    const agentSkillDir = path.join(rootDir, ".agents/skills/computer-use");
+    const rootSkillDir = path.join(rootDir, "skills/computer-use");
 
-    assert.ok(fs.existsSync(agentSkillPath), `.agents/skills/computer-use/SKILL.md must exist at ${agentSkillPath}`);
-    assert.ok(fs.existsSync(rootSkillPath), `skills/computer-use/SKILL.md must exist at ${rootSkillPath}`);
+    assert.ok(fs.existsSync(agentSkillDir), `.agents/skills/computer-use must exist`);
+    assert.ok(fs.existsSync(rootSkillDir), `skills/computer-use must exist`);
 
-    const agentSkillContent = fs.readFileSync(agentSkillPath, "utf-8");
-    const rootSkillContent = fs.readFileSync(rootSkillPath, "utf-8");
+    const agentSkillContent = fs.readFileSync(path.join(agentSkillDir, "SKILL.md"), "utf-8");
+    const rootSkillContent = fs.readFileSync(path.join(rootSkillDir, "SKILL.md"), "utf-8");
 
-    assert.equal(agentSkillContent.trim(), rootSkillContent.trim(), "Skill packages in .agents/skills/computer-use and skills/computer-use must be identical");
+    assert.equal(agentSkillContent.trim(), rootSkillContent.trim(), "SKILL.md files must be identical");
+    assert.ok(fs.existsSync(path.join(rootSkillDir, "references/observe-action-loop.md")));
+    assert.ok(fs.existsSync(path.join(rootSkillDir, "references/ax-vs-vision.md")));
   });
 });

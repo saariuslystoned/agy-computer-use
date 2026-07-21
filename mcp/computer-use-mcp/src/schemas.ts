@@ -60,8 +60,8 @@ export const ShortcutSchema = z.object({
 export const ScrollSchema = z.object({
   x: GridCoordinateSchema.describe("Target X coordinate on normalized 0...999 grid"),
   y: GridCoordinateSchema.describe("Target Y coordinate on normalized 0...999 grid"),
-  delta_x: z.number().int().describe("Horizontal scroll delta"),
-  delta_y: z.number().int().describe("Vertical scroll delta"),
+  delta_x: z.number().int().default(0).describe("Horizontal scroll delta"),
+  delta_y: z.number().int().default(0).describe("Vertical scroll delta"),
   direction: z.enum(["up", "down", "left", "right"]).optional().describe("Optional scroll direction helper"),
   capture_id: z.string().min(1).describe("Capture ID from prior computer_use_observe action"),
   topology_version: TopologyVersionSchema,

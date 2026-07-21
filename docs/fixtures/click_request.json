@@ -6,6 +6,8 @@
     "y": 500,
     "button": "left",
     "click_count": 1,
-    "capture_id": "cap-20260721-001"
+    "capture_id": "cap-20260721-001",
+    "topology_version": "top-v1",
+    "intent": "Click Open button in main window"
   }
 }

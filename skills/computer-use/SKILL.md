@@ -44,5 +44,5 @@ This skill teaches Google Antigravity agents (and Gemini models) how to reliably
 ---
 
 ## References & Operational Guides
-- [Observe-Action-Observe Loop Guide](file:///.agents/skills/computer-use/references/observe-action-loop.md)
-- [Accessibility vs Vision Decision Matrix](file:///.agents/skills/computer-use/references/ax-vs-vision.md)
+- [Observe-Action-Observe Loop Guide](references/observe-action-loop.md)
+- [Accessibility vs Vision Decision Matrix](references/ax-vs-vision.md)
