@@ -1,0 +1,5 @@
+{
+  "id": "req-bad-method",
+  "method": "unsupported_action",
+  "params": {}
+}

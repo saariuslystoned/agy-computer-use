@@ -12,7 +12,7 @@
 
 2. **TypeScript MCP Server (`mcp/computer-use-mcp`)**:
    - Spawned by Google Antigravity over stdio using JSON-RPC 2.0.
-   - Pinned to Node `v22.23.1`, pnpm `10.33.0`, and `@modelcontextprotocol/sdk` (`^1.6.0`).
+   - Pinned to Node `v22.23.1`, pnpm `10.33.0`, and `@modelcontextprotocol/sdk` (`1.29.0`).
    - Communicates with the native host using a length-prefixed protocol over the Unix domain socket.
    - Enforces strict Zod schema validation for all tool calls.
    - Keeps `stdout` strictly clean for MCP transport, routing all logging to `stderr`.

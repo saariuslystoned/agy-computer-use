@@ -69,7 +69,11 @@ public class SocketListener {
                 throw ComputerUseError.ipcError(reason: "Existing socket \(socketPath) owned by another user")
             }
 
-            // Distinguish live listener from stale socket file by attempting test connection
+            // Distinguish live listener from stale socket file using fail-closed connect probe
+            var isLive = false
+            var isStale = false
+            var probeErrno: Int32 = 0
+
             let testFd = socket(AF_UNIX, SOCK_STREAM, 0)
             if testFd >= 0 {
                 var testAddr = sockaddr_un()
@@ -84,19 +88,46 @@ public class SocketListener {
                     }
                 }
 
-                let connRes = withUnsafePointer(to: &testAddr) { ptr in
-                    ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { saPtr in
-                        connect(testFd, saPtr, socklen_t(addrLen))
+                var connRes: Int32 = -1
+                while true {
+                    connRes = withUnsafePointer(to: &testAddr) { ptr in
+                        ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { saPtr in
+                            connect(testFd, saPtr, socklen_t(addrLen))
+                        }
                     }
+                    if connRes < 0 && errno == EINTR {
+                        continue
+                    }
+                    break
                 }
+                probeErrno = errno
                 close(testFd)
 
                 if connRes == 0 {
-                    throw ComputerUseError.ipcError(reason: "Active listener process already bound to socket path \(socketPath)")
+                    isLive = true
+                } else if probeErrno == ECONNREFUSED || probeErrno == ENOENT {
+                    isStale = true
                 }
             }
 
-            // Socket is stale and non-responsive; safely remove it
+            if isLive {
+                throw ComputerUseError.ipcError(reason: "Active listener process already bound to socket path \(socketPath)")
+            }
+
+            guard isStale else {
+                throw ComputerUseError.ipcError(reason: "Socket path probe returned ambiguous error (errno: \(probeErrno)); failing closed without unlinking socket")
+            }
+
+            // Socket is confirmed stale. Re-verify path identity and owner before unlinking
+            var statRecheck = stat()
+            guard lstat(socketPath, &statRecheck) == 0,
+                  (statRecheck.st_mode & S_IFMT) == S_IFSOCK,
+                  statRecheck.st_uid == getuid(),
+                  statRecheck.st_ino == statBuf.st_ino,
+                  statRecheck.st_dev == statBuf.st_dev else {
+                throw ComputerUseError.ipcError(reason: "Socket identity changed during stale probe; refusing to unlink")
+            }
+
             try fm.removeItem(atPath: socketPath)
         }
 
@@ -155,15 +186,25 @@ public class SocketListener {
         var clientAddr = sockaddr_un()
         var clientAddrLen = socklen_t(MemoryLayout<sockaddr_un>.size)
 
-        let clientFd = withUnsafeMutablePointer(to: &clientAddr) { ptr in
-            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { saPtr in
-                accept(listeningSocket, saPtr, &clientAddrLen)
+        var clientFd: Int32 = -1
+        while isRunning && listeningSocket >= 0 {
+            clientFd = withUnsafeMutablePointer(to: &clientAddr) { ptr in
+                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { saPtr in
+                    accept(listeningSocket, saPtr, &clientAddrLen)
+                }
             }
+            if clientFd < 0 {
+                if errno == EINTR || errno == ECONNABORTED {
+                    continue
+                }
+                if !isRunning { return false }
+                throw ComputerUseError.ipcError(reason: "Socket accept failed: \(String(cString: strerror(errno)))")
+            }
+            break
         }
 
         guard clientFd >= 0 else {
-            if !isRunning { return false }
-            throw ComputerUseError.ipcError(reason: "Socket accept failed")
+            return false
         }
 
         defer {

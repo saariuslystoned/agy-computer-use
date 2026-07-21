@@ -38,7 +38,7 @@
             "direction": { "type": "string", "enum": ["up", "down", "left", "right"] },
             "capture_id": { "type": "string", "minLength": 1 },
             "topology_version": { "type": "string", "minLength": 1 },
-            "intent": { "type": "string", "minLength": 1, "maxLength": 200 }
+            "intent": { "type": "string", "minLength": 1, "maxLength": 200, "pattern": "^.*\\S.*$" }
           }
         }
       },
@@ -49,6 +49,7 @@
             "required": ["params"],
             "properties": {
               "params": {
+                "type": "object",
                 "required": ["x", "y", "capture_id", "topology_version", "intent"]
               }
             }
@@ -60,6 +61,7 @@
             "required": ["params"],
             "properties": {
               "params": {
+                "type": "object",
                 "required": ["start_x", "start_y", "end_x", "end_y", "capture_id", "topology_version", "intent"]
               }
             }
@@ -71,6 +73,7 @@
             "required": ["params"],
             "properties": {
               "params": {
+                "type": "object",
                 "required": ["text", "capture_id", "topology_version", "intent"]
               }
             }
@@ -82,6 +85,7 @@
             "required": ["params"],
             "properties": {
               "params": {
+                "type": "object",
                 "required": ["keys", "capture_id", "topology_version", "intent"]
               }
             }

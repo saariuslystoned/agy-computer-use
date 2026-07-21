@@ -3,10 +3,13 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as net from "net";
+import AjvModule from "ajv";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createComputerUseServer } from "../src/index.js";
 import { MockHostClient, UnixSocketHostClient, IPCResponseSchema } from "../src/host-client.js";
+
+const Ajv = (AjvModule as any).default || AjvModule;
 
 function getRecursiveFiles(dir: string): string[] {
   let results: string[] = [];
@@ -45,7 +48,7 @@ describe("Computer Use MCP Server & HostClient Test Suite", () => {
     assert.ok(toolsResult.tools);
     assert.equal(toolsResult.tools.length, 9);
 
-    // Verify all 6 action tools publish maxLength: 200 on intent in inputSchema
+    // Verify all 6 action tools publish maxLength: 200 and pattern: ^.*\S.*$ on intent in inputSchema
     const actionTools = ["computer_use_click", "computer_use_move", "computer_use_drag", "computer_use_type", "computer_use_shortcut", "computer_use_scroll"];
     for (const toolName of actionTools) {
       const tool = toolsResult.tools.find(t => t.name === toolName);
@@ -53,6 +56,7 @@ describe("Computer Use MCP Server & HostClient Test Suite", () => {
       const intentProp = (tool.inputSchema.properties as any).intent;
       assert.ok(intentProp, `Tool ${toolName} must have intent property`);
       assert.equal(intentProp.maxLength, 200, `Tool ${toolName} intent property must declare maxLength: 200`);
+      assert.equal(intentProp.pattern, "^.*\\S.*$", `Tool ${toolName} intent property must declare non-whitespace regex pattern`);
     }
 
     // 2. Call observe
@@ -194,7 +198,7 @@ describe("Computer Use MCP Server & HostClient Test Suite", () => {
     }
   });
 
-  test("Validates all golden JSON fixtures in docs/fixtures/ against protocol schema & Zod schemas", () => {
+  test("Validates all golden JSON fixtures in docs/fixtures/ against protocol_schema.json (Ajv) & Zod schemas", () => {
     const rootDir = path.resolve(process.cwd(), "../../");
     const fixturesDir = path.join(rootDir, "docs/fixtures");
     const schemaPath = path.join(rootDir, "docs/protocol_schema.json");
@@ -203,13 +207,13 @@ describe("Computer Use MCP Server & HostClient Test Suite", () => {
     assert.ok(fs.existsSync(schemaPath), "docs/protocol_schema.json must exist");
 
     const schemaContent = fs.readFileSync(schemaPath, "utf-8");
-    assert.doesNotThrow(() => JSON.parse(schemaContent), "protocol_schema.json must be valid JSON");
     const protocolSchema = JSON.parse(schemaContent);
 
-    assert.ok(protocolSchema.oneOf, "protocol_schema.json must define top-level oneOf validation array");
+    const ajv = new Ajv({ allErrors: true });
+    const validateProtocol = ajv.compile(protocolSchema);
 
     const fixtureFiles = fs.readdirSync(fixturesDir).filter(f => f.endsWith(".json"));
-    assert.ok(fixtureFiles.length >= 3, "Must contain at least 3 golden fixtures");
+    assert.ok(fixtureFiles.length >= 5, "Must contain at least 5 positive and negative golden fixtures");
 
     for (const file of fixtureFiles) {
       const content = fs.readFileSync(path.join(fixturesDir, file), "utf-8");
@@ -217,9 +221,17 @@ describe("Computer Use MCP Server & HostClient Test Suite", () => {
       const parsed = JSON.parse(content);
       assert.ok(parsed.id, `Fixture '${file}' must contain id`);
 
-      if (typeof parsed.success === "boolean") {
-        const zodParse = IPCResponseSchema.safeParse(parsed);
-        assert.ok(zodParse.success, `Response fixture '${file}' must validate against IPCResponseSchema: ${zodParse.error?.message}`);
+      if (file.endsWith("_negative.json")) {
+        const isValid = validateProtocol(parsed);
+        assert.equal(isValid, false, `Negative fixture '${file}' must fail Ajv protocol schema validation`);
+      } else {
+        const isValid = validateProtocol(parsed);
+        assert.ok(isValid, `Positive fixture '${file}' must pass Ajv protocol schema validation: ${JSON.stringify(validateProtocol.errors)}`);
+
+        if (typeof parsed.success === "boolean") {
+          const zodParse = IPCResponseSchema.safeParse(parsed);
+          assert.ok(zodParse.success, `Response fixture '${file}' must validate against IPCResponseSchema: ${zodParse.error?.message}`);
+        }
       }
     }
   });

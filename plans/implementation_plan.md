@@ -18,7 +18,7 @@ Work is partitioned into 10 dependency-ordered milestones (M0–M9), strictly di
 | **M5** | Display Topology & Half-Open Coordinate Authority | `IMPLEMENTED & TESTED` | `apps/computer-use-host/Sources/ComputerUseHostLib/Topology/` |
 | **M6** | TypeScript MCP Server Bridge & Official Client Tests | `IMPLEMENTED & TESTED` | `mcp/computer-use-mcp/` |
 | **M7** | Antigravity Skill Definition & Safety Guardrails | `IMPLEMENTED & TESTED` | `.agents/skills/computer-use/SKILL.md` |
-| **M8** | Continuous Integration & End-to-End Verification Suite | `IMPLEMENTED & TESTED` | `swift run ComputerUseHostTestsRunner`, `pnpm test`, `.github/workflows/ci.yml` |
+| **M8** | Continuous Integration & End-to-End Verification Suite | `IMPLEMENTED & TESTED` | `swift test`, `pnpm test`, `.github/workflows/ci.yml` |
 | **M9** | Real OS Drivers (ScreenCaptureKit, CGEvent, Signed App Bundle) | `GATED / FUTURE` | Requires signed `ComputerUseHost.app` bundle and active TCC authorization |
 
 ---
