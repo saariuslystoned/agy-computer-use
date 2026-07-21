@@ -5,7 +5,7 @@
       "args": [
         "./mcp/computer-use-mcp/dist/src/canary.js"
       ],
-      "cwd": "${workspaceRoot}"
+      "cwd": "."
     }
   }
 }

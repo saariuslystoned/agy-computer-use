@@ -119,8 +119,8 @@ function validateMcpConfigStruct() {
     throw new Error(`Config args[0] must be './mcp/computer-use-mcp/dist/src/canary.js'`);
   }
 
-  if (canaryServer.cwd !== "${workspaceRoot}") {
-    throw new Error(`Config cwd must be '\${workspaceRoot}', got '${canaryServer.cwd}'`);
+  if (canaryServer.cwd !== ".") {
+    throw new Error(`Config cwd must be '.', got '${canaryServer.cwd}'`);
   }
 
   const targetPath = path.join(rootDir, canaryServer.args[0]);
