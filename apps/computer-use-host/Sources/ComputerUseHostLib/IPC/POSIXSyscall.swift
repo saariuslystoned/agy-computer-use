@@ -46,7 +46,7 @@ extension POSIXSyscallProviding {
 }
 
 @_silgen_name("flock")
-private func sys_flock(_ fd: Int32, _ operation: Int32) -> Int32
+private func sys_c_flock(_ fd: Int32, _ operation: Int32) -> Int32
 
 public final class DarwinPOSIXSyscalls: POSIXSyscallProviding, @unchecked Sendable {
     public static let shared = DarwinPOSIXSyscalls()
@@ -89,7 +89,7 @@ public final class DarwinPOSIXSyscalls: POSIXSyscallProviding, @unchecked Sendab
         Darwin.fstat(fd, buf)
     }
     public func fileFlock(_ fd: Int32, _ operation: Int32) -> Int32 {
-        sys_flock(fd, operation)
+        sys_c_flock(fd, operation)
     }
     public func unlink(_ path: UnsafePointer<CChar>) -> Int32 {
         Darwin.unlink(path)
