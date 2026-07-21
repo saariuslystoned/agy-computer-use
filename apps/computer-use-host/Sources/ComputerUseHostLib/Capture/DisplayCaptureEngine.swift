@@ -92,8 +92,11 @@ public actor SCScreenshotCaptureEngine: DisplayCaptureEngine {
         }
 
         // 2. Pre-check 64-megapixel budget BEFORE framework allocation
+        guard targetDisplay.pixelWidth > 0, targetDisplay.pixelHeight > 0 else {
+            throw ComputerUseError.targetUnreachable(reason: "Display ID \(targetDisplayId) pixel dimensions (\(targetDisplay.pixelWidth)x\(targetDisplay.pixelHeight)) must be positive")
+        }
         let (totalPixels, overflow) = targetDisplay.pixelWidth.multipliedReportingOverflow(by: targetDisplay.pixelHeight)
-        guard !overflow, totalPixels > 0, totalPixels <= 64_000_000 else {
+        guard !overflow, totalPixels <= 64_000_000 else {
             throw ComputerUseError.targetUnreachable(reason: "Display ID \(targetDisplayId) pixel dimensions (\(targetDisplay.pixelWidth)x\(targetDisplay.pixelHeight)) exceed 64-megapixel safety limit")
         }
 

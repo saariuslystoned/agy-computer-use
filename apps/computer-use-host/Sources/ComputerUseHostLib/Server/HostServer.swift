@@ -336,7 +336,7 @@ public actor HostServer {
         timeoutSec: Double,
         budget: CaptureBudget
     ) async throws -> CaptureFrameDTO {
-        guard timeoutSec.isFinite && timeoutSec > 0 else {
+        guard timeoutSec.isFinite && timeoutSec > 0 && timeoutSec < 100_000_000 else {
             budget.release()
             throw ComputerUseError.ipcError(reason: "Invalid observation timeout value: \(timeoutSec)")
         }

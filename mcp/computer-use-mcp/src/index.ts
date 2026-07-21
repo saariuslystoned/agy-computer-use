@@ -15,7 +15,7 @@ export interface JPEGDimensions {
 
 export function parseJPEGDimensions(buf: Buffer): JPEGDimensions | null {
   if (buf.length < 4 || buf[0] !== 0xff || buf[1] !== 0xd8) {
-    return null;
+    return null; // Must start with SOI 0xFFD8
   }
 
   let offset = 2;
@@ -25,59 +25,72 @@ export function parseJPEGDimensions(buf: Buffer): JPEGDimensions | null {
   let eoiOffset = -1;
 
   while (offset < buf.length - 1) {
+    // Check if byte is marker start 0xFF
     if (buf[offset] !== 0xff) {
       if (foundSOS) {
-        // Inside entropy data: scan for 0xFF marker
+        // Inside entropy data scanning for 0xFF marker
         offset++;
         continue;
       } else {
-        return null;
+        return null; // Non-0xFF byte outside entropy data is invalid
       }
     }
 
+    // Skip consecutive 0xFF fill bytes
+    while (offset < buf.length - 1 && buf[offset] === 0xff && buf[offset + 1] === 0xff) {
+      offset++;
+    }
+    if (offset >= buf.length - 1) return null;
+
     const marker = buf[offset + 1];
 
-    // Standalone markers / stuffed bytes
-    if (marker === 0x00) {
-      // Byte stuffing in entropy data
-      offset += 2;
-      continue;
+    if (foundSOS) {
+      // Entropy data state: only stuffed 0xFF 0x00, restart markers 0xFF 0xD0..0xD7, or EOI 0xFF 0xD9 are valid
+      if (marker === 0x00) {
+        offset += 2;
+        continue;
+      }
+      if (marker >= 0xd0 && marker <= 0xd7) {
+        offset += 2;
+        continue;
+      }
+      if (marker === 0xd9) {
+        eoiOffset = offset;
+        break;
+      }
+      // Any other marker in entropy data is invalid
+      return null;
     }
 
-    if (marker >= 0xd0 && marker <= 0xd7) {
-      // Restart markers (RST0..RST7)
-      offset += 2;
-      continue;
-    }
-
+    // Header / Segment state (before SOS)
     if (marker === 0xd8) {
-      // SOI
+      // Second SOI unexpected
       offset += 2;
       continue;
     }
 
     if (marker === 0xd9) {
-      // EOI
-      eoiOffset = offset;
-      break;
+      // EOI before SOS is invalid
+      return null;
     }
 
     if (marker === 0xda) {
-      // SOS: Start of Scan
-      if (offset + 3 >= buf.length) return null;
+      // SOS: Start of Scan (SOF must precede SOS)
+      if (!foundSOF) return null;
+      if (offset + 4 >= buf.length) return null;
       const segLen = (buf[offset + 2] << 8) | buf[offset + 3];
-      if (segLen < 2 || offset + 2 + segLen > buf.length) return null;
+      const numScanComponents = buf[offset + 4];
+      if (segLen !== 6 + 2 * numScanComponents || offset + 2 + segLen > buf.length) return null;
       foundSOS = true;
       offset += 2 + segLen;
       continue;
     }
 
-    // SOF0 (0xC0), SOF1 (0xC1), SOF2 (0xC2)
-    if (marker === 0xc0 || marker === 0xc1 || marker === 0xc2) {
+    // SOF0 (0xC0) or SOF2 (0xC2) only (baseline or progressive DCT)
+    if (marker === 0xc0 || marker === 0xc2) {
+      if (foundSOF) return null; // Duplicate SOF invalid
       if (offset + 9 >= buf.length) return null;
       const segLen = (buf[offset + 2] << 8) | buf[offset + 3];
-      if (segLen < 8 || offset + 2 + segLen > buf.length) return null;
-
       const precision = buf[offset + 4];
       if (precision !== 8) return null; // 8-bit precision required
 
@@ -85,8 +98,9 @@ export function parseJPEGDimensions(buf: Buffer): JPEGDimensions | null {
       const width = (buf[offset + 7] << 8) | buf[offset + 8];
       const numComponents = buf[offset + 9];
 
+      if (segLen !== 8 + 3 * numComponents || offset + 2 + segLen > buf.length) return null;
       if (width <= 0 || height <= 0) return null;
-      if (numComponents !== 1 && numComponents !== 3 && numComponents !== 4) return null; // Gray, YCbCr, CMYK/YCCK
+      if (numComponents !== 1 && numComponents !== 3 && numComponents !== 4) return null;
 
       dimensions = { width, height };
       foundSOF = true;
@@ -94,7 +108,7 @@ export function parseJPEGDimensions(buf: Buffer): JPEGDimensions | null {
       continue;
     }
 
-    // Skip payload marker
+    // Skip generic segment payload
     if (offset + 3 < buf.length) {
       const segLen = (buf[offset + 2] << 8) | buf[offset + 3];
       if (segLen < 2 || offset + 2 + segLen > buf.length) return null;

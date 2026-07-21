@@ -77,142 +77,167 @@ public final class SocketListener: @unchecked Sendable {
 
         guard !isRunning else { return }
 
-        let parentDir = (socketPath as NSString).deletingLastPathComponent
-        try SocketListener.prepareDirectory(at: socketPath)
+        var boundPathForRollback: String? = nil
+        var boundInodeForRollback: ino_t = 0
 
-        // Hold owner-only lifecycle lock file via flock LOCK_EX|LOCK_NB
-        let lockPath = (parentDir as NSString).appendingPathComponent("host.lock")
-        lockFd = open(lockPath, O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0o600)
-        guard lockFd >= 0 else {
-            throw ComputerUseError.ipcError(reason: "Failed to open or create host.lock file at \(lockPath)")
-        }
+        do {
+            let parentDir = (socketPath as NSString).deletingLastPathComponent
+            try SocketListener.prepareDirectory(at: socketPath)
 
-        let flockRes = flock(lockFd, LOCK_EX | LOCK_NB)
-        guard flockRes == 0 else {
-            close(lockFd)
-            lockFd = -1
-            throw ComputerUseError.ipcError(reason: "Refusing to start: another active host instance holds flock on \(lockPath)")
-        }
-
-        var statBuf = stat()
-        if lstat(socketPath, &statBuf) == 0 {
-            guard statBuf.st_uid == getuid() else {
-                throw ComputerUseError.ipcError(reason: "Refusing to unlink socket owned by foreign UID \(statBuf.st_uid)")
-            }
-            guard (statBuf.st_mode & S_IFMT) == S_IFSOCK else {
-                throw ComputerUseError.ipcError(reason: "Refusing to unlink non-socket file at \(socketPath)")
+            // Hold owner-only lifecycle lock file via flock LOCK_EX|LOCK_NB
+            let lockPath = (parentDir as NSString).appendingPathComponent("host.lock")
+            lockFd = open(lockPath, O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0o600)
+            guard lockFd >= 0 else {
+                throw ComputerUseError.ipcError(reason: "Failed to open or create host.lock file at \(lockPath)")
             }
 
-            // Monotonic nonblocking connect & poll probe to refuse active listener
-            let probeFd = socket(AF_UNIX, SOCK_STREAM, 0)
-            if probeFd >= 0 {
-                defer { close(probeFd) }
-                let flags = fcntl(probeFd, F_GETFL, 0)
-                _ = fcntl(probeFd, F_SETFL, flags | O_NONBLOCK)
+            let flockRes = flock(lockFd, LOCK_EX | LOCK_NB)
+            guard flockRes == 0 else {
+                close(lockFd)
+                lockFd = -1
+                throw ComputerUseError.ipcError(reason: "Refusing to start: another active host instance holds flock on \(lockPath)")
+            }
 
-                var probeAddr = sockaddr_un()
-                let pathBytes = socketPath.utf8CString
-                let addrLen = MemoryLayout<sa_family_t>.size + pathBytes.count
-                probeAddr.sun_len = UInt8(addrLen)
-                probeAddr.sun_family = sa_family_t(AF_UNIX)
-                withUnsafeMutableBytes(of: &probeAddr.sun_path) { ptr in
-                    ptr.initializeMemory(as: CChar.self, repeating: 0)
-                    _ = pathBytes.withUnsafeBufferPointer { bPtr in memcpy(ptr.baseAddress!, bPtr.baseAddress!, bPtr.count) }
+            var statBuf = stat()
+            if lstat(socketPath, &statBuf) == 0 {
+                guard statBuf.st_uid == getuid() else {
+                    throw ComputerUseError.ipcError(reason: "Refusing to unlink socket owned by foreign UID \(statBuf.st_uid)")
+                }
+                guard (statBuf.st_mode & S_IFMT) == S_IFSOCK else {
+                    throw ComputerUseError.ipcError(reason: "Refusing to unlink non-socket file at \(socketPath)")
                 }
 
-                let connRes = withUnsafePointer(to: &probeAddr) { ptr in
-                    ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { saPtr in
-                        connect(probeFd, saPtr, socklen_t(addrLen))
+                // Monotonic nonblocking connect & poll probe to refuse active listener
+                let probeFd = socket(AF_UNIX, SOCK_STREAM, 0)
+                if probeFd >= 0 {
+                    defer { close(probeFd) }
+                    let flags = fcntl(probeFd, F_GETFL, 0)
+                    _ = fcntl(probeFd, F_SETFL, flags | O_NONBLOCK)
+
+                    var probeAddr = sockaddr_un()
+                    let pathBytes = socketPath.utf8CString
+                    guard pathBytes.count <= MemoryLayout.size(ofValue: probeAddr.sun_path) else {
+                        throw ComputerUseError.ipcError(reason: "Socket path length exceeds sockaddr_un sun_path limit")
                     }
-                }
+                    let addrLen = MemoryLayout<sa_family_t>.size + pathBytes.count
+                    probeAddr.sun_len = UInt8(addrLen)
+                    probeAddr.sun_family = sa_family_t(AF_UNIX)
+                    withUnsafeMutableBytes(of: &probeAddr.sun_path) { ptr in
+                        ptr.initializeMemory(as: CChar.self, repeating: 0)
+                        _ = pathBytes.withUnsafeBufferPointer { bPtr in memcpy(ptr.baseAddress!, bPtr.baseAddress!, bPtr.count) }
+                    }
 
-                if connRes == 0 {
-                    throw ComputerUseError.ipcError(reason: "Refusing to unlink active socket with live listener at \(socketPath)")
-                } else if errno == EINPROGRESS {
-                    var pfd = pollfd(fd: probeFd, events: Int16(POLLOUT), revents: 0)
-                    let pollRes = poll(&pfd, 1, 100) // 100ms deadline
-                    if pollRes > 0 {
-                        var err: Int32 = 0
-                        var errLen = socklen_t(MemoryLayout<Int32>.size)
-                        getsockopt(probeFd, SOL_SOCKET, SO_ERROR, &err, &errLen)
-                        if err == 0 {
-                            throw ComputerUseError.ipcError(reason: "Refusing to unlink active socket with live listener at \(socketPath)")
-                        } else if err != ECONNREFUSED {
-                            throw ComputerUseError.ipcError(reason: "Socket connect returned error \(err), failing closed")
+                    let connRes = withUnsafePointer(to: &probeAddr) { ptr in
+                        ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { saPtr in
+                            connect(probeFd, saPtr, socklen_t(addrLen))
                         }
-                    } else {
-                        throw ComputerUseError.ipcError(reason: "Socket connect probe timed out, failing closed")
                     }
-                } else if errno != ECONNREFUSED {
-                    throw ComputerUseError.ipcError(reason: "Socket probe failed with errno \(errno), failing closed")
+
+                    if connRes == 0 {
+                        throw ComputerUseError.ipcError(reason: "Refusing to unlink active socket with live listener at \(socketPath)")
+                    } else if errno == EINPROGRESS {
+                        var pfd = pollfd(fd: probeFd, events: Int16(POLLOUT), revents: 0)
+                        let pollRes = poll(&pfd, 1, 100) // 100ms deadline
+                        if pollRes > 0 {
+                            var err: Int32 = 0
+                            var errLen = socklen_t(MemoryLayout<Int32>.size)
+                            getsockopt(probeFd, SOL_SOCKET, SO_ERROR, &err, &errLen)
+                            if err == 0 {
+                                throw ComputerUseError.ipcError(reason: "Refusing to unlink active socket with live listener at \(socketPath)")
+                            } else if err != ECONNREFUSED {
+                                throw ComputerUseError.ipcError(reason: "Socket connect returned error \(err), failing closed")
+                            }
+                        } else {
+                            throw ComputerUseError.ipcError(reason: "Socket connect probe timed out, failing closed")
+                        }
+                    } else if errno != ECONNREFUSED {
+                        throw ComputerUseError.ipcError(reason: "Socket probe failed with errno \(errno), failing closed")
+                    }
+                }
+
+                // Re-read stat right before unlinking
+                var preUnlinkStat = stat()
+                guard lstat(socketPath, &preUnlinkStat) == 0,
+                      preUnlinkStat.st_dev == statBuf.st_dev,
+                      preUnlinkStat.st_ino == statBuf.st_ino,
+                      preUnlinkStat.st_uid == getuid(),
+                      (preUnlinkStat.st_mode & S_IFMT) == S_IFSOCK else {
+                    throw ComputerUseError.ipcError(reason: "Socket state changed before unlink, failing closed")
+                }
+                _ = unlink(socketPath)
+            }
+
+            serverFd = socket(AF_UNIX, SOCK_STREAM, 0)
+            guard serverFd >= 0 else {
+                throw ComputerUseError.ipcError(reason: "Failed to create UNIX domain socket descriptor")
+            }
+
+            var on: Int32 = 1
+            _ = setsockopt(serverFd, SOL_SOCKET, SO_REUSEADDR, &on, socklen_t(MemoryLayout<Int32>.size))
+
+            var addr = sockaddr_un()
+            let pathBytes = socketPath.utf8CString
+            guard pathBytes.count <= MemoryLayout.size(ofValue: addr.sun_path) else {
+                throw ComputerUseError.ipcError(reason: "Socket path exceeds sun_path maximum size (\(socketPath))")
+            }
+
+            let addrLen = MemoryLayout<sa_family_t>.size + pathBytes.count
+            addr.sun_len = UInt8(addrLen)
+            addr.sun_family = sa_family_t(AF_UNIX)
+
+            withUnsafeMutableBytes(of: &addr.sun_path) { ptr in
+                ptr.initializeMemory(as: CChar.self, repeating: 0)
+                _ = pathBytes.withUnsafeBufferPointer { bPtr in
+                    memcpy(ptr.baseAddress!, bPtr.baseAddress!, bPtr.count)
                 }
             }
 
-            // Re-read stat right before unlinking
-            var preUnlinkStat = stat()
-            guard lstat(socketPath, &preUnlinkStat) == 0, preUnlinkStat.st_uid == getuid(), (preUnlinkStat.st_mode & S_IFMT) == S_IFSOCK else {
-                throw ComputerUseError.ipcError(reason: "Socket state changed before unlink, failing closed")
+            let bindRes = withUnsafePointer(to: &addr) { ptr in
+                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { saPtr in
+                    bind(serverFd, saPtr, socklen_t(addrLen))
+                }
             }
-            _ = unlink(socketPath)
-        }
 
-        serverFd = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard serverFd >= 0 else {
-            throw ComputerUseError.ipcError(reason: "Failed to create UNIX domain socket descriptor")
-        }
-
-        var on: Int32 = 1
-        _ = setsockopt(serverFd, SOL_SOCKET, SO_REUSEADDR, &on, socklen_t(MemoryLayout<Int32>.size))
-
-        var addr = sockaddr_un()
-        let pathBytes = socketPath.utf8CString
-        guard pathBytes.count <= MemoryLayout.size(ofValue: addr.sun_path) else {
-            close(serverFd)
-            serverFd = -1
-            throw ComputerUseError.ipcError(reason: "Socket path exceeds sun_path maximum size (\(socketPath))")
-        }
-
-        let addrLen = MemoryLayout<sa_family_t>.size + pathBytes.count
-        addr.sun_len = UInt8(addrLen)
-        addr.sun_family = sa_family_t(AF_UNIX)
-
-        withUnsafeMutableBytes(of: &addr.sun_path) { ptr in
-            ptr.initializeMemory(as: CChar.self, repeating: 0)
-            _ = pathBytes.withUnsafeBufferPointer { bPtr in
-                memcpy(ptr.baseAddress!, bPtr.baseAddress!, bPtr.count)
+            guard bindRes == 0 else {
+                let err = errno
+                throw ComputerUseError.ipcError(reason: "Failed to bind socket at \(socketPath): errno \(err)")
             }
-        }
+            boundPathForRollback = socketPath
 
-        let bindRes = withUnsafePointer(to: &addr) { ptr in
-            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { saPtr in
-                bind(serverFd, saPtr, socklen_t(addrLen))
+            var boundStat = stat()
+            guard lstat(socketPath, &boundStat) == 0, boundStat.st_uid == getuid(), (boundStat.st_mode & S_IFMT) == S_IFSOCK else {
+                throw ComputerUseError.ipcError(reason: "Bound socket state revalidation failed")
             }
-        }
+            self.boundInode = boundStat.st_ino
+            boundInodeForRollback = boundStat.st_ino
 
-        guard bindRes == 0 else {
-            let err = errno
-            close(serverFd)
-            serverFd = -1
-            throw ComputerUseError.ipcError(reason: "Failed to bind socket at \(socketPath): errno \(err)")
-        }
+            let listenRes = listen(serverFd, 5)
+            guard listenRes == 0 else {
+                let err = errno
+                throw ComputerUseError.ipcError(reason: "Failed to listen on socket at \(socketPath): errno \(err)")
+            }
 
-        var boundStat = stat()
-        guard lstat(socketPath, &boundStat) == 0, boundStat.st_uid == getuid(), (boundStat.st_mode & S_IFMT) == S_IFSOCK else {
-            close(serverFd)
-            serverFd = -1
-            throw ComputerUseError.ipcError(reason: "Bound socket state revalidation failed")
+            isRunning = true
+        } catch {
+            if serverFd >= 0 {
+                close(serverFd)
+                serverFd = -1
+            }
+            if let boundPath = boundPathForRollback, boundInodeForRollback > 0 {
+                var statBuf = stat()
+                if lstat(boundPath, &statBuf) == 0, statBuf.st_ino == boundInodeForRollback, statBuf.st_uid == getuid() {
+                    _ = unlink(boundPath)
+                }
+            }
+            if lockFd >= 0 {
+                _ = flock(lockFd, LOCK_UN)
+                close(lockFd)
+                lockFd = -1
+            }
+            self.boundInode = 0
+            self.isRunning = false
+            throw error
         }
-        self.boundInode = boundStat.st_ino
-
-        let listenRes = listen(serverFd, 5)
-        guard listenRes == 0 else {
-            let err = errno
-            close(serverFd)
-            serverFd = -1
-            throw ComputerUseError.ipcError(reason: "Failed to listen on socket at \(socketPath): errno \(err)")
-        }
-
-        isRunning = true
     }
 
     private func getSocketState() -> (fd: Int32, active: Bool) {
@@ -263,7 +288,7 @@ public final class SocketListener: @unchecked Sendable {
         let headerDeadline = clock.now + .seconds(2)
         do {
             var headerBuffer = Data()
-            try readExactly(count: 4, from: clientFd, into: &headerBuffer, clock: clock, deadline: headerDeadline, operation: "socket_read_header")
+            try readExactly(count: 4, from: clientFd, into: &headerBuffer, clock: clock, deadline: headerDeadline, operation: "socket_read_header", phaseBudgetSec: 2.0)
 
             let payloadLength = Int(headerBuffer[0]) << 24 | Int(headerBuffer[1]) << 16 | Int(headerBuffer[2]) << 8 | Int(headerBuffer[3])
             guard payloadLength > 0, payloadLength <= LengthPrefixedFramer.maxPayloadSize else {
@@ -273,14 +298,14 @@ public final class SocketListener: @unchecked Sendable {
                     success: false,
                     error: IPCErrorPayload(code: "IPC_ERROR", message: "Oversized or zero payload header length: \(payloadLength)")
                 )
-                try writeResponse(errResp, to: clientFd, clock: clock, deadline: writeDeadline)
+                try writeResponse(errResp, to: clientFd, clock: clock, deadline: writeDeadline, phaseBudgetSec: 2.0)
                 return true
             }
 
             // 2. Body read phase: 3s deadline starting at body phase start
             let bodyDeadline = clock.now + .seconds(3)
             var payloadBuffer = Data()
-            try readExactly(count: payloadLength, from: clientFd, into: &payloadBuffer, clock: clock, deadline: bodyDeadline, operation: "socket_read_body")
+            try readExactly(count: payloadLength, from: clientFd, into: &payloadBuffer, clock: clock, deadline: bodyDeadline, operation: "socket_read_body", phaseBudgetSec: 3.0)
 
             let request = try JSONDecoder().decode(IPCRequest.self, from: payloadBuffer)
 
@@ -289,7 +314,7 @@ public final class SocketListener: @unchecked Sendable {
 
             // 4. Response write phase: 2s deadline starting at write phase start
             let writeDeadline = clock.now + .seconds(2)
-            try writeResponse(response, to: clientFd, clock: clock, deadline: writeDeadline)
+            try writeResponse(response, to: clientFd, clock: clock, deadline: writeDeadline, phaseBudgetSec: 2.0)
         } catch let err as ComputerUseError {
             let writeDeadline = clock.now + .seconds(2)
             let errResp = IPCResponse(
@@ -297,7 +322,7 @@ public final class SocketListener: @unchecked Sendable {
                 success: false,
                 error: IPCErrorPayload(code: err.errorCode, message: err.errorMessage)
             )
-            _ = try? writeResponse(errResp, to: clientFd, clock: clock, deadline: writeDeadline)
+            _ = try? writeResponse(errResp, to: clientFd, clock: clock, deadline: writeDeadline, phaseBudgetSec: 2.0)
         } catch {
             let writeDeadline = clock.now + .seconds(2)
             let errResp = IPCResponse(
@@ -305,26 +330,26 @@ public final class SocketListener: @unchecked Sendable {
                 success: false,
                 error: IPCErrorPayload(code: "IPC_ERROR", message: error.localizedDescription)
             )
-            _ = try? writeResponse(errResp, to: clientFd, clock: clock, deadline: writeDeadline)
+            _ = try? writeResponse(errResp, to: clientFd, clock: clock, deadline: writeDeadline, phaseBudgetSec: 2.0)
         }
 
         return true
     }
 
-    private func readExactly(count: Int, from fd: Int32, into data: inout Data, clock: ContinuousClock, deadline: ContinuousClock.Instant, operation: String) throws {
+    private func readExactly(count: Int, from fd: Int32, into data: inout Data, clock: ContinuousClock, deadline: ContinuousClock.Instant, operation: String, phaseBudgetSec: Double) throws {
         var tempBuf = [UInt8](repeating: 0, count: count)
         var totalRead = 0
 
         while totalRead < count {
             let now = clock.now
             guard now < deadline else {
-                throw ComputerUseError.timeout(operation: operation, seconds: perFrameTimeoutSec)
+                throw ComputerUseError.timeout(operation: operation, seconds: phaseBudgetSec)
             }
 
             let duration = deadline - now
             let remainingSec = Double(duration.components.seconds) + Double(duration.components.attoseconds) / 1e18
             guard remainingSec > 0 else {
-                throw ComputerUseError.timeout(operation: operation, seconds: perFrameTimeoutSec)
+                throw ComputerUseError.timeout(operation: operation, seconds: phaseBudgetSec)
             }
 
             let tvSec = Int(remainingSec)
@@ -350,7 +375,7 @@ public final class SocketListener: @unchecked Sendable {
                 let err = errno
                 if err == EINTR { continue }
                 if err == EAGAIN || err == EWOULDBLOCK {
-                    throw ComputerUseError.timeout(operation: operation, seconds: perFrameTimeoutSec)
+                    throw ComputerUseError.timeout(operation: operation, seconds: phaseBudgetSec)
                 }
                 throw ComputerUseError.ipcError(reason: "Socket read failed with errno \(err)")
             }
@@ -359,14 +384,14 @@ public final class SocketListener: @unchecked Sendable {
         data.append(tempBuf, count: totalRead)
     }
 
-    private func writeResponse(_ response: IPCResponse, to fd: Int32, clock: ContinuousClock, deadline: ContinuousClock.Instant) throws {
+    private func writeResponse(_ response: IPCResponse, to fd: Int32, clock: ContinuousClock, deadline: ContinuousClock.Instant, phaseBudgetSec: Double) throws {
         let respData = try JSONEncoder().encode(response)
         let framedResp = try LengthPrefixedFramer.encode(payload: respData)
 
-        try writeAll(data: framedResp, to: fd, clock: clock, deadline: deadline)
+        try writeAll(data: framedResp, to: fd, clock: clock, deadline: deadline, phaseBudgetSec: phaseBudgetSec)
     }
 
-    private func writeAll(data: Data, to fd: Int32, clock: ContinuousClock, deadline: ContinuousClock.Instant) throws {
+    private func writeAll(data: Data, to fd: Int32, clock: ContinuousClock, deadline: ContinuousClock.Instant, phaseBudgetSec: Double) throws {
         var totalWritten = 0
         let totalCount = data.count
 
@@ -376,13 +401,13 @@ public final class SocketListener: @unchecked Sendable {
             while totalWritten < totalCount {
                 let now = clock.now
                 guard now < deadline else {
-                    throw ComputerUseError.timeout(operation: "socket_write_response", seconds: perFrameTimeoutSec)
+                    throw ComputerUseError.timeout(operation: "socket_write_response", seconds: phaseBudgetSec)
                 }
 
                 let duration = deadline - now
                 let remainingSec = Double(duration.components.seconds) + Double(duration.components.attoseconds) / 1e18
                 guard remainingSec > 0 else {
-                    throw ComputerUseError.timeout(operation: "socket_write_response", seconds: perFrameTimeoutSec)
+                    throw ComputerUseError.timeout(operation: "socket_write_response", seconds: phaseBudgetSec)
                 }
 
                 let tvSec = Int(remainingSec)
@@ -406,7 +431,7 @@ public final class SocketListener: @unchecked Sendable {
                     let err = errno
                     if err == EINTR { continue }
                     if err == EAGAIN || err == EWOULDBLOCK {
-                        throw ComputerUseError.timeout(operation: "socket_write_response", seconds: perFrameTimeoutSec)
+                        throw ComputerUseError.timeout(operation: "socket_write_response", seconds: phaseBudgetSec)
                     }
                     throw ComputerUseError.ipcError(reason: "Socket write failed with errno \(err)")
                 }

@@ -108,9 +108,9 @@ export const ObserveDataSchema = z.object({
   image_format: z.literal("jpeg"),
   image_data_base64: Base64ImageSchema,
   normalized_bounds: z.object({
-    min_x: z.number().int().min(0).max(999).finite(),
-    min_y: z.number().int().min(0).max(999).finite(),
-    max_x: z.number().int().min(0).max(999).finite(),
-    max_y: z.number().int().min(0).max(999).finite()
+    min_x: z.literal(0),
+    min_y: z.literal(0),
+    max_x: z.literal(999),
+    max_y: z.literal(999)
   }).strict()
 }).strict();

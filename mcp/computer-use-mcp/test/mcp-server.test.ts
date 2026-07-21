@@ -6,7 +6,7 @@ import * as net from "net";
 import AjvModule from "ajv";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createComputerUseServer, validateAndDecodeBase64JPEG } from "../src/index.js";
+import { createComputerUseServer, validateAndDecodeBase64JPEG, parseJPEGDimensions } from "../src/index.js";
 import { MockHostClient, UnixSocketHostClient, IPCResponseSchema } from "../src/host-client.js";
 
 const Ajv = (AjvModule as any).default || AjvModule;
@@ -304,6 +304,31 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
     }
   });
 
+  test("Decoder-invocation seam: accepts exact N=10,485,760 byte boundary", () => {
+    let decodeCount = 0;
+    const mockDecoder = (str: string, enc: BufferEncoding) => {
+      decodeCount++;
+      // Return minimal valid JPEG buffer for test seam
+      return Buffer.from([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x0a, 0x00, 0x0a, 0x01, 0x01, 0x11, 0x00, 0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3f, 0x00, 0xff, 0xd9]);
+    };
+    // 10,485,760 bytes in Base64 (13,981,016 chars with '==' padding)
+    const b64_N = "A".repeat(13_981_014) + "==";
+    assert.doesNotThrow(() => validateAndDecodeBase64JPEG(b64_N, 10, 10, mockDecoder));
+    assert.equal(decodeCount, 1);
+  });
+
+  test("Adversarial: SOS before SOF in JPEG fails closed", () => {
+    // 0xFFD8 (SOI), 0xFFDA (SOS), 0xFFC0 (SOF0), 0xFFD9 (EOI)
+    const sosBeforeSof = Buffer.from([0xff, 0xd8, 0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3f, 0x00, 0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x0a, 0x00, 0x0a, 0x01, 0x01, 0x11, 0x00, 0xff, 0xd9]);
+    assert.equal(parseJPEGDimensions(sosBeforeSof), null);
+  });
+
+  test("Adversarial: Invalid SOF or SOS segment lengths in JPEG fail closed", () => {
+    // Bad SOF length (should be 11, set to 10)
+    const badSofLen = Buffer.from([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x0a, 0x08, 0x00, 0x0a, 0x00, 0x0a, 0x01, 0x01, 0x11, 0x00, 0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3f, 0x00, 0xff, 0xd9]);
+    assert.equal(parseJPEGDimensions(badSofLen), null);
+  });
+
   test("Validates all golden JSON fixtures in docs/fixtures/ using explicit fixture-to-schema mappings", () => {
     const rootDir = path.resolve(process.cwd(), "../../");
     const fixturesDir = path.join(rootDir, "docs/fixtures");
@@ -326,27 +351,31 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
       "permission_denied_response.json": { expectedValid: true, schemaTarget: "ErrorResponse" },
       "stale_topology_response.json": { expectedValid: true, schemaTarget: "ErrorResponse" },
       "timeout_response.json": { expectedValid: true, schemaTarget: "ErrorResponse" },
+      "ax_tree_unreachable_response.json": { expectedValid: true, schemaTarget: "ErrorResponse" },
       "click_request_disabled.json": { expectedValid: false },
-      "invalid_click_request_negative.json": { expectedValid: false }
+      "invalid_click_request_negative.json": { expectedValid: false },
+      "invalid_method_request_negative.json": { expectedValid: false }
     };
 
     const fixtureFiles = fs.readdirSync(fixturesDir).filter(f => f.endsWith(".json"));
-    assert.ok(fixtureFiles.length >= 4, "Must contain active D2 fixtures");
+    assert.ok(fixtureFiles.length >= 5, "Must contain active D2 fixtures");
 
     for (const file of fixtureFiles) {
       const mapping = FIXTURE_MAPPINGS[file];
+      assert.ok(mapping, `Fixture '${file}' must have an explicit mapping in FIXTURE_MAPPINGS`);
       const content = fs.readFileSync(path.join(fixturesDir, file), "utf-8");
       assert.doesNotThrow(() => JSON.parse(content), `Fixture '${file}' must be valid JSON`);
       const parsed = JSON.parse(content);
 
-      if (mapping) {
-        const isValid = validateProtocol(parsed);
-        assert.equal(isValid, mapping.expectedValid, `Fixture '${file}' Ajv validation state (${isValid}) must match expected state (${mapping.expectedValid}): ${JSON.stringify(validateProtocol.errors)}`);
+      let isValid: boolean;
+      if (mapping.schemaTarget) {
+        const subValidator = ajv.getSchema(`#/definitions/${mapping.schemaTarget}`);
+        isValid = subValidator ? (subValidator(parsed) as boolean) : (validateProtocol(parsed) as boolean);
       } else {
-        // Fallback for unmapped fixtures
-        const isValid = validateProtocol(parsed);
-        assert.ok(isValid !== undefined);
+        isValid = validateProtocol(parsed) as boolean;
       }
+
+      assert.equal(isValid, mapping.expectedValid, `Fixture '${file}' Ajv validation state (${isValid}) must match expected state (${mapping.expectedValid}): ${JSON.stringify(validateProtocol.errors)}`);
 
       if (parsed.success === true) {
         const zodParse = IPCResponseSchema.safeParse(parsed);
