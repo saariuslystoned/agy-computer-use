@@ -1531,39 +1531,232 @@ public struct ComputerUseHostTestRunner {
     }
 
     public static func run10_EINTRRetryPath() async throws {
-        signal(SIGUSR1, { _ in })
+        let fakeTopo = try FakeDisplayTopologyProvider().getTopology()
+        let expectedTopologyDict: [String: AnyCodable] = [
+            "version": .string(fakeTopo.version),
+            "primary_display_id": .int(1),
+            "displays": .array([
+                .dictionary([
+                    "id": .int(1),
+                    "width_points": .int(1920),
+                    "height_points": .int(1080),
+                    "scale_factor": .int(2),
+                    "origin_x": .int(0),
+                    "origin_y": .int(0),
+                    "pixel_width": .int(3840),
+                    "pixel_height": .int(2160),
+                    "rotation": .int(0)
+                ])
+            ])
+        ]
 
-        let sockPath10 = "/tmp/agy-test-c10-\(UUID().uuidString)/host.sock"
-        try SocketListener.prepareDirectory(at: sockPath10)
-        let listener10 = SocketListener(
-            socketPath: sockPath10,
-            server: HostServer(
-                authorizer: FakeScreenRecordingAuthorizer(granted: true),
-                topologyProvider: FakeDisplayTopologyProvider(),
-                captureEngine: FakeCaptureEngine(),
-                axEngine: DisabledAXInspector(),
-                inputEngine: DisabledInputInjector()
+        let expectedDataDict: [String: AnyCodable] = [
+            "connected": .bool(true),
+            "tcc_permission_state": .string("granted"),
+            "accessibility_available": .bool(false),
+            "accessibility_trusted": .bool(false),
+            "input_mutation_state": .string("disabled"),
+            "topology_version": .string(fakeTopo.version),
+            "primary_display_id": .int(1),
+            "display_count": .int(1),
+            "topology": .dictionary(expectedTopologyDict)
+        ]
+
+        // --- Subcase A: Combined deterministic real-UDS EINTR retry exercise ---
+        try await { () async throws in
+            let scripted10 = ScriptedPOSIXSyscalls()
+            let acceptInjections = AtomicCounter()
+            let headerReadInjections = AtomicCounter()
+            let bodyReadInjections = AtomicCounter()
+            let responseWriteInjections = AtomicCounter()
+
+            scripted10.acceptHook = { fd, addr, addrLen in
+                if acceptInjections.value == 0 {
+                    acceptInjections.increment()
+                    scripted10.setErrno(EINTR)
+                    return -1
+                }
+                return nil
+            }
+
+            scripted10.readHook = { fd, buf, count in
+                if count == 4 && headerReadInjections.value == 0 {
+                    headerReadInjections.increment()
+                    scripted10.setErrno(EINTR)
+                    return -1
+                } else if count > 4 && bodyReadInjections.value == 0 {
+                    bodyReadInjections.increment()
+                    scripted10.setErrno(EINTR)
+                    return -1
+                }
+                return nil
+            }
+
+            scripted10.writeHook = { fd, buf, count in
+                if responseWriteInjections.value == 0 {
+                    responseWriteInjections.increment()
+                    scripted10.setErrno(EINTR)
+                    return -1
+                }
+                return nil
+            }
+
+            let sockPath10 = "/tmp/agy-test-c10-\(UUID().uuidString)/host.sock"
+            try SocketListener.prepareDirectory(at: sockPath10, syscalls: scripted10)
+            let listener10 = SocketListener(
+                socketPath: sockPath10,
+                server: HostServer(
+                    authorizer: FakeScreenRecordingAuthorizer(granted: true),
+                    topologyProvider: FakeDisplayTopologyProvider(),
+                    captureEngine: FakeCaptureEngine(),
+                    axEngine: DisabledAXInspector(),
+                    inputEngine: DisabledInputInjector()
+                ),
+                syscalls: scripted10
             )
-        )
-        try listener10.start()
 
-        let acceptTask10 = Task { try await listener10.acceptAndHandleOneConnection() }
-        let clientFd10 = try connectToSocket(at: listener10.socketPath)
+            defer {
+                listener10.stop()
+                assertTrue(scripted10.areAllDescriptorsClosed, "All descriptors must be closed after listener10 stop")
+            }
 
-        kill(getpid(), SIGUSR1)
-        try sendIPCRequest(IPCRequest(id: "eintr-req-10", method: "status"), to: clientFd10)
+            try listener10.start()
 
-        kill(getpid(), SIGUSR1)
-        let handled10 = try await acceptTask10.value
-        assertTrue(handled10)
+            // 1st request exercising 4 injected EINTR events
+            var clientFd10a: Int32 = -1
+            try await { () async throws in
+                let acceptTask10a = Task { try await listener10.acceptAndHandleOneConnection() }
+                let rawFd = try connectToSocket(at: listener10.socketPath)
+                clientFd10a = rawFd
 
-        let resp10 = try readIPCResponse(from: clientFd10)
-        assertEqual(resp10.id, "eintr-req-10")
-        assertTrue(resp10.success)
+                defer {
+                    if clientFd10a >= 0 {
+                        let cRes = close(clientFd10a)
+                        clientFd10a = -1
+                        assertEqual(cRes, 0, "clientFd10a close must return 0")
+                    }
+                }
 
-        close(clientFd10)
-        listener10.stop()
-        signal(SIGUSR1, SIG_DFL)
+                try sendIPCRequest(IPCRequest(id: "eintr-req-10", method: "status"), to: rawFd)
+                let handled10a = try await acceptTask10a.value
+                assertTrue(handled10a)
+
+                let resp10a = try readIPCResponse(from: rawFd)
+                assertEqual(resp10a.id, "eintr-req-10")
+                assertTrue(resp10a.success)
+                assertEqual(resp10a.data?.count, 9, "Top-level response data dictionary must contain exactly 9 keys")
+                assertEqual(resp10a.data, expectedDataDict, "Response data dictionary must match full expected status payload exactly")
+            }()
+
+            // Assert each injection fired exactly once
+            assertEqual(acceptInjections.value, 1, "accept EINTR injection must fire exactly once")
+            assertEqual(headerReadInjections.value, 1, "header read EINTR injection must fire exactly once")
+            assertEqual(bodyReadInjections.value, 1, "body read EINTR injection must fire exactly once")
+            assertEqual(responseWriteInjections.value, 1, "response write EINTR injection must fire exactly once")
+
+            // Assert total call counts (2 for accept, 4 for read [2 header + 2 body], 2 for write)
+            assertEqual(scripted10.acceptCallCount, 2, "accept call count must be 2 (1 EINTR + 1 success)")
+            assertEqual(scripted10.readCallCount, 4, "read call count must be 4 (2 header + 2 body)")
+            assertEqual(scripted10.writeCallCount, 2, "write call count must be 2 (1 EINTR + 1 success)")
+
+            // 2nd request on same listener proving recovery with injection exhausted
+            var clientFd10b: Int32 = -1
+            try await { () async throws in
+                let acceptTask10b = Task { try await listener10.acceptAndHandleOneConnection() }
+                let rawFd = try connectToSocket(at: listener10.socketPath)
+                clientFd10b = rawFd
+
+                defer {
+                    if clientFd10b >= 0 {
+                        let cRes = close(clientFd10b)
+                        clientFd10b = -1
+                        assertEqual(cRes, 0, "clientFd10b close must return 0")
+                    }
+                }
+
+                try sendIPCRequest(IPCRequest(id: "eintr-req-10-recovery", method: "status"), to: rawFd)
+                let handled10b = try await acceptTask10b.value
+                assertTrue(handled10b)
+
+                let resp10b = try readIPCResponse(from: clientFd10b)
+                assertEqual(resp10b.id, "eintr-req-10-recovery")
+                assertTrue(resp10b.success)
+                assertEqual(resp10b.data?.count, 9, "Recovery response data dictionary must contain exactly 9 keys")
+                assertEqual(resp10b.data, expectedDataDict, "Recovery response data dictionary must match full expected status payload exactly")
+            }()
+
+            // Assert totals after 2nd request
+            assertEqual(scripted10.acceptCallCount, 3)
+            assertEqual(scripted10.readCallCount, 6)
+            assertEqual(scripted10.writeCallCount, 3)
+        }()
+
+        // --- Subcase B: Discriminating non-EINTR (EIO) response-write error path ---
+        try await { () async throws in
+            let scripted10_eio = ScriptedPOSIXSyscalls()
+            let eioInjections = AtomicCounter()
+
+            scripted10_eio.writeHook = { fd, buf, count in
+                if eioInjections.value == 0 {
+                    eioInjections.increment()
+                    scripted10_eio.setErrno(EIO)
+                    return -1
+                }
+                return nil
+            }
+
+            let sockPath10_eio = "/tmp/agy-test-c10-eio-\(UUID().uuidString)/host.sock"
+            try SocketListener.prepareDirectory(at: sockPath10_eio, syscalls: scripted10_eio)
+            let listener10_eio = SocketListener(
+                socketPath: sockPath10_eio,
+                server: HostServer(
+                    authorizer: FakeScreenRecordingAuthorizer(granted: true),
+                    topologyProvider: FakeDisplayTopologyProvider(),
+                    captureEngine: FakeCaptureEngine(),
+                    axEngine: DisabledAXInspector(),
+                    inputEngine: DisabledInputInjector()
+                ),
+                syscalls: scripted10_eio
+            )
+
+            defer {
+                listener10_eio.stop()
+                assertTrue(scripted10_eio.areAllDescriptorsClosed, "All descriptors must be closed after listener10_eio stop")
+            }
+
+            try listener10_eio.start()
+
+            var clientFdEIO: Int32 = -1
+            try await { () async throws in
+                let acceptTaskEIO = Task { try await listener10_eio.acceptAndHandleOneConnection() }
+                let rawFd = try connectToSocket(at: listener10_eio.socketPath)
+                clientFdEIO = rawFd
+
+                defer {
+                    if clientFdEIO >= 0 {
+                        let cRes = close(clientFdEIO)
+                        clientFdEIO = -1
+                        assertEqual(cRes, 0, "clientFdEIO close must return 0")
+                    }
+                }
+
+                try sendIPCRequest(IPCRequest(id: "eio-req-10", method: "status"), to: rawFd)
+                let handledEIO = try await acceptTaskEIO.value
+                assertTrue(handledEIO)
+
+                // Peer must receive EOF / read failure, NOT fabricated success
+                var readFailed = false
+                do {
+                    _ = try readIPCResponse(from: rawFd)
+                } catch {
+                    readFailed = true
+                }
+                assertTrue(readFailed, "Peer must experience read failure when response write encounters EIO")
+            }()
+
+            assertEqual(eioInjections.value, 1, "EIO injection must fire exactly once")
+            assertEqual(scripted10_eio.writeCallCount, 1, "write call count must be exactly 1 (EIO not retried)")
+        }()
     }
 
     public static func run11_TimeoutResponseFollowedByNextClient() async throws {
