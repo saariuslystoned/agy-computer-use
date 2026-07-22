@@ -117,56 +117,71 @@ async function main() {
     const hostDir = path.join(rootDir, "apps/computer-use-host");
     const manifestPath = path.join(rootDir, "docs/native_test_manifest.txt");
 
-    let isFallback = false;
-    let actualList = "";
-    try {
-      const helpOut = execSync("swift test list --help 2>&1", { cwd: hostDir, encoding: "utf-8" });
-      const enableFlag = helpOut.includes("--enable-xctest") ? " --enable-xctest" : "";
-      const testListRaw = execSync(`swift test list${enableFlag} 2>&1`, { cwd: hostDir, encoding: "utf-8" });
-      actualList = testListRaw
-        .trim()
-        .split("\n")
-        .map(l => l.trim())
-        .filter(l => l.startsWith("ComputerUseHostTests."))
-        .sort()
-        .join("\n");
+    let helpOutput = "";
+    let listOutput = "";
+    let listExitCode = 0;
 
-      if (actualList.length === 0) {
-        fail("'swift test list' returned status 0 with 0 discovered tests. Failing closed.");
-      }
+    try {
+      helpOutput = execSync("swift test list --help 2>&1", { cwd: hostDir, encoding: "utf-8" });
+      const enableFlag = helpOutput.includes("--enable-xctest") ? " --enable-xctest" : "";
+      listOutput = execSync(`swift test list${enableFlag} 2>&1`, { cwd: hostDir, encoding: "utf-8" });
+      listExitCode = 0;
     } catch (err) {
-      const output = (err.stdout || "") + "\n" + (err.stderr || "") + "\n" + (err.message || "");
+      listOutput = (err.stdout || "") + "\n" + (err.stderr || "") + "\n" + (err.message || "");
+      listExitCode = err.status || 1;
+    }
+
+    let manifestContent = "";
+    try {
+      manifestContent = fs.readFileSync(manifestPath, "utf-8");
+    } catch (err) {
+      fail(`Failed to read native test manifest at ${manifestPath}: ${err.message}`);
+    }
+
+    if (listExitCode !== 0) {
       const isRecognizedFallback =
-        output.includes("no such module 'XCTest'") ||
-        output.includes("no such module \"XCTest\"") ||
-        output.includes("XCTest is not supported") ||
-        output.includes("XCTestHelper binary not found");
+        listOutput.includes("no such module 'XCTest'") ||
+        listOutput.includes('no such module "XCTest"') ||
+        listOutput.includes("XCTest is not supported") ||
+        listOutput.includes("XCTestHelper binary not found");
 
       if (isRecognizedFallback) {
-        isFallback = true;
+        log("XCTest discovery unavailable in environment; running ComputerUseHostTestRunner executable authority...");
+        execSync("swift run -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors ComputerUseHostTestRunner", { cwd: hostDir, stdio: "inherit" });
+        log("Native test suite execution complete.");
+        process.exit(0);
       } else {
-        fail(`'swift test list' failed closed with build/discovery/manifest error:\n${output}`);
+        fail(`'swift test list' failed closed with build/discovery/manifest error:\n${listOutput}`);
       }
     }
 
-    if (!isFallback) {
-      log("Verifying native test manifest matches 'swift test list'...");
-      let expectedList = "";
-      try {
-        expectedList = fs.readFileSync(manifestPath, "utf-8").trim().split("\n").map(l => l.trim()).filter(Boolean).sort().join("\n");
-      } catch (err) {
-        fail(`Failed to read native test manifest at ${manifestPath}: ${err.message}`);
-      }
+    const actualListLines = listOutput
+      .trim()
+      .split("\n")
+      .map(l => l.trim())
+      .filter(l => l.startsWith("ComputerUseHostTests."))
+      .sort();
 
-      if (actualList !== expectedList) {
-        fail(`Native test manifest mismatch!\nExpected:\n${expectedList}\nActual:\n${actualList}`);
-      }
-      execSync("swift test -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors", { cwd: hostDir, stdio: "inherit" });
-    } else {
-      log("XCTest discovery unavailable in environment; running ComputerUseHostTestRunner executable authority...");
-      execSync("swift run -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors ComputerUseHostTestRunner", { cwd: hostDir, stdio: "inherit" });
+    if (actualListLines.length === 0) {
+      fail("'swift test list' returned status 0 with 0 discovered tests. Failing closed.");
     }
 
+    const expectedList = manifestContent
+      .trim()
+      .split("\n")
+      .map(l => l.trim())
+      .filter(Boolean)
+      .sort()
+      .join("\n");
+
+    const actualListStr = actualListLines.join("\n");
+
+    if (actualListStr !== expectedList) {
+      fail(`Native test manifest mismatch!\nExpected:\n${expectedList}\nActual:\n${actualListStr}`);
+    }
+
+    log(`Verified native test manifest (${actualListLines.length} test cases). Running swift test...`);
+    execSync("swift test -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors", { cwd: hostDir, stdio: "inherit" });
     log("Native test suite execution complete.");
     process.exit(0);
   }

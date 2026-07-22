@@ -484,6 +484,11 @@ private func assertTrue(_ cond: Bool, _ msg: String = "", file: String = #file, 
     }
 }
 
+private func fail(_ msg: String = "", file: String = #file, line: Int = #line) -> Never {
+    fputs("[FAIL] \(msg) at \(file):\(line)\n", stderr)
+    exit(1)
+}
+
 private func connectToSocket(at socketPath: String) throws -> Int32 {
     let clientFd = socket(AF_UNIX, SOCK_STREAM, 0)
     assertTrue(clientFd >= 0)
@@ -1853,7 +1858,54 @@ public struct ComputerUseHostTestRunner {
         assertTrue(scriptedSyscalls.lstat(sockPath, &sockStat) != 0, "Socket file must be unlinked on listener stop")
     }
 
-    public static func run36_FourSurfaceAuthorityBijection() async throws {
+    public struct FourSurfaces {
+        public let manifest: [String]
+        public let xctestFuncs: [String]
+        public let allTests: [String]
+        public let runnerCalls: [String]
+    }
+
+    public enum FourSurfaceValidationError: Error {
+        case duplicateInSurface(String)
+        case emptySurface
+        case mismatch(String)
+    }
+
+    public static func validateFourSurfaces(_ surfaces: FourSurfaces) throws {
+        guard surfaces.manifest.count == Set(surfaces.manifest).count else {
+            throw FourSurfaceValidationError.duplicateInSurface("manifest")
+        }
+        guard surfaces.xctestFuncs.count == Set(surfaces.xctestFuncs).count else {
+            throw FourSurfaceValidationError.duplicateInSurface("xctestFuncs")
+        }
+        guard surfaces.allTests.count == Set(surfaces.allTests).count else {
+            throw FourSurfaceValidationError.duplicateInSurface("allTests")
+        }
+        guard surfaces.runnerCalls.count == Set(surfaces.runnerCalls).count else {
+            throw FourSurfaceValidationError.duplicateInSurface("runnerCalls")
+        }
+
+        let s1 = Set(surfaces.manifest)
+        let s2 = Set(surfaces.xctestFuncs)
+        let s3 = Set(surfaces.allTests)
+        let s4 = Set(surfaces.runnerCalls)
+
+        guard !s1.isEmpty else {
+            throw FourSurfaceValidationError.emptySurface
+        }
+
+        guard s1 == s2 else {
+            throw FourSurfaceValidationError.mismatch("manifest vs xctestFuncs")
+        }
+        guard s1 == s3 else {
+            throw FourSurfaceValidationError.mismatch("manifest vs allTests")
+        }
+        guard s1 == s4 else {
+            throw FourSurfaceValidationError.mismatch("manifest vs runnerCalls")
+        }
+    }
+
+    public static func loadFourSurfaces() throws -> FourSurfaces {
         let manifestPaths = ["docs/native_test_manifest.txt", "../../docs/native_test_manifest.txt"]
         var manifestContent: String? = nil
         for p in manifestPaths {
@@ -1862,15 +1914,15 @@ public struct ComputerUseHostTestRunner {
                 break
             }
         }
-        assertTrue(manifestContent != nil, "docs/native_test_manifest.txt must exist and be readable")
-        let manifestLines = (manifestContent ?? "")
+        guard let mContent = manifestContent else {
+            throw FourSurfaceValidationError.emptySurface
+        }
+        let manifestLines = mContent
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
         let manifestList = manifestLines.compactMap { $0.components(separatedBy: "/").last }
-        assertEqual(manifestList.count, Set(manifestList).count, "Surface 1 (manifest) must contain no duplicate test names")
-        let surface1Set = Set(manifestList)
 
         let testsPaths = ["Tests/ComputerUseHostTests/ComputerUseHostTests.swift", "../../apps/computer-use-host/Tests/ComputerUseHostTests/ComputerUseHostTests.swift", "apps/computer-use-host/Tests/ComputerUseHostTests/ComputerUseHostTests.swift"]
         var testsContent: String? = nil
@@ -1880,25 +1932,23 @@ public struct ComputerUseHostTestRunner {
                 break
             }
         }
-        assertTrue(testsContent != nil, "ComputerUseHostTests.swift must exist and be readable")
-        let xctestFuncLines = (testsContent ?? "").components(separatedBy: "\n")
+        guard let tContent = testsContent else {
+            throw FourSurfaceValidationError.emptySurface
+        }
+        let xctestFuncLines = tContent.components(separatedBy: "\n")
             .filter { $0.contains("func test") && $0.contains("() throws {") }
             .compactMap { line -> String? in
                 guard let range = line.range(of: "test[0-9]{2}_[A-Za-z0-9_]+", options: .regularExpression) else { return nil }
                 return String(line[range])
             }
-        assertEqual(xctestFuncLines.count, Set(xctestFuncLines).count, "Surface 2 (XCTest functions) must contain no duplicate test names")
-        let surface2Set = Set(xctestFuncLines)
 
-        let allTestsMatches = (testsContent ?? "").components(separatedBy: "\n")
+        let allTestsMatches = tContent.components(separatedBy: "\n")
             .filter { $0.contains("(\"test") }
             .compactMap { line -> String? in
                 guard let firstQuote = line.range(of: "\"test")?.lowerBound,
                       let secondQuote = line[line.index(after: firstQuote)...].range(of: "\"")?.lowerBound else { return nil }
                 return String(line[line.index(after: firstQuote)..<secondQuote])
             }
-        assertEqual(allTestsMatches.count, Set(allTestsMatches).count, "Surface 3 (__allTests) must contain no duplicate test names")
-        let surface3Set = Set(allTestsMatches)
 
         let runnerPaths = ["Tests/ComputerUseHostTestRunner/main.swift", "../../apps/computer-use-host/Tests/ComputerUseHostTestRunner/main.swift", "apps/computer-use-host/Tests/ComputerUseHostTestRunner/main.swift"]
         var runnerContent: String? = nil
@@ -1908,23 +1958,69 @@ public struct ComputerUseHostTestRunner {
                 break
             }
         }
-        assertTrue(runnerContent != nil, "main.swift must exist and be readable")
-        let runnerCalls = (runnerContent ?? "").components(separatedBy: "\n")
+        guard let rContent = runnerContent else {
+            throw FourSurfaceValidationError.emptySurface
+        }
+        let runnerCalls = rContent.components(separatedBy: "\n")
             .filter { $0.contains("runWithWatchdog(name: \"test") }
             .compactMap { line -> String? in
                 guard let range = line.range(of: "test[0-9]{2}_[A-Za-z0-9_]+", options: .regularExpression) else { return nil }
                 return String(line[range])
             }
-        assertEqual(runnerCalls.count, Set(runnerCalls).count, "Surface 4 (runner calls in main) must contain no duplicate test names")
-        let surface4Set = Set(runnerCalls)
 
-        assertEqual(surface1Set, surface2Set, "Surface 1 (manifest) and Surface 2 (XCTest functions) must be bijective sets")
-        assertEqual(surface1Set, surface3Set, "Surface 1 (manifest) and Surface 3 (__allTests) must be bijective sets")
-        assertEqual(surface1Set, surface4Set, "Surface 1 (manifest) and Surface 4 (runner calls) must be bijective sets")
+        return FourSurfaces(
+            manifest: manifestList,
+            xctestFuncs: xctestFuncLines,
+            allTests: allTestsMatches,
+            runnerCalls: runnerCalls
+        )
+    }
 
-        let expectedCount = surface1Set.count
-        assertTrue(expectedCount > 0, "Test suite authority count must be greater than zero")
-        assertEqual(surface1Set.count, expectedCount, "All 4 authority surfaces dynamically match count \(expectedCount)")
+    public static func run36_FourSurfaceAuthorityBijection() async throws {
+        let surfaces = try loadFourSurfaces()
+        try validateFourSurfaces(surfaces)
+
+        let baseList = surfaces.manifest
+        if baseList.isEmpty { fail("Base surface must not be empty") }
+        let firstItem = baseList[0]
+        let extraItem = "test99_InjectedExtraTest"
+        let renamedItem = "test01_RenamedMismatch"
+
+        func assertThrows(_ block: () throws -> Void, _ msg: String) {
+            var threw = false
+            do {
+                try block()
+            } catch {
+                threw = true
+            }
+            if !threw {
+                fail(msg)
+            }
+        }
+
+        // Surface 1 (manifest) mutations: missing, extra, duplicate, renamed
+        assertThrows({ try validateFourSurfaces(FourSurfaces(manifest: Array(baseList.dropFirst()), xctestFuncs: surfaces.xctestFuncs, allTests: surfaces.allTests, runnerCalls: surfaces.runnerCalls)) }, "Surface 1 missing item must throw")
+        assertThrows({ try validateFourSurfaces(FourSurfaces(manifest: baseList + [extraItem], xctestFuncs: surfaces.xctestFuncs, allTests: surfaces.allTests, runnerCalls: surfaces.runnerCalls)) }, "Surface 1 extra item must throw")
+        assertThrows({ try validateFourSurfaces(FourSurfaces(manifest: baseList + [firstItem], xctestFuncs: surfaces.xctestFuncs, allTests: surfaces.allTests, runnerCalls: surfaces.runnerCalls)) }, "Surface 1 duplicate item must throw")
+        assertThrows({ try validateFourSurfaces(FourSurfaces(manifest: [renamedItem] + Array(baseList.dropFirst()), xctestFuncs: surfaces.xctestFuncs, allTests: surfaces.allTests, runnerCalls: surfaces.runnerCalls)) }, "Surface 1 renamed item must throw")
+
+        // Surface 2 (XCTest functions) mutations: missing, extra, duplicate, renamed
+        assertThrows({ try validateFourSurfaces(FourSurfaces(manifest: surfaces.manifest, xctestFuncs: Array(baseList.dropFirst()), allTests: surfaces.allTests, runnerCalls: surfaces.runnerCalls)) }, "Surface 2 missing item must throw")
+        assertThrows({ try validateFourSurfaces(FourSurfaces(manifest: surfaces.manifest, xctestFuncs: baseList + [extraItem], allTests: surfaces.allTests, runnerCalls: surfaces.runnerCalls)) }, "Surface 2 extra item must throw")
+        assertThrows({ try validateFourSurfaces(FourSurfaces(manifest: surfaces.manifest, xctestFuncs: baseList + [firstItem], allTests: surfaces.allTests, runnerCalls: surfaces.runnerCalls)) }, "Surface 2 duplicate item must throw")
+        assertThrows({ try validateFourSurfaces(FourSurfaces(manifest: surfaces.manifest, xctestFuncs: [renamedItem] + Array(baseList.dropFirst()), allTests: surfaces.allTests, runnerCalls: surfaces.runnerCalls)) }, "Surface 2 renamed item must throw")
+
+        // Surface 3 (__allTests) mutations: missing, extra, duplicate, renamed
+        assertThrows({ try validateFourSurfaces(FourSurfaces(manifest: surfaces.manifest, xctestFuncs: surfaces.xctestFuncs, allTests: Array(baseList.dropFirst()), runnerCalls: surfaces.runnerCalls)) }, "Surface 3 missing item must throw")
+        assertThrows({ try validateFourSurfaces(FourSurfaces(manifest: surfaces.manifest, xctestFuncs: surfaces.xctestFuncs, allTests: baseList + [extraItem], runnerCalls: surfaces.runnerCalls)) }, "Surface 3 extra item must throw")
+        assertThrows({ try validateFourSurfaces(FourSurfaces(manifest: surfaces.manifest, xctestFuncs: surfaces.xctestFuncs, allTests: baseList + [firstItem], runnerCalls: surfaces.runnerCalls)) }, "Surface 3 duplicate item must throw")
+        assertThrows({ try validateFourSurfaces(FourSurfaces(manifest: surfaces.manifest, xctestFuncs: [renamedItem] + Array(baseList.dropFirst()), allTests: surfaces.allTests, runnerCalls: surfaces.runnerCalls)) }, "Surface 3 renamed item must throw")
+
+        // Surface 4 (runner calls) mutations: missing, extra, duplicate, renamed
+        assertThrows({ try validateFourSurfaces(FourSurfaces(manifest: surfaces.manifest, xctestFuncs: surfaces.xctestFuncs, allTests: surfaces.allTests, runnerCalls: Array(baseList.dropFirst()))) }, "Surface 4 missing item must throw")
+        assertThrows({ try validateFourSurfaces(FourSurfaces(manifest: surfaces.manifest, xctestFuncs: surfaces.xctestFuncs, allTests: surfaces.allTests, runnerCalls: baseList + [extraItem])) }, "Surface 4 extra item must throw")
+        assertThrows({ try validateFourSurfaces(FourSurfaces(manifest: surfaces.manifest, xctestFuncs: surfaces.xctestFuncs, allTests: surfaces.allTests, runnerCalls: baseList + [firstItem])) }, "Surface 4 duplicate item must throw")
+        assertThrows({ try validateFourSurfaces(FourSurfaces(manifest: surfaces.manifest, xctestFuncs: surfaces.xctestFuncs, allTests: surfaces.allTests, runnerCalls: [renamedItem] + Array(baseList.dropFirst()))) }, "Surface 4 renamed item must throw")
     }
 
     private static func runWithWatchdog(name: String, timeoutSec: Double = 10.0, _ block: @Sendable @escaping () async throws -> Void) async throws {
