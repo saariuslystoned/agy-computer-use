@@ -289,13 +289,33 @@ test('RP-2: Complete production-bound principal classification authority table',
         { name: 'Requirement record negative: Reordered requirement records -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: 'designated => identifier "com.saariuslystoned.agy-computer-use.host" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = ABCDE12345\nExecutable=/path/to/app', verified: true },
         { name: 'Requirement record negative: Prefixed Executable= -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: replaceExactToken(validCanonicalTeamReq, 'Executable=', 'prefix Executable='), verified: true },
         { name: 'Requirement record negative: Suffixed Executable= -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: replaceExactToken(validCanonicalTeamReq, 'Executable=/path/to/app', 'Executable=/path/to/app '), verified: true },
-        { name: 'Requirement record negative: Leading-whitespace Executable= record -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: replaceExactToken(validCanonicalTeamReq, 'Executable=', 'Executable= '), verified: true },
+        {
+            name: 'Requirement record negative: Record-leading-whitespace Executable= -> unsigned_or_invalid',
+            codesign: validCanonicalTeamCodesign,
+            req: (() => {
+                const r = replaceExactToken(validCanonicalTeamReq, 'Executable=', ' Executable=');
+                assert.ok(r.startsWith(' Executable='), 'Fixture must begin with leading space before Executable=');
+                return r;
+            })(),
+            verified: true
+        },
+        { name: 'Requirement record negative: Value-leading-whitespace Executable= -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: replaceExactToken(validCanonicalTeamReq, 'Executable=', 'Executable= '), verified: true },
         { name: 'Requirement record negative: Missing designated record -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: 'Executable=/path/to/app', verified: true },
         { name: 'Requirement record negative: Empty designated record -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: 'Executable=/path/to/app\ndesignated => ', verified: true },
         { name: 'Requirement record negative: Duplicate designated record -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: validCanonicalTeamReq + '\ndesignated => identifier "com.saariuslystoned.agy-computer-use.host"', verified: true },
         { name: 'Requirement record negative: Prefixed designated record -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: replaceExactToken(validCanonicalTeamReq, 'designated => ', 'prefix designated => '), verified: true },
         { name: 'Requirement record negative: Suffixed designated record -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: validCanonicalTeamReq + ' ', verified: true },
-        { name: 'Requirement record negative: Leading-whitespace designated => record -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: replaceExactToken(validCanonicalTeamReq, 'designated => ', 'designated =>  '), verified: true },
+        {
+            name: 'Requirement record negative: Record-leading-whitespace designated => -> unsigned_or_invalid',
+            codesign: validCanonicalTeamCodesign,
+            req: (() => {
+                const r = replaceExactToken(validCanonicalTeamReq, '\ndesignated =>', '\n designated =>');
+                assert.ok(r.includes('\n designated =>'), 'Second record fixture must begin with leading space before designated =>');
+                return r;
+            })(),
+            verified: true
+        },
+        { name: 'Requirement record negative: Value-leading-whitespace designated => -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: replaceExactToken(validCanonicalTeamReq, 'designated => ', 'designated =>  '), verified: true },
         { name: 'Requirement record negative: Extra third record -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: validCanonicalTeamReq + '\nExtraField=123', verified: true },
         { name: 'Requirement record negative: Leading blank record -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: '\n' + validCanonicalTeamReq, verified: true },
         { name: 'Requirement record negative: Interior blank record -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: replaceExactToken(validCanonicalTeamReq, '\ndesignated =>', '\n\ndesignated =>'), verified: true },
@@ -303,20 +323,26 @@ test('RP-2: Complete production-bound principal classification authority table',
         { name: 'Requirement record negative: and without exact surrounding spaces -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: replaceExactToken(validMinimalTeamReq, ' and anchor apple generic', 'and anchor apple generic'), verified: true },
 
         {
-            name: 'Requirement record negative: Doubled separator vs Empty atom -> unsigned_or_invalid',
+            name: 'Requirement record negative: Doubled conjunction token -> unsigned_or_invalid',
             codesign: validCanonicalTeamCodesign,
             req: (() => {
-                const doubledSep = replaceExactToken(validMinimalTeamReq, ' and anchor apple generic', ' and  and anchor apple generic');
-                const emptyAtom = replaceExactToken(validMinimalTeamReq, ' and anchor apple generic', ' and   and anchor apple generic');
-                assert.notEqual(doubledSep, emptyAtom, 'Doubled separator and empty atom test fixtures must be distinct strings');
-                return doubledSep;
+                const doubledConjFix = replaceExactToken(validMinimalTeamReq, ' and anchor apple generic', ' and and anchor apple generic');
+                const emptyAtomFix = replaceExactToken(validMinimalTeamReq, ' and anchor apple generic', ' and  and anchor apple generic');
+                assert.notEqual(doubledConjFix, emptyAtomFix, 'Doubled conjunction token and empty atom fixtures must be byte-distinct strings');
+                assert.equal((doubledConjFix.match(/\band\b/g) || []).length, 3, 'Doubled conjunction token fixture must contain 3 lexical and tokens');
+                assert.ok(!doubledConjFix.split(' and ').includes(''), 'Doubled conjunction token fixture must not produce empty atom under split(" and ")');
+                return doubledConjFix;
             })(),
             verified: true
         },
         {
             name: 'Requirement record negative: Empty atom in requirement -> unsigned_or_invalid',
             codesign: validCanonicalTeamCodesign,
-            req: replaceExactToken(validMinimalTeamReq, ' and anchor apple generic', ' and   and anchor apple generic'),
+            req: (() => {
+                const emptyAtomFix = replaceExactToken(validMinimalTeamReq, ' and anchor apple generic', ' and  and anchor apple generic');
+                assert.ok(emptyAtomFix.split(' and ').includes(''), 'Empty atom fixture must produce empty string element under split(" and ")');
+                return emptyAtomFix;
+            })(),
             verified: true
         },
         { name: 'Requirement record negative: Alternate whitespace around separator -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: replaceExactToken(validMinimalTeamReq, ' and anchor apple generic', '  and  anchor apple generic'), verified: true },
@@ -413,6 +439,9 @@ test('AR-P1: Recording runner test for classifyPrincipal', async () => {
     const failRes = await classifyPrincipal(appPath, { execFileAsync: failingRunner });
     assert.equal(failRes.classification, 'unsigned_or_invalid', 'Must report unsigned_or_invalid on verification failure');
     assert.equal(failRecordedCalls.length, 3, 'Must execute all 3 commands even on verification failure');
+    assert.deepEqual(failRecordedCalls[0], { cmd: 'codesign', args: ['--verify', '--strict', appPath] });
+    assert.deepEqual(failRecordedCalls[1], { cmd: 'codesign', args: ['-dv', '--verbose=4', appPath] });
+    assert.deepEqual(failRecordedCalls[2], { cmd: 'codesign', args: ['-d', '-r-', appPath] });
 
     const mutantRes = parseAndClassifyPrincipal(canonicalStderrDV, canonicalStderrExec + canonicalStdoutR, true);
     assert.equal(mutantRes.classification, 'stable_team_signed_candidate', 'Mutant ignoring verification would return stable_team_signed_candidate');
