@@ -21,12 +21,21 @@ export function classifyNativeAuthoritySelection(input) {
     };
   }
 
-  const actualListLines = (input.listOutput || "")
+  const rawListLines = (input.listOutput || "")
     .trim()
     .split("\n")
     .map(l => l.trim())
-    .filter(l => l.startsWith("ComputerUseHostTests."))
-    .sort();
+    .filter(l => l.startsWith("ComputerUseHostTests."));
+
+  if (new Set(rawListLines).size !== rawListLines.length) {
+    return {
+      status: 1,
+      authority: "none",
+      error: "'swift test list' output contains duplicate entries. Failing closed."
+    };
+  }
+
+  const actualListLines = [...rawListLines].sort();
 
   if (actualListLines.length === 0) {
     return {

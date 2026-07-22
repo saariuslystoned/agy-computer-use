@@ -6,6 +6,14 @@ export const ObserveInputSchema = z.object({
   display_id: z.number().int().min(1).finite().optional()
 }).strict();
 
+export function validatePixelDimensions(width: number, height: number): boolean {
+  if (!Number.isInteger(width) || !Number.isInteger(height)) return false;
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height)) return false;
+  if (width <= 0 || height <= 0) return false;
+  const total = width * height;
+  return Number.isSafeInteger(total) && total <= 64_000_000;
+}
+
 export const TopologyVersionSchema = z
   .string()
   .regex(/^top-sha256-[0-9a-f]{64}$/, {

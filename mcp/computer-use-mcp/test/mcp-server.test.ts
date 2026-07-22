@@ -8,6 +8,7 @@ import AjvModule from "ajv";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createComputerUseServer, validateAndDecodeBase64JPEG, parseJPEGDimensions } from "../src/index.js";
+import { validatePixelDimensions } from "../src/schemas.js";
 import { MockHostClient, UnixSocketHostClient, IPCResponseSchema } from "../src/host-client.js";
 
 const Ajv = (AjvModule as any).default || AjvModule;
@@ -661,18 +662,11 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
     ]);
     assert.deepEqual(parseJPEGDimensions(exact64MBuf), { width: 8000, height: 8000 });
 
-    // Negative / overflow bounds helper validation function
-    const validateBounds = (w: number, h: number): boolean => {
-      if (!Number.isSafeInteger(w) || !Number.isSafeInteger(h) || w <= 0 || h <= 0) return false;
-      const total = w * h;
-      return Number.isSafeInteger(total) && total <= 64_000_000;
-    };
-
-    assert.equal(validateBounds(0, 100), false, "Zero width must be rejected");
-    assert.equal(validateBounds(-10, 100), false, "Negative width must be rejected");
-    assert.equal(validateBounds(100, -5), false, "Negative height must be rejected");
-    assert.equal(validateBounds(1e12, 1e12), false, "Unsafe integer overflow must be rejected");
-    assert.equal(validateBounds(5213, 12277), false, "Exact 64M+1 (64,000,001) must be rejected");
-    assert.equal(validateBounds(8000, 8000), true, "Exact 64M (64,000,000) must be accepted");
+    assert.equal(validatePixelDimensions(0, 100), false, "Zero width must be rejected");
+    assert.equal(validatePixelDimensions(-10, 100), false, "Negative width must be rejected");
+    assert.equal(validatePixelDimensions(100, -5), false, "Negative height must be rejected");
+    assert.equal(validatePixelDimensions(1e12, 1e12), false, "Unsafe integer overflow must be rejected");
+    assert.equal(validatePixelDimensions(5213, 12277), false, "Exact 64M+1 (64,000,001) must be rejected");
+    assert.equal(validatePixelDimensions(8000, 8000), true, "Exact 64M (64,000,000) must be accepted");
   });
 });

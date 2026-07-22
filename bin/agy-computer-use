@@ -161,7 +161,7 @@ async function main() {
     if (selection.authority === "xctest") {
       log(`Executing native test suite (${selection.testCount} discovered tests)...`);
       const enableFlag = helpOutput.includes("--enable-xctest") ? " --enable-xctest" : "";
-      execSync(`swift test${enableFlag}`, { cwd: hostDir, stdio: "inherit" });
+      execSync(`swift test${enableFlag} -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors`, { cwd: hostDir, stdio: "inherit" });
       log("Native test suite execution complete.");
       process.exit(0);
     }

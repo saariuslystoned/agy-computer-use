@@ -59,7 +59,7 @@ Work is partitioned into dependency-ordered milestones (M0–M9 & Dogfood D1–D
 - Read-only Calculator capture proof via Peekaboo bridge and `computer_use_canary_screenshot`.
 
 ### D2: Production-Bounded Native Observation Slice (Test Authority Closure)
-- **Status**: In Progress (Source Hardening / Awaiting Exact-Head Acceptance; proof placeholder `proof/d2_verification.md` is REJECTED / NON-TERMINAL)
+- **Status**: In Progress (Source Hardening / Awaiting Exact-Head Acceptance; previous candidate 35cde9 failed independent exact-head review due to invalid skeptic/push chronology and open C1–C6 clauses; proof placeholder `proof/d2_verification.md` is REJECTED / NON-TERMINAL)
 - **Key Deliverables & Repairs**:
   - Authoritative native test runner (`./bin/agy-computer-use test-native`) executing required named native test cases.
   - Strict-concurrency compilation with warnings as errors (`swift build -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors`).

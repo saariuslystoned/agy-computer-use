@@ -1,5 +1,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import * as child_process from "node:child_process";
 import { classifyNativeAuthoritySelection } from "../src/native-authority-selection.js";
 
 const sampleManifest = `ComputerUseHostTests.ComputerUseHostTests/test01_LengthPrefixedFraming
@@ -63,7 +67,7 @@ describe("Native Authority Selection Classification Table", () => {
     });
     assert.equal(res.status, 1);
     assert.equal(res.authority, "none");
-    assert.match(res.error || "", /manifest mismatch/i);
+    assert.match(res.error || "", /duplicate entries|manifest mismatch/i);
   });
 
   it("6. Compiler failure -> fails closed with status 1", () => {
@@ -99,5 +103,44 @@ describe("Native Authority Selection Classification Table", () => {
     });
     assert.equal(res.status, 0);
     assert.equal(res.authority, "fallback");
+  });
+});
+
+describe("Hermetic Child-Process CLI Authority Selection (`bin/agy-computer-use test-native`)", () => {
+  it("Executes bin/agy-computer-use test-native with stubbed swift binary in PATH", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-cli-test-"));
+    const binDir = path.join(tmpDir, "bin");
+    fs.mkdirSync(binDir, { recursive: true });
+
+    const stubSwift = path.join(binDir, "swift");
+    fs.writeFileSync(
+      stubSwift,
+      `#!/bin/sh
+if [ "$1" = "test" ] && [ "$2" = "--help" ]; then
+  echo "Usage: swift test"
+  exit 0
+fi
+if [ "$1" = "test" ] && [ "$2" = "list" ]; then
+  echo "error: no such module 'XCTest'"
+  exit 1
+fi
+if [ "$1" = "run" ]; then
+  echo "[ComputerUseHostTestRunner] Executed 37 native test cases successfully. ALL PASSED."
+  exit 0
+fi
+exit 0
+`,
+      { mode: 0o755 }
+    );
+
+    const repoRoot = path.resolve(process.cwd(), "../../");
+    const cliBin = path.join(repoRoot, "bin/agy-computer-use");
+    const env = { ...process.env, PATH: `${binDir}:${process.env.PATH}` };
+
+    const out = child_process.execSync(`node ${cliBin} test-native`, { env, cwd: repoRoot }).toString();
+    assert.match(out, /XCTest discovery unavailable in environment/);
+    assert.match(out, /Native test suite execution complete/);
+
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 });

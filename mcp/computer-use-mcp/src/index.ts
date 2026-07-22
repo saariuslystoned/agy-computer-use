@@ -148,11 +148,8 @@ export function parseJPEGDimensions(buf: Buffer): JPEGDimensions | null {
     return null;
   }
 
-  // Reject trailing non-zero garbage past EOI
-  for (let i = eoiOffset + 2; i < buf.length; i++) {
-    if (buf[i] !== 0) {
-      return null;
-    }
+  if (eoiOffset + 2 !== buf.length) {
+    return null;
   }
 
   return dimensions;
