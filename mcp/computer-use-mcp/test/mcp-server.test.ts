@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "path";
 import * as net from "net";
+import * as crypto from "crypto";
 import AjvModule from "ajv";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -496,5 +497,138 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
 
     server.close();
     if (fs.existsSync(sockPath)) fs.unlinkSync(sockPath);
+  });
+
+  test("Section 4 & Section 5: Golden JPEG fixture parity and capture boundaries", () => {
+    const rootDir = path.resolve(process.cwd(), "../../");
+    const docFixturePath = path.join(rootDir, "docs/fixtures/golden_progressive.jpg");
+    const mcpFixturePath = path.join(process.cwd(), "test/fixtures/golden_progressive.jpg");
+
+    assert.ok(fs.existsSync(docFixturePath), "docs/fixtures/golden_progressive.jpg must exist");
+    assert.ok(fs.existsSync(mcpFixturePath), "mcp/test/fixtures/golden_progressive.jpg must exist");
+
+    const docBuf = fs.readFileSync(docFixturePath);
+    const mcpBuf = fs.readFileSync(mcpFixturePath);
+
+    const docHash = crypto.createHash("sha256").update(docBuf).digest("hex");
+    const mcpHash = crypto.createHash("sha256").update(mcpBuf).digest("hex");
+
+    assert.equal(docHash, mcpHash, "Both golden_progressive.jpg fixture files must be byte-identical SHA-256");
+
+    // 14-Mutation Parity Table against golden_progressive.jpg
+    const goldenBuf = docBuf;
+
+    // 1. Identity
+    assert.deepEqual(parseJPEGDimensions(goldenBuf), { width: 10, height: 10 });
+
+    // 2. Malformed APP/COM length
+    const mut2 = Buffer.from(goldenBuf);
+    mut2[4] = 0x00; mut2[5] = 0x01;
+    assert.equal(parseJPEGDimensions(mut2), null);
+
+    // 3. Duplicate SOF IDs
+    const mut3 = Buffer.from(goldenBuf);
+    const sofIdx3 = mut3.indexOf(Buffer.from([0xff, 0xc2]));
+    if (sofIdx3 !== -1) mut3[sofIdx3 + 13] = mut3[sofIdx3 + 10];
+    assert.equal(parseJPEGDimensions(mut3), null);
+
+    // 4. Duplicate same-SOS selectors
+    const mut4 = Buffer.from(goldenBuf);
+    const sosIdx4 = mut4.indexOf(Buffer.from([0xff, 0xda]));
+    if (sosIdx4 !== -1) mut4[sosIdx4 + 7] = mut4[sosIdx4 + 5];
+    assert.equal(parseJPEGDimensions(mut4), null);
+
+    // 5. Unknown selector in SOS
+    const mut5 = Buffer.from(goldenBuf);
+    const sosIdx5 = mut5.indexOf(Buffer.from([0xff, 0xda]));
+    if (sosIdx5 !== -1) mut5[sosIdx5 + 5] = 0x99;
+    assert.equal(parseJPEGDimensions(mut5), null);
+
+    // 6. Zero/excess counts in SOS
+    const mut6a = Buffer.from(goldenBuf);
+    const sosIdx6a = mut6a.indexOf(Buffer.from([0xff, 0xda]));
+    if (sosIdx6a !== -1) mut6a[sosIdx6a + 4] = 0;
+    assert.equal(parseJPEGDimensions(mut6a), null);
+
+    const mut6b = Buffer.from(goldenBuf);
+    const sosIdx6b = mut6b.indexOf(Buffer.from([0xff, 0xda]));
+    if (sosIdx6b !== -1) mut6b[sosIdx6b + 4] = 5;
+    assert.equal(parseJPEGDimensions(mut6b), null);
+
+    // 7. Repeated SOI
+    const mut7 = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xd8]), goldenBuf.subarray(2)]);
+    assert.equal(parseJPEGDimensions(mut7), null);
+
+    // 8. Duplicate SOF
+    const sofIdx8 = goldenBuf.indexOf(Buffer.from([0xff, 0xc2]));
+    if (sofIdx8 !== -1) {
+      const segLen8 = (goldenBuf[sofIdx8 + 2] << 8) | goldenBuf[sofIdx8 + 3];
+      const sofChunk = goldenBuf.subarray(sofIdx8, sofIdx8 + 2 + segLen8);
+      const mut8 = Buffer.concat([goldenBuf.subarray(0, sofIdx8 + 2 + segLen8), sofChunk, goldenBuf.subarray(sofIdx8 + 2 + segLen8)]);
+      assert.equal(parseJPEGDimensions(mut8), null);
+    }
+
+    // 9. Bad inter-scan marker/length
+    const mut9 = Buffer.from(goldenBuf);
+    const sosIdx9 = mut9.indexOf(Buffer.from([0xff, 0xda]));
+    if (sosIdx9 !== -1) {
+      for (let i = sosIdx9 + 10; i < mut9.length - 1; i++) {
+        if (mut9[i] === 0xff && mut9[i + 1] !== 0x00 && !(mut9[i + 1] >= 0xd0 && mut9[i + 1] <= 0xd7) && mut9[i + 1] !== 0xd9) {
+          mut9[i + 1] = 0x02;
+          break;
+        }
+      }
+    }
+    assert.equal(parseJPEGDimensions(mut9), null);
+
+    // 10. Truncated entropy
+    const mut10 = goldenBuf.subarray(0, goldenBuf.length - 10);
+    assert.equal(parseJPEGDimensions(mut10), null);
+
+    // 11. Missing EOI
+    const mut11 = goldenBuf.subarray(0, goldenBuf.length - 2);
+    assert.equal(parseJPEGDimensions(mut11), null);
+
+    // 12. Exact 64M (8000x8000)
+    const mut12 = Buffer.from(goldenBuf);
+    const sofIdx12 = mut12.indexOf(Buffer.from([0xff, 0xc2]));
+    if (sofIdx12 !== -1) {
+      mut12[sofIdx12 + 5] = 0x1f; mut12[sofIdx12 + 6] = 0x40;
+      mut12[sofIdx12 + 7] = 0x1f; mut12[sofIdx12 + 8] = 0x40;
+    }
+    assert.deepEqual(parseJPEGDimensions(mut12), { width: 8000, height: 8000 });
+
+    // 13. 64M+1 (8000x8001 = 64,008,000)
+    const mut13 = Buffer.from(goldenBuf);
+    const sofIdx13 = mut13.indexOf(Buffer.from([0xff, 0xc2]));
+    if (sofIdx13 !== -1) {
+      mut13[sofIdx13 + 5] = 0x1f; mut13[sofIdx13 + 6] = 0x41;
+      mut13[sofIdx13 + 7] = 0x1f; mut13[sofIdx13 + 8] = 0x40;
+    }
+    assert.equal(parseJPEGDimensions(mut13), null);
+
+    // 14. Canonical trailing-byte policy
+    const mut14a = Buffer.concat([goldenBuf, Buffer.from([0x00, 0x00])]);
+    assert.deepEqual(parseJPEGDimensions(mut14a), { width: 10, height: 10 });
+
+    const mut14b = Buffer.concat([goldenBuf, Buffer.from([0xaa])]);
+    assert.equal(parseJPEGDimensions(mut14b), null);
+  });
+
+  test("Section 5: Dimension rejection bounds (0, negative, overflow, >64M)", () => {
+    const zeroWidthBuf = Buffer.from([
+      0xff, 0xd8, 0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x64, 0x00, 0x00, 0x01, 0x01, 0x11, 0x00, 0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3f, 0x00, 0xff, 0xd9
+    ]);
+    assert.equal(parseJPEGDimensions(zeroWidthBuf), null);
+
+    const over64MBuf = Buffer.from([
+      0xff, 0xd8, 0xff, 0xc0, 0x00, 0x0b, 0x08, 0x1f, 0x41, 0x1f, 0x40, 0x01, 0x01, 0x11, 0x00, 0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3f, 0x00, 0xff, 0xd9
+    ]);
+    assert.equal(parseJPEGDimensions(over64MBuf), null);
+
+    const exact64MBuf = Buffer.from([
+      0xff, 0xd8, 0xff, 0xc0, 0x00, 0x0b, 0x08, 0x1f, 0x40, 0x1f, 0x40, 0x01, 0x01, 0x11, 0x00, 0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3f, 0x00, 0xff, 0xd9
+    ]);
+    assert.deepEqual(parseJPEGDimensions(exact64MBuf), { width: 8000, height: 8000 });
   });
 });

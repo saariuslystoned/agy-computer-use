@@ -133,6 +133,16 @@ public final class SocketListener: @unchecked Sendable {
                 throw ComputerUseError.ipcError(reason: "Failed to open or create host.lock file via runtime directory descriptor")
             }
 
+            var lockStat = stat()
+            guard syscalls.fstat(lockFd, &lockStat) == 0,
+                  (lockStat.st_mode & S_IFMT) == S_IFREG,
+                  lockStat.st_uid == syscalls.getuid(),
+                  (lockStat.st_mode & 0o077) == 0 else {
+                _ = syscalls.close(lockFd)
+                lockFd = -1
+                throw ComputerUseError.ipcError(reason: "host.lock descriptor verification failed: must be a private regular file owned by current user")
+            }
+
             let flockRes = syscalls.fileFlock(lockFd, LOCK_EX | LOCK_NB)
             guard flockRes == 0 else {
                 _ = syscalls.close(lockFd)
@@ -246,18 +256,22 @@ public final class SocketListener: @unchecked Sendable {
                 }
             }
 
-            // Pre-bind parent directory revalidation via retained descriptor
+            // Pre-bind parent directory revalidation via retained descriptor AND lstat pathname
             var preBindDirStat = stat()
+            var preBindPathStat = stat()
             guard syscalls.fstat(self.dirFd, &preBindDirStat) == 0,
+                  syscalls.lstat(parentDir, &preBindPathStat) == 0,
                   preBindDirStat.st_dev == self.boundDirDev,
                   preBindDirStat.st_ino == self.boundDirInode,
-                  preBindDirStat.st_uid == syscalls.getuid(),
-                  (preBindDirStat.st_mode & S_IFMT) == S_IFDIR,
-                  (preBindDirStat.st_mode & 0o777) == 0o700 else {
-                throw ComputerUseError.ipcError(reason: "Pre-bind parent directory revalidation failed")
+                  preBindPathStat.st_dev == self.boundDirDev,
+                  preBindPathStat.st_ino == self.boundDirInode,
+                  preBindPathStat.st_uid == syscalls.getuid(),
+                  (preBindPathStat.st_mode & S_IFMT) == S_IFDIR,
+                  (preBindPathStat.st_mode & 0o777) == 0o700 else {
+                throw ComputerUseError.ipcError(reason: "Pre-bind parent directory revalidation failed: path replaced or mode altered")
             }
 
-            // Pathname bind (macOS POSIX lacks bindat; narrow same-UID path-swap residual guarded by pre/post fstat)
+            // Pathname bind (macOS POSIX lacks bindat; narrow same-UID path-swap residual guarded by pre/post fstat & lstat)
             let bindRes = withUnsafePointer(to: &addr) { ptr in
                 ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { saPtr in
                     syscalls.bind(serverFd, saPtr, socklen_t(addrLen))
@@ -269,15 +283,19 @@ public final class SocketListener: @unchecked Sendable {
                 throw ComputerUseError.ipcError(reason: "Failed to bind socket at \(socketPath): errno \(err)")
             }
 
-            // Post-bind parent directory revalidation via retained descriptor
+            // Post-bind parent directory revalidation via retained descriptor AND lstat pathname
             var postBindDirStat = stat()
+            var postBindPathStat = stat()
             guard syscalls.fstat(self.dirFd, &postBindDirStat) == 0,
+                  syscalls.lstat(parentDir, &postBindPathStat) == 0,
                   postBindDirStat.st_dev == self.boundDirDev,
                   postBindDirStat.st_ino == self.boundDirInode,
-                  postBindDirStat.st_uid == syscalls.getuid(),
-                  (postBindDirStat.st_mode & S_IFMT) == S_IFDIR,
-                  (postBindDirStat.st_mode & 0o777) == 0o700 else {
-                throw ComputerUseError.ipcError(reason: "Post-bind parent directory revalidation failed")
+                  postBindPathStat.st_dev == self.boundDirDev,
+                  postBindPathStat.st_ino == self.boundDirInode,
+                  postBindPathStat.st_uid == syscalls.getuid(),
+                  (postBindPathStat.st_mode & S_IFMT) == S_IFDIR,
+                  (postBindPathStat.st_mode & 0o777) == 0o700 else {
+                throw ComputerUseError.ipcError(reason: "Post-bind parent directory revalidation failed: path replaced after bind")
             }
 
             var boundStat = stat()

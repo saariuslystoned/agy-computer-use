@@ -79,19 +79,34 @@ public protocol DisplayCaptureEngine: Sendable {
 }
 
 public actor SCScreenshotCaptureEngine: DisplayCaptureEngine {
+    public typealias ContentLoader = @Sendable () async throws -> SCShareableContent
     public typealias ImageCapturer = @Sendable (SCContentFilter, SCStreamConfiguration) async throws -> CGImage
+    public typealias JPEGEncoder = @Sendable (CGImage, Double) throws -> Data
 
     private let authorizer: ScreenRecordingAuthorizing
+    private let contentLoader: ContentLoader
     private let imageCapturer: ImageCapturer
+    private let jpegEncoder: JPEGEncoder
+
+    public private(set) var contentLoaderInvocationCount: Int = 0
     public private(set) var frameworkInvocationCount: Int = 0
+    public private(set) var encoderInvocationCount: Int = 0
 
     public init(
         authorizer: ScreenRecordingAuthorizing = CGScreenRecordingAuthorizer(),
-        imageCapturer: ImageCapturer? = nil
+        contentLoader: ContentLoader? = nil,
+        imageCapturer: ImageCapturer? = nil,
+        jpegEncoder: JPEGEncoder? = nil
     ) {
         self.authorizer = authorizer
+        self.contentLoader = contentLoader ?? {
+            try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        }
         self.imageCapturer = imageCapturer ?? { filter, config in
             try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+        }
+        self.jpegEncoder = jpegEncoder ?? { image, quality in
+            try SCScreenshotCaptureEngine.encodeToJPEG(image: image, quality: quality)
         }
     }
 
@@ -106,14 +121,12 @@ public actor SCScreenshotCaptureEngine: DisplayCaptureEngine {
             throw ComputerUseError.targetUnreachable(reason: "Display ID \(targetDisplayId) not found in topology")
         }
 
-        // 2. Pre-check 64-megapixel budget BEFORE framework allocation
+        // 2. Pre-check 64-megapixel budget BEFORE framework allocation or content loading
         try validatePixelDimensions(width: targetDisplay.pixelWidth, height: targetDisplay.pixelHeight)
 
-        // 3. Increment framework invocation counter to track real framework calls
-        frameworkInvocationCount += 1
-
-        // 4. Perform SCShareableContent discovery and filter creation entirely inside actor scope
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        // 3. Content loading boundary
+        contentLoaderInvocationCount += 1
+        let content = try await contentLoader()
         guard let scDisplay = content.displays.first(where: { Int($0.displayID) == targetDisplayId }) else {
             throw ComputerUseError.targetUnreachable(reason: "Display ID \(targetDisplayId) not found in SCShareableContent")
         }
@@ -127,11 +140,13 @@ public actor SCScreenshotCaptureEngine: DisplayCaptureEngine {
         streamConfig.height = targetDisplay.pixelHeight
         streamConfig.showsCursor = false
 
-        // 5. Capture image via injected imageCapturer
+        // 4. Capture image via injected imageCapturer
+        frameworkInvocationCount += 1
         let cgImage = try await imageCapturer(contentFilter, streamConfig)
 
-        // 6. Validate and encode image via pure validator
-        let (_, base64Str) = try SCScreenshotCaptureEngine.validateAndEncode(image: cgImage, targetDisplay: targetDisplay, quality: 0.8)
+        // 5. Validate and encode image via pure validator + injected encoder
+        encoderInvocationCount += 1
+        let (_, base64Str) = try SCScreenshotCaptureEngine.validateAndEncode(image: cgImage, targetDisplay: targetDisplay, quality: 0.8, jpegEncoder: self.jpegEncoder)
 
         let capId = "cap-\(UUID().uuidString)"
         return CaptureFrameDTO(
@@ -315,7 +330,13 @@ public actor SCScreenshotCaptureEngine: DisplayCaptureEngine {
         }
     }
 
-    public static func validateAndEncode(image: CGImage, targetDisplay: DisplayInfo, quality: Double = 0.8, overrideDataSize: Int? = nil) throws -> (data: Data, base64: String) {
+    public static func validateAndEncode(
+        image: CGImage,
+        targetDisplay: DisplayInfo,
+        quality: Double = 0.8,
+        overrideDataSize: Int? = nil,
+        jpegEncoder: JPEGEncoder? = nil
+    ) throws -> (data: Data, base64: String) {
         let pixelWidth = targetDisplay.pixelWidth
         let pixelHeight = targetDisplay.pixelHeight
 
@@ -325,7 +346,8 @@ public actor SCScreenshotCaptureEngine: DisplayCaptureEngine {
             throw ComputerUseError.targetUnreachable(reason: "Captured CGImage dimensions (\(image.width)x\(image.height)) mismatch requested topology (\(pixelWidth)x\(pixelHeight))")
         }
 
-        let jpegData = try encodeToJPEG(image: image, quality: quality)
+        let encoder = jpegEncoder ?? { img, q in try encodeToJPEG(image: img, quality: q) }
+        let jpegData = try encoder(image, quality)
         let effectiveSize = overrideDataSize ?? jpegData.count
         guard effectiveSize <= 10 * 1024 * 1024 else {
             throw ComputerUseError.targetUnreachable(reason: "Captured JPEG image size (\(effectiveSize) bytes) exceeds maximum 10 MiB limit")
