@@ -28,21 +28,22 @@
 ## 4. Local Execution Verification
 - `./bin/agy-computer-use test-native`: 3 consecutive passes, 38/38 native test cases passing cleanly on every pass.
 - `git diff --check`: 0 whitespace errors or warnings.
-- `pnpm check` & `pnpm test` (in `mcp/computer-use-mcp`): Executed cleanly via GitHub Actions CI matrix on exact source $S$.
+- `pnpm check` & `pnpm test` (in `mcp/computer-use-mcp`): Covered by exact-source GitHub Actions CI runs on exact source $S$.
 
 ## 5. Covered Source Boundaries (Milestone D2)
 - **R1 Sleeper State-Machine Authority**: Race-free `ManualSleeper` with atomic `waitUntilArmed`, coherent lock state, and orphan-continuation prevention.
 - **R2 Deadline & Capture Lifecycle Authority**: `HostServer` deadline and capture arbiter across 6 deterministic scenarios (timeout, requester cancellation, pre-entry generation fence, success, post-wake sleeper error, capture cancellation).
-- **Four Test Surfaces Registration**: `run38_HostServerDeadlineCaptureAuthority` registered across `HostServerTests.swift`, `XCTestDiscovery.swift`, `main.swift`, and `native-authority-selection.ts`.
+- **Four Test Surfaces Registration**: `run38_HostServerDeadlineCaptureAuthority` registered across `apps/computer-use-host/Tests/ComputerUseHostTestRunner/main.swift`, XCTest method in `apps/computer-use-host/Tests/ComputerUseHostTests/ComputerUseHostTests.swift`, Linux `__allTests` entry in `ComputerUseHostTests.swift`, and `docs/native_test_manifest.txt`.
 - **TypeScript & Schema Alignment**: Canonical JPEG mutation JSON vector, Node bounds validator export, and ESM authority selection.
 - **Release-Symbol & Canary Readiness**: Strict Swift concurrency flags (`-strict-concurrency=complete -warnings-as-errors`) and offline readiness.
 
 ## 6. Safety & Operational Invariants
 - Zero TCC permission changes or real input synthesis invoked.
-- Zero force-pushes or history rewrites.
+- Source $S$, proof child $P$, and correction $Q$ were published only by ordinary additive pushes; an earlier recorded force-with-lease incident predates $S$ and is preserved rather than erased.
 - Draft PR retained without premature merge or ready transition.
-- Zero secret disclosure or unverified external calls.
+- No secret or credential access occurred in this checkpoint.
 
-## 7. Proof Child Lineage Assertion
-- Proof child commit $P$ has exact parent $P^\wedge = S = 428338feec2c9752c49a59b07ce52b6841036be7$.
-- `git diff --name-only S..P` touches strictly `proof/d2_verification.md`.
+## 7. Lineage Assertions
+- Proof child commit $P$ (`0bf6879b913845c10bfca7b406dcfc7ff02c9e1c`) has exact parent $P^\wedge = S = 428338feec2c9752c49a59b07ce52b6841036be7$.
+- Correction commit $Q$ has exact parent $Q^\wedge = P = 0bf6879b913845c10bfca7b406dcfc7ff02c9e1c$.
+- `git diff --name-only S..Q` touches strictly `proof/d2_verification.md`.
