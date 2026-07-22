@@ -140,7 +140,7 @@ export function parseAndClassifyPrincipal(codesignInfo, reqInfo, verificationPas
         return { classification: 'unsigned_or_invalid', details: 'Codesign verification failed' };
     }
 
-    const infoLines = (codesignInfo || '').split(/\r?\n/);
+    const infoLines = (codesignInfo || '').split('\n').map(l => l.replace(/\r$/, ''));
     const identifiers = [];
     const signatures = [];
     const teamIds = [];
@@ -235,31 +235,45 @@ export function parseAndClassifyPrincipal(codesignInfo, reqInfo, verificationPas
         return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Team signature missing Authority chain' };
     }
 
-    const reqLines = (reqInfo || '').split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
-    const designatedLines = reqLines.filter(l => l.includes('designated =>'));
+    const rawReqLines = (reqInfo || '').split('\n').map(l => l.replace(/\r$/, ''));
+    const reqLines = rawReqLines.filter(l => l.length > 0);
 
-    if (designatedLines.length !== 1) {
-        return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Must contain exactly one designated requirement record' };
+    if (reqLines.length !== 2) {
+        return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Requirement output must contain exactly two non-empty records' };
     }
 
-    const desLine = designatedLines[0];
-    if (!desLine.startsWith('designated =>')) {
-        return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'designated => line must not have a same-line prefix' };
+    const execLine = reqLines[0];
+    if (!execLine.startsWith('Executable=')) {
+        return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'First requirement record must start with Executable=' };
+    }
+    const execVal = execLine.slice(11);
+    if (execVal === '' || execVal.trim() !== execVal) {
+        return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Executable= value cannot be empty or have whitespace' };
     }
 
-    for (const rline of reqLines) {
-        if (!rline.startsWith('Executable=') && !rline.startsWith('designated =>')) {
-            return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Extra non-empty record in requirement output' };
-        }
+    const desLine = reqLines[1];
+    if (!desLine.startsWith('designated => ')) {
+        return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Second requirement record must start with designated => ' };
     }
-
-    const designatedBody = desLine.slice(13).trim();
+    const designatedBody = desLine.slice(14);
+    if (designatedBody === '' || designatedBody.trim() !== designatedBody) {
+        return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'designated => body cannot be empty or have whitespace' };
+    }
 
     if (/\bor\b/i.test(designatedBody) || designatedBody.includes('||')) {
         return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Disallowed OR or alternate clauses in designated requirement' };
     }
 
-    const predicates = designatedBody.split('and').map(p => p.trim());
+    const atoms = designatedBody.split(' and ');
+    if (atoms.join(' and ') !== designatedBody) {
+        return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Requirement body fails byte-for-byte round trip' };
+    }
+
+    for (const atom of atoms) {
+        if (atom === '' || atom.trim() !== atom) {
+            return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Requirement atom cannot be empty or have surrounding whitespace' };
+        }
+    }
 
     const expectedPred0 = `identifier "${expectedIdentifier}"`;
     const expectedPred1 = 'anchor apple generic';
@@ -274,7 +288,7 @@ export function parseAndClassifyPrincipal(codesignInfo, reqInfo, verificationPas
     let foundOid1 = false;
     let foundOid2 = false;
 
-    for (const pred of predicates) {
+    for (const pred of atoms) {
         if (pred === expectedPred0) {
             if (foundId) return { classification: 'unsigned_or_invalid', details: 'Duplicate identifier predicate' };
             foundId = true;
@@ -329,7 +343,7 @@ export async function classifyPrincipal(appPath, options = {}) {
         const { stdout, stderr } = await execRunner('codesign', ['-dv', '--verbose=4', absPath]);
         codesignInfo = (stdout || '') + (stderr || '');
     } catch (e) {
-        codesignInfo = (e.stdout || '') + (e.stderr || '') || String(e);
+        codesignInfo = (e && e.stdout || '') + (e && e.stderr || '') || String(e);
     }
 
     let reqInfo = '';
@@ -337,7 +351,7 @@ export async function classifyPrincipal(appPath, options = {}) {
         const { stdout, stderr } = await execRunner('codesign', ['-d', '-r-', absPath]);
         reqInfo = (stdout || '') + (stderr || '');
     } catch (e) {
-        reqInfo = (e.stdout || '') + (e.stderr || '');
+        reqInfo = (e && e.stdout || '') + (e && e.stderr || '') || String(e);
     }
 
     return parseAndClassifyPrincipal(codesignInfo, reqInfo, verificationPassed, options);
