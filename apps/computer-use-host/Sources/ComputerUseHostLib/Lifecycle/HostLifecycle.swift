@@ -17,16 +17,55 @@ public enum LifecycleState: Sendable, Equatable {
     case stopped
 }
 
+public protocol HostSignalSource: AnyObject, Sendable {
+    func resume()
+    func cancel()
+}
+
+public protocol HostSignalSourceFactory: Sendable {
+    func makeSignalSource(signal: Int32, queue: DispatchQueue, handler: @escaping @Sendable () -> Void) -> any HostSignalSource
+}
+
+private final class DispatchSignalSourceAdapter: HostSignalSource, @unchecked Sendable {
+    private let source: any DispatchSourceSignal
+
+    init(source: any DispatchSourceSignal) {
+        self.source = source
+    }
+
+    func resume() {
+        source.resume()
+    }
+
+    func cancel() {
+        source.cancel()
+    }
+}
+
+public struct DefaultDispatchSignalSourceFactory: HostSignalSourceFactory {
+    public init() {}
+    public func makeSignalSource(signal sig: Int32, queue: DispatchQueue, handler: @escaping @Sendable () -> Void) -> any HostSignalSource {
+        signal(sig, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: sig, queue: queue)
+        source.setEventHandler(handler: handler)
+        let adapter = DispatchSignalSourceAdapter(source: source)
+        adapter.resume()
+        return adapter
+    }
+}
+
 public final class HostLifecycle: @unchecked Sendable {
     private let listener: HostListener
+    private let signalFactory: HostSignalSourceFactory
     private let lock = NSLock()
     private var state: LifecycleState = .unstarted
-    private var sigIntSource: (any DispatchSourceSignal)?
-    private var sigTermSource: (any DispatchSourceSignal)?
+    private var sigIntSource: (any HostSignalSource)?
+    private var sigTermSource: (any HostSignalSource)?
     private var startHook: (() -> Void)?
 
-    public init(listener: HostListener, startHook: (() -> Void)? = nil) {
+    public init(listener: HostListener, signalFactory: HostSignalSourceFactory = DefaultDispatchSignalSourceFactory(), startHook: (() -> Void)? = nil) {
         self.listener = listener
+        self.signalFactory = signalFactory
         self.startHook = startHook
     }
 
@@ -37,23 +76,16 @@ public final class HostLifecycle: @unchecked Sendable {
     }
 
     public func setupSignalHandlers() {
-        signal(SIGINT, SIG_IGN)
-        signal(SIGTERM, SIG_IGN)
-
         let queue = DispatchQueue(label: "com.saariuslystoned.agy-computer-use.lifecycle")
 
-        let intSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: queue)
-        intSource.setEventHandler { [weak self] in
+        let intSource = signalFactory.makeSignalSource(signal: SIGINT, queue: queue) { [weak self] in
             self?.stop()
         }
-        intSource.resume()
         self.sigIntSource = intSource
 
-        let termSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: queue)
-        termSource.setEventHandler { [weak self] in
+        let termSource = signalFactory.makeSignalSource(signal: SIGTERM, queue: queue) { [weak self] in
             self?.stop()
         }
-        termSource.resume()
         self.sigTermSource = termSource
     }
 

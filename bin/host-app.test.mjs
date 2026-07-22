@@ -74,6 +74,8 @@ function waitForExit(proc, timeoutMs = 5000) {
 
 function spawnAndMonitor(binary, args = [], env = {}) {
     const proc = spawn(binary, args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    if (proc.stdout) proc.stdout.resume();
+    if (proc.stderr) proc.stderr.resume();
     let exited = false;
     let exitCode = null;
     let exitErr = null;
