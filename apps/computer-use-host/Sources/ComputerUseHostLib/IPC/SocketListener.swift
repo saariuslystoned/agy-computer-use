@@ -9,10 +9,13 @@ public final class SocketListener: @unchecked Sendable {
     private let server: HostServer
     private var serverFd: Int32 = -1
     private var lockFd: Int32 = -1
+    private var dirFd: Int32 = -1
     private var isRunning: Bool = false
     public private(set) var responseAttemptCount = 0
     private var boundDev: dev_t = 0
     private var boundInode: ino_t = 0
+    private var boundDirDev: dev_t = 0
+    private var boundDirInode: ino_t = 0
     private let lock = NSLock()
     private let perFrameTimeoutSec: Double
 
@@ -58,8 +61,8 @@ public final class SocketListener: @unchecked Sendable {
 
         let res = syscalls.mkdir(targetDir, 0o700)
         if res == 0 || syscalls.lastErrno == EEXIST {
-            let dirFd = syscalls.open(targetDir, O_RDONLY | O_NOFOLLOW | O_CLOEXEC, 0)
-            guard dirFd >= 0 else {
+            let openDirFd = syscalls.open(targetDir, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC, 0)
+            guard openDirFd >= 0 else {
                 let err = syscalls.lastErrno
                 if err == ELOOP {
                     throw ComputerUseError.ipcError(reason: "Refusing to follow symlink at runtime directory path: \(targetDir)")
@@ -68,10 +71,10 @@ public final class SocketListener: @unchecked Sendable {
                 }
                 throw ComputerUseError.ipcError(reason: "Failed to open runtime directory descriptor for path: \(targetDir), errno: \(err)")
             }
-            defer { _ = syscalls.close(dirFd) }
+            defer { _ = syscalls.close(openDirFd) }
 
             var openStatBuf = stat()
-            guard syscalls.fstat(dirFd, &openStatBuf) == 0 else {
+            guard syscalls.fstat(openDirFd, &openStatBuf) == 0 else {
                 throw ComputerUseError.ipcError(reason: "Failed to fstat open descriptor for runtime directory: \(targetDir)")
             }
             guard (openStatBuf.st_mode & S_IFMT) == S_IFDIR else {
@@ -95,45 +98,55 @@ public final class SocketListener: @unchecked Sendable {
 
         guard !isRunning else { return }
 
-        var boundPathForRollback: String? = nil
         var boundDevForRollback: dev_t = 0
         var boundInodeForRollback: ino_t = 0
 
         do {
             let parentDir = (socketPath as NSString).deletingLastPathComponent
+            let socketFilename = (socketPath as NSString).lastPathComponent
             try SocketListener.prepareDirectory(at: socketPath, syscalls: self.syscalls)
 
-            let dirFd = syscalls.open(parentDir, O_RDONLY | O_NOFOLLOW | O_CLOEXEC, 0)
-            guard dirFd >= 0 else {
+            let openDirFd = syscalls.open(parentDir, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC, 0)
+            guard openDirFd >= 0 else {
                 throw ComputerUseError.ipcError(reason: "Failed to open descriptor for runtime directory: \(parentDir)")
             }
-            defer { _ = syscalls.close(dirFd) }
+            self.dirFd = openDirFd
 
             var dirStat = stat()
-            guard syscalls.fstat(dirFd, &dirStat) == 0 else {
+            guard syscalls.fstat(self.dirFd, &dirStat) == 0 else {
                 throw ComputerUseError.ipcError(reason: "Failed to fstat runtime directory descriptor: \(parentDir)")
             }
+            guard (dirStat.st_mode & S_IFMT) == S_IFDIR else {
+                throw ComputerUseError.ipcError(reason: "Runtime directory descriptor is not a directory: \(parentDir)")
+            }
+            guard dirStat.st_uid == syscalls.getuid() else {
+                throw ComputerUseError.ipcError(reason: "Runtime directory owner UID \(dirStat.st_uid) does not match current user UID \(syscalls.getuid())")
+            }
+            guard (dirStat.st_mode & 0o777) == 0o700 else {
+                throw ComputerUseError.ipcError(reason: "Insecure runtime directory permissions for path: \(parentDir)")
+            }
+            self.boundDirDev = dirStat.st_dev
+            self.boundDirInode = dirStat.st_ino
 
-            let lockPath = (parentDir as NSString).appendingPathComponent("host.lock")
-            lockFd = syscalls.openat(dirFd, "host.lock", O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0o600)
+            lockFd = syscalls.openat(self.dirFd, "host.lock", O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0o600)
             guard lockFd >= 0 else {
-                throw ComputerUseError.ipcError(reason: "Failed to open or create host.lock file at \(lockPath)")
+                throw ComputerUseError.ipcError(reason: "Failed to open or create host.lock file via runtime directory descriptor")
             }
 
             let flockRes = syscalls.fileFlock(lockFd, LOCK_EX | LOCK_NB)
             guard flockRes == 0 else {
                 _ = syscalls.close(lockFd)
                 lockFd = -1
-                throw ComputerUseError.ipcError(reason: "Refusing to start: another active host instance holds flock on \(lockPath)")
+                throw ComputerUseError.ipcError(reason: "Refusing to start: another active host instance holds flock on host.lock")
             }
 
-            var statBuf = stat()
-            if syscalls.lstat(socketPath, &statBuf) == 0 {
-                guard statBuf.st_uid == syscalls.getuid() else {
-                    throw ComputerUseError.ipcError(reason: "Refusing to unlink socket owned by foreign UID \(statBuf.st_uid)")
+            var existingSockStat = stat()
+            if syscalls.fstatat(self.dirFd, socketFilename, &existingSockStat, AT_SYMLINK_NOFOLLOW) == 0 {
+                guard existingSockStat.st_uid == syscalls.getuid() else {
+                    throw ComputerUseError.ipcError(reason: "Refusing to unlink socket owned by foreign UID \(existingSockStat.st_uid)")
                 }
-                guard (statBuf.st_mode & S_IFMT) == S_IFSOCK else {
-                    throw ComputerUseError.ipcError(reason: "Refusing to unlink non-socket file at \(socketPath)")
+                guard (existingSockStat.st_mode & S_IFMT) == S_IFSOCK else {
+                    throw ComputerUseError.ipcError(reason: "Refusing to unlink non-socket file at \(socketFilename)")
                 }
 
                 let probeFd = syscalls.socket(AF_UNIX, SOCK_STREAM, 0)
@@ -198,14 +211,14 @@ public final class SocketListener: @unchecked Sendable {
                 }
 
                 var preUnlinkStat = stat()
-                guard syscalls.lstat(socketPath, &preUnlinkStat) == 0,
-                      preUnlinkStat.st_dev == statBuf.st_dev,
-                      preUnlinkStat.st_ino == statBuf.st_ino,
+                guard syscalls.fstatat(self.dirFd, socketFilename, &preUnlinkStat, AT_SYMLINK_NOFOLLOW) == 0,
+                      preUnlinkStat.st_dev == existingSockStat.st_dev,
+                      preUnlinkStat.st_ino == existingSockStat.st_ino,
                       preUnlinkStat.st_uid == syscalls.getuid(),
                       (preUnlinkStat.st_mode & S_IFMT) == S_IFSOCK else {
                     throw ComputerUseError.ipcError(reason: "Socket state changed before unlink, failing closed")
                 }
-                _ = syscalls.unlink(socketPath)
+                _ = syscalls.unlinkat(self.dirFd, socketFilename, 0)
             }
 
             serverFd = syscalls.socket(AF_UNIX, SOCK_STREAM, 0)
@@ -233,6 +246,18 @@ public final class SocketListener: @unchecked Sendable {
                 }
             }
 
+            // Pre-bind parent directory revalidation via retained descriptor
+            var preBindDirStat = stat()
+            guard syscalls.fstat(self.dirFd, &preBindDirStat) == 0,
+                  preBindDirStat.st_dev == self.boundDirDev,
+                  preBindDirStat.st_ino == self.boundDirInode,
+                  preBindDirStat.st_uid == syscalls.getuid(),
+                  (preBindDirStat.st_mode & S_IFMT) == S_IFDIR,
+                  (preBindDirStat.st_mode & 0o777) == 0o700 else {
+                throw ComputerUseError.ipcError(reason: "Pre-bind parent directory revalidation failed")
+            }
+
+            // Pathname bind (macOS POSIX lacks bindat; narrow same-UID path-swap residual guarded by pre/post fstat)
             let bindRes = withUnsafePointer(to: &addr) { ptr in
                 ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { saPtr in
                     syscalls.bind(serverFd, saPtr, socklen_t(addrLen))
@@ -243,11 +268,23 @@ public final class SocketListener: @unchecked Sendable {
                 let err = syscalls.lastErrno
                 throw ComputerUseError.ipcError(reason: "Failed to bind socket at \(socketPath): errno \(err)")
             }
-            boundPathForRollback = socketPath
+
+            // Post-bind parent directory revalidation via retained descriptor
+            var postBindDirStat = stat()
+            guard syscalls.fstat(self.dirFd, &postBindDirStat) == 0,
+                  postBindDirStat.st_dev == self.boundDirDev,
+                  postBindDirStat.st_ino == self.boundDirInode,
+                  postBindDirStat.st_uid == syscalls.getuid(),
+                  (postBindDirStat.st_mode & S_IFMT) == S_IFDIR,
+                  (postBindDirStat.st_mode & 0o777) == 0o700 else {
+                throw ComputerUseError.ipcError(reason: "Post-bind parent directory revalidation failed")
+            }
 
             var boundStat = stat()
-            guard syscalls.lstat(socketPath, &boundStat) == 0, boundStat.st_uid == syscalls.getuid(), (boundStat.st_mode & S_IFMT) == S_IFSOCK else {
-                throw ComputerUseError.ipcError(reason: "Bound socket state revalidation failed")
+            guard syscalls.fstatat(self.dirFd, socketFilename, &boundStat, AT_SYMLINK_NOFOLLOW) == 0,
+                  boundStat.st_uid == syscalls.getuid(),
+                  (boundStat.st_mode & S_IFMT) == S_IFSOCK else {
+                throw ComputerUseError.ipcError(reason: "Bound socket state revalidation failed via fstatat")
             }
             self.boundDev = boundStat.st_dev
             self.boundInode = boundStat.st_ino
@@ -266,14 +303,15 @@ public final class SocketListener: @unchecked Sendable {
                 _ = syscalls.close(serverFd)
                 serverFd = -1
             }
-            if let boundPath = boundPathForRollback, boundInodeForRollback > 0 {
+            let socketFilename = (socketPath as NSString).lastPathComponent
+            if dirFd >= 0 && boundInodeForRollback > 0 {
                 var statBuf = stat()
-                if syscalls.lstat(boundPath, &statBuf) == 0,
+                if syscalls.fstatat(dirFd, socketFilename, &statBuf, AT_SYMLINK_NOFOLLOW) == 0,
                    statBuf.st_dev == boundDevForRollback,
                    statBuf.st_ino == boundInodeForRollback,
                    statBuf.st_uid == syscalls.getuid(),
                    (statBuf.st_mode & S_IFMT) == S_IFSOCK {
-                    _ = syscalls.unlink(boundPath)
+                    _ = syscalls.unlinkat(dirFd, socketFilename, 0)
                 }
             }
             if lockFd >= 0 {
@@ -281,8 +319,14 @@ public final class SocketListener: @unchecked Sendable {
                 _ = syscalls.close(lockFd)
                 lockFd = -1
             }
+            if dirFd >= 0 {
+                _ = syscalls.close(dirFd)
+                dirFd = -1
+            }
             self.boundDev = 0
             self.boundInode = 0
+            self.boundDirDev = 0
+            self.boundDirInode = 0
             self.isRunning = false
             throw error
         }
@@ -542,10 +586,14 @@ public final class SocketListener: @unchecked Sendable {
             serverFd = -1
         }
 
-        var statBuf = stat()
-        if syscalls.lstat(socketPath, &statBuf) == 0 {
-            if statBuf.st_dev == self.boundDev && statBuf.st_ino == self.boundInode && statBuf.st_uid == syscalls.getuid() && (statBuf.st_mode & S_IFMT) == S_IFSOCK {
-                _ = syscalls.unlink(socketPath)
+        let socketFilename = (socketPath as NSString).lastPathComponent
+
+        if dirFd >= 0 {
+            var statBuf = stat()
+            if syscalls.fstatat(dirFd, socketFilename, &statBuf, AT_SYMLINK_NOFOLLOW) == 0 {
+                if statBuf.st_dev == self.boundDev && statBuf.st_ino == self.boundInode && statBuf.st_uid == syscalls.getuid() && (statBuf.st_mode & S_IFMT) == S_IFSOCK {
+                    _ = syscalls.unlinkat(dirFd, socketFilename, 0)
+                }
             }
         }
 
@@ -555,7 +603,14 @@ public final class SocketListener: @unchecked Sendable {
             lockFd = -1
         }
 
+        if dirFd >= 0 {
+            _ = syscalls.close(dirFd)
+            dirFd = -1
+        }
+
         self.boundDev = 0
         self.boundInode = 0
+        self.boundDirDev = 0
+        self.boundDirInode = 0
     }
 }

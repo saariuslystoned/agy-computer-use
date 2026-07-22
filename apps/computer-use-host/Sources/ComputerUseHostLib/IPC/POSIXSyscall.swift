@@ -17,8 +17,10 @@ public protocol POSIXSyscallProviding: Sendable {
     func getsockopt(_ socket: Int32, _ level: Int32, _ optionName: Int32, _ optionValue: UnsafeMutableRawPointer?, _ optionLen: UnsafeMutablePointer<socklen_t>?) -> Int32
     func lstat(_ path: UnsafePointer<CChar>, _ buf: UnsafeMutablePointer<stat>?) -> Int32
     func fstat(_ fd: Int32, _ buf: UnsafeMutablePointer<stat>?) -> Int32
+    func fstatat(_ dirFd: Int32, _ path: UnsafePointer<CChar>, _ buf: UnsafeMutablePointer<stat>?, _ flag: Int32) -> Int32
     func fileFlock(_ fd: Int32, _ operation: Int32) -> Int32
     func unlink(_ path: UnsafePointer<CChar>) -> Int32
+    func unlinkat(_ dirFd: Int32, _ path: UnsafePointer<CChar>, _ flag: Int32) -> Int32
     func rmdir(_ path: UnsafePointer<CChar>) -> Int32
     func mkdir(_ path: UnsafePointer<CChar>, _ mode: mode_t) -> Int32
     func close(_ fd: Int32) -> Int32
@@ -39,8 +41,14 @@ extension POSIXSyscallProviding {
     public func lstat(_ path: String, _ buf: UnsafeMutablePointer<stat>?) -> Int32 {
         path.withCString { lstat($0, buf) }
     }
+    public func fstatat(_ dirFd: Int32, _ path: String, _ buf: UnsafeMutablePointer<stat>?, _ flag: Int32 = 0) -> Int32 {
+        path.withCString { fstatat(dirFd, $0, buf, flag) }
+    }
     public func unlink(_ path: String) -> Int32 {
         path.withCString { unlink($0) }
+    }
+    public func unlinkat(_ dirFd: Int32, _ path: String, _ flag: Int32 = 0) -> Int32 {
+        path.withCString { unlinkat(dirFd, $0, flag) }
     }
     public func rmdir(_ path: String) -> Int32 {
         path.withCString { rmdir($0) }
@@ -93,11 +101,17 @@ public final class DarwinPOSIXSyscalls: POSIXSyscallProviding, @unchecked Sendab
     public func fstat(_ fd: Int32, _ buf: UnsafeMutablePointer<stat>?) -> Int32 {
         Darwin.fstat(fd, buf)
     }
+    public func fstatat(_ dirFd: Int32, _ path: UnsafePointer<CChar>, _ buf: UnsafeMutablePointer<stat>?, _ flag: Int32) -> Int32 {
+        Darwin.fstatat(dirFd, path, buf, flag)
+    }
     public func fileFlock(_ fd: Int32, _ operation: Int32) -> Int32 {
         agy_flock(fd, operation)
     }
     public func unlink(_ path: UnsafePointer<CChar>) -> Int32 {
         Darwin.unlink(path)
+    }
+    public func unlinkat(_ dirFd: Int32, _ path: UnsafePointer<CChar>, _ flag: Int32) -> Int32 {
+        Darwin.unlinkat(dirFd, path, flag)
     }
     public func rmdir(_ path: UnsafePointer<CChar>) -> Int32 {
         Darwin.rmdir(path)

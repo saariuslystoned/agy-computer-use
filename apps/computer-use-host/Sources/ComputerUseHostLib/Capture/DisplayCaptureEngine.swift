@@ -235,6 +235,8 @@ public actor SCScreenshotCaptureEngine: DisplayCaptureEngine {
 
                 if segLen != 8 + 3 * numComponents || offset + 2 + segLen > data.count { return nil }
                 if width <= 0 || height <= 0 { return nil }
+                let (totalPixels, overflow) = width.multipliedReportingOverflow(by: height)
+                if overflow || totalPixels > 64_000_000 { return nil }
                 if numComponents != 1 && numComponents != 3 && numComponents != 4 { return nil }
 
                 for i in 0..<numComponents {
