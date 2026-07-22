@@ -596,6 +596,7 @@ public final class ScriptedPOSIXSyscalls: POSIXSyscallProviding, @unchecked Send
     public var lstatHook: ((UnsafePointer<CChar>, UnsafeMutablePointer<stat>?) -> Int32?)?
     public var openHook: ((UnsafePointer<CChar>, Int32, mode_t) -> Int32?)?
     public var closeHook: ((Int32) -> Int32?)?
+    public var shutdownHook: ((Int32, Int32) -> Int32?)?
 
     public var acceptCallCount: Int = 0
     public var readCallCount: Int = 0
@@ -604,6 +605,8 @@ public final class ScriptedPOSIXSyscalls: POSIXSyscallProviding, @unchecked Send
     public var closeCallCount: Int = 0
     public var bindCallCount: Int = 0
     public var listenCallCount: Int = 0
+    public var shutdownCallCount: Int = 0
+    public var shutdownCalls: [(fd: Int32, how: Int32)] = []
     public var unlinkedFiles: [String] = []
     public var openedDescriptors: [Int32] = []
     public var closedDescriptors: [Int32] = []
@@ -846,7 +849,19 @@ public final class ScriptedPOSIXSyscalls: POSIXSyscallProviding, @unchecked Send
     public func connect(_ socket: Int32, _ address: UnsafePointer<sockaddr>?, _ addressLen: socklen_t) -> Int32 { clearErrno(); return underlying.connect(socket, address, addressLen) }
     public func poll(_ fds: UnsafeMutablePointer<pollfd>?, _ nfds: nfds_t, _ timeout: Int32) -> Int32 { clearErrno(); return underlying.poll(fds, nfds, timeout) }
     public func getpeereid(_ socket: Int32, _ uid: UnsafeMutablePointer<uid_t>?, _ gid: UnsafeMutablePointer<gid_t>?) -> Int32 { clearErrno(); return underlying.getpeereid(socket, uid, gid) }
-    public func shutdown(_ socket: Int32, _ how: Int32) -> Int32 { clearErrno(); return underlying.shutdown(socket, how) }
+    public func shutdown(_ socket: Int32, _ how: Int32) -> Int32 {
+        clearErrno()
+        lock.lock()
+        shutdownCallCount += 1
+        shutdownCalls.append((fd: socket, how: how))
+        let hook = shutdownHook
+        lock.unlock()
+        if let res = hook?(socket, how) {
+            if res != 0 { setErrno(ENOTCONN) }
+            return res
+        }
+        return underlying.shutdown(socket, how)
+    }
 }
 
 public final class FakeScreenRecordingAuthorizer: ScreenRecordingAuthorizing, @unchecked Sendable {
@@ -1170,9 +1185,27 @@ public final class FakeCaptureEngine: DisplayCaptureEngine, @unchecked Sendable 
             rotation: display.rotation
         )
 
-        let (_, b64) = try SCScreenshotCaptureEngine.validateAndEncode(image: cgImg, targetDisplay: targetDisp, quality: 0.8)
+        let (_, b64, byteLen, sha256Str) = try SCScreenshotCaptureEngine.validateAndEncode(image: cgImg, targetDisplay: targetDisp, quality: 0.8)
         let versionToUse = customTopologyVersion ?? topology.version
-        let finalB64 = largePayloadBytes > 0 ? b64 + String(repeating: "A", count: max(0, largePayloadBytes - b64.count)) : b64
+        let finalB64: String
+        let finalByteLen: Int
+        let finalSha256: String
+
+        if largePayloadBytes > 0 {
+            finalB64 = b64 + String(repeating: "A", count: max(0, largePayloadBytes - b64.count))
+            if let decoded = Data(base64Encoded: finalB64) {
+                finalByteLen = decoded.count
+                let digest = SHA256.hash(data: decoded)
+                finalSha256 = digest.map { String(format: "%02x", $0) }.joined()
+            } else {
+                finalByteLen = byteLen
+                finalSha256 = sha256Str
+            }
+        } else {
+            finalB64 = b64
+            finalByteLen = byteLen
+            finalSha256 = sha256Str
+        }
 
         return CaptureFrameDTO(
             captureId: "cap-test-\(UUID().uuidString)",
@@ -1185,7 +1218,9 @@ public final class FakeCaptureEngine: DisplayCaptureEngine, @unchecked Sendable 
             pixelWidth: width,
             pixelHeight: height,
             imageFormat: "jpeg",
-            imageDataBase64: finalB64
+            imageDataBase64: finalB64,
+            imageByteLength: finalByteLen,
+            imageSha256: finalSha256
         )
     }
 }
@@ -5213,16 +5248,24 @@ public struct ComputerUseHostTestRunner {
 
         // Connect client and send status request
         let clientFd = try connectToSocket(at: listener39.socketPath)
+        defer { _ = scripted39.close(clientFd) }
+
         try sendIPCRequest(IPCRequest(id: "lc-req-1", method: "status"), to: clientFd)
         let resp = try readIPCResponse(from: clientFd)
         assertEqual(resp.id, "lc-req-1")
         assertTrue(resp.success)
-        close(clientFd)
+
+        assertEqual(scripted39.shutdownCallCount, 0, "No shutdown call before stop")
 
         // Idempotent stop request
         lifecycle39.stop()
-        lifecycle39.stop() // repeat stop call
+        lifecycle39.stop() // repeat stop call must add no extra shutdown call
         assertTrue(lifecycle39.isStoppedState)
+
+        assertEqual(scripted39.shutdownCallCount, 1, "Exactly 1 shutdown call on stop")
+        if let firstCall = scripted39.shutdownCalls.first {
+            assertEqual(firstCall.how, SHUT_RDWR, "Shutdown call must use SHUT_RDWR")
+        }
 
         // Accept loop task finishes cleanly without error
         let loopResult = await loopTask.result
@@ -5234,6 +5277,33 @@ public struct ComputerUseHostTestRunner {
         }
 
         assertTrue(scripted39.areAllDescriptorsClosed, "All descriptors must be closed after lifecycle stop")
+
+        // Test injected shutdown failure scenario: shutdown fails but close & unlink succeed
+        let scripted39_fail = ScriptedPOSIXSyscalls()
+        let sockPath39_fail = "/tmp/agy-test-c39f-\(UUID().uuidString)/host.sock"
+        try SocketListener.prepareDirectory(at: sockPath39_fail, syscalls: scripted39_fail)
+
+        scripted39_fail.shutdownHook = { _, _ in
+            return -1 // inject ENOTCONN failure
+        }
+
+        let listener39_fail = SocketListener(
+            socketPath: sockPath39_fail,
+            server: HostServer(
+                authorizer: FakeScreenRecordingAuthorizer(granted: true),
+                topologyProvider: FakeDisplayTopologyProvider(),
+                captureEngine: FakeCaptureEngine(),
+                axEngine: DisabledAXInspector(),
+                inputEngine: DisabledInputInjector()
+            ),
+            syscalls: scripted39_fail
+        )
+        try listener39_fail.start()
+        listener39_fail.stop()
+
+        assertEqual(listener39_fail.lastStopReport?.shutdownResult, -1, "Injected shutdown failure must be reflected in stop report")
+        assertTrue(listener39_fail.lastStopReport?.socketUnlinked == true, "Socket unlinking must succeed even when shutdown reports error")
+        assertTrue(scripted39_fail.areAllDescriptorsClosed, "All descriptors must be closed even when shutdown fails")
 
         // Second bind on clean path must succeed
         let listener39b = SocketListener(

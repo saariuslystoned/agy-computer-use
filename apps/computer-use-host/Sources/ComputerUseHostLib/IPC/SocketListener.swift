@@ -592,6 +592,33 @@ public final class SocketListener: @unchecked Sendable {
         }
     }
 
+    public struct StopReport: Sendable, Equatable {
+        public let shutdownResult: Int32
+        public let shutdownErrno: Int32
+        public let closeResult: Int32
+        public let closeErrno: Int32
+        public let socketUnlinked: Bool
+        public let lockUnlocked: Bool
+
+        public init(
+            shutdownResult: Int32,
+            shutdownErrno: Int32,
+            closeResult: Int32,
+            closeErrno: Int32,
+            socketUnlinked: Bool,
+            lockUnlocked: Bool
+        ) {
+            self.shutdownResult = shutdownResult
+            self.shutdownErrno = shutdownErrno
+            self.closeResult = closeResult
+            self.closeErrno = closeErrno
+            self.socketUnlinked = socketUnlinked
+            self.lockUnlocked = lockUnlocked
+        }
+    }
+
+    public private(set) var lastStopReport: StopReport?
+
     public func stop() {
         lock.lock()
         defer { lock.unlock() }
@@ -599,25 +626,40 @@ public final class SocketListener: @unchecked Sendable {
         guard isRunning else { return }
         isRunning = false
 
+        var shutRes: Int32 = 0
+        var shutErr: Int32 = 0
+        var closeRes: Int32 = 0
+        var closeErr: Int32 = 0
+
         if serverFd >= 0 {
-            _ = syscalls.shutdown(serverFd, SHUT_RDWR)
-            _ = syscalls.close(serverFd)
+            shutRes = syscalls.shutdown(serverFd, SHUT_RDWR)
+            if shutRes != 0 {
+                shutErr = syscalls.lastErrno
+            }
+            closeRes = syscalls.close(serverFd)
+            if closeRes != 0 {
+                closeErr = syscalls.lastErrno
+            }
             serverFd = -1
         }
 
         let socketFilename = (socketPath as NSString).lastPathComponent
+        var unlinked = false
 
         if dirFd >= 0 {
             var statBuf = stat()
             if syscalls.fstatat(dirFd, socketFilename, &statBuf, AT_SYMLINK_NOFOLLOW) == 0 {
                 if statBuf.st_dev == self.boundDev && statBuf.st_ino == self.boundInode && statBuf.st_uid == syscalls.getuid() && (statBuf.st_mode & S_IFMT) == S_IFSOCK {
-                    _ = syscalls.unlinkat(dirFd, socketFilename, 0)
+                    let unlRes = syscalls.unlinkat(dirFd, socketFilename, 0)
+                    unlinked = (unlRes == 0)
                 }
             }
         }
 
+        var unlocked = false
         if lockFd >= 0 {
-            _ = syscalls.fileFlock(lockFd, LOCK_UN)
+            let unlRes = syscalls.fileFlock(lockFd, LOCK_UN)
+            unlocked = (unlRes == 0)
             _ = syscalls.close(lockFd)
             lockFd = -1
         }
@@ -631,5 +673,13 @@ public final class SocketListener: @unchecked Sendable {
         self.boundInode = 0
         self.boundDirDev = 0
         self.boundDirInode = 0
+        self.lastStopReport = StopReport(
+            shutdownResult: shutRes,
+            shutdownErrno: shutErr,
+            closeResult: closeRes,
+            closeErrno: closeErr,
+            socketUnlinked: unlinked,
+            lockUnlocked: unlocked
+        )
     }
 }
