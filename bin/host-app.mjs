@@ -4,65 +4,89 @@ import path from 'node:path';
 import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 
 const execFileAsync = promisify(execFile);
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const REPO_ROOT = path.resolve(__dirname, '..');
 
 export function validateStageTargetDir(targetDir, allowedRoot) {
     const resolvedRoot = path.resolve(allowedRoot);
 
-    if (!fs.existsSync(resolvedRoot)) {
-        throw new Error(`Allowed root ${resolvedRoot} does not exist`);
+    let rootLstat;
+    try {
+        rootLstat = fs.lstatSync(resolvedRoot);
+    } catch (e) {
+        if (e.code === 'ENOENT') {
+            throw new Error(`Allowed root ${resolvedRoot} does not exist`);
+        }
+        throw e;
     }
 
-    const rootLstat = fs.lstatSync(resolvedRoot);
     if (rootLstat.isSymbolicLink()) {
         throw new Error(`Allowed root ${resolvedRoot} cannot be a symbolic link`);
     }
     if (!rootLstat.isDirectory()) {
         throw new Error(`Allowed root ${resolvedRoot} must be a directory, not a regular file or non-directory`);
     }
+    if ((rootLstat.mode & 0o077) !== 0) {
+        throw new Error(`Allowed root ${resolvedRoot} must have private 0700 permissions`);
+    }
+
+    const rawTarget = path.resolve(targetDir);
+
+    if (rawTarget === resolvedRoot) {
+        throw new Error(`Target directory ${rawTarget} cannot be equal to allowed root ${resolvedRoot}`);
+    }
+
+    const lexRel = path.relative(resolvedRoot, rawTarget);
+    if (lexRel === '' || lexRel.startsWith('..') || path.isAbsolute(lexRel)) {
+        throw new Error(`Target directory ${rawTarget} is not strictly contained within allowed root ${resolvedRoot}`);
+    }
+
+    let curr = resolvedRoot;
+    const parts = lexRel.split(path.sep);
+    for (const part of parts) {
+        curr = path.join(curr, part);
+        try {
+            const lstat = fs.lstatSync(curr);
+            if (lstat.isSymbolicLink()) {
+                throw new Error(`Target directory component ${curr} cannot be a symbolic link`);
+            }
+        } catch (e) {
+            if (e.code !== 'ENOENT') throw e;
+        }
+    }
 
     const canonicalRoot = fs.realpathSync(resolvedRoot);
-    let resolvedTarget = path.resolve(targetDir);
-
-    let currTarget = resolvedTarget;
+    let currTarget = rawTarget;
     let tail = [];
     while (!fs.existsSync(currTarget) && currTarget !== path.dirname(currTarget)) {
         tail.unshift(path.basename(currTarget));
         currTarget = path.dirname(currTarget);
     }
+    let canonicalTarget = rawTarget;
     if (fs.existsSync(currTarget)) {
         const canonicalCurr = fs.realpathSync(currTarget);
-        resolvedTarget = path.join(canonicalCurr, ...tail);
+        canonicalTarget = path.join(canonicalCurr, ...tail);
     }
 
-    if (resolvedTarget === canonicalRoot) {
-        throw new Error(`Target directory ${resolvedTarget} cannot be equal to allowed root ${canonicalRoot}`);
+    const canRel = path.relative(canonicalRoot, canonicalTarget);
+    if (canRel === '' || canRel.startsWith('..') || path.isAbsolute(canRel)) {
+        throw new Error(`Target directory ${canonicalTarget} is not strictly contained within canonical root ${canonicalRoot}`);
     }
 
-    const rel = path.relative(canonicalRoot, resolvedTarget);
-    if (rel.startsWith('..') || path.isAbsolute(rel) || rel === '') {
-        throw new Error(`Target directory ${resolvedTarget} is not strictly contained within allowed root ${canonicalRoot}`);
-    }
-
-    let curr = canonicalRoot;
-    const parts = rel.split(path.sep);
-    for (const part of parts) {
-        curr = path.join(curr, part);
-        if (fs.existsSync(curr)) {
-            const lstat = fs.lstatSync(curr);
-            if (lstat.isSymbolicLink()) {
-                throw new Error(`Target directory component ${curr} cannot be a symbolic link`);
-            }
-        }
-    }
-
-    return resolvedTarget;
+    return rawTarget;
 }
 
 export async function stageHostApp(options = {}) {
-    const projectRoot = options.projectRoot || process.cwd();
-    const root = path.resolve(projectRoot);
+    if (options.projectRoot) {
+        throw new Error('Obsolete projectRoot option is not allowed for production staging');
+    }
+
+    const root = REPO_ROOT;
     const hostPackageDir = path.join(root, 'apps/computer-use-host');
 
     let stagedAppDir;
@@ -78,6 +102,16 @@ export async function stageHostApp(options = {}) {
         stagingRoot = path.join(hostPackageDir, '.build/staged');
         if (!fs.existsSync(stagingRoot)) {
             fs.mkdirSync(stagingRoot, { recursive: true, mode: 0o700 });
+        }
+        const rootLstat = fs.lstatSync(stagingRoot);
+        if (rootLstat.isSymbolicLink()) {
+            throw new Error(`Staging root ${stagingRoot} cannot be a symbolic link`);
+        }
+        if (!rootLstat.isDirectory()) {
+            throw new Error(`Staging root ${stagingRoot} must be a directory`);
+        }
+        if ((rootLstat.mode & 0o077) !== 0) {
+            fs.chmodSync(stagingRoot, 0o700);
         }
         stagedAppDir = path.join(stagingRoot, 'ComputerUseHost.app');
         validateStageTargetDir(stagedAppDir, stagingRoot);
@@ -105,6 +139,10 @@ export async function stageHostApp(options = {}) {
         if (!fs.existsSync(releaseBinarySource)) {
             throw new Error(`Release binary does not exist at ${releaseBinarySource}; cannot stage without build.`);
         }
+    }
+
+    if (typeof options.beforeRemovalHook === 'function') {
+        await options.beforeRemovalHook();
     }
 
     // Revalidate target immediately before removal
