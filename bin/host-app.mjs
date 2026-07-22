@@ -8,30 +8,49 @@ import { promisify } from 'node:util';
 const execFileAsync = promisify(execFile);
 
 export function validateStageTargetDir(targetDir, allowedRoot) {
-    const resolvedTarget = path.resolve(targetDir);
     const resolvedRoot = path.resolve(allowedRoot);
+    let resolvedTarget = path.resolve(targetDir);
 
-    if (resolvedTarget === resolvedRoot) {
-        throw new Error(`Target directory ${resolvedTarget} cannot be equal to allowed root ${resolvedRoot}`);
+    if (!fs.existsSync(resolvedRoot)) {
+        throw new Error(`Allowed root ${resolvedRoot} does not exist`);
     }
 
-    const rel = path.relative(resolvedRoot, resolvedTarget);
+    const rootLstat = fs.lstatSync(resolvedRoot);
+    if (rootLstat.isSymbolicLink()) {
+        throw new Error(`Allowed root ${resolvedRoot} cannot be a symbolic link`);
+    }
+
+    const canonicalRoot = fs.realpathSync(resolvedRoot);
+
+    // Canonicalize existing target or deepest existing parent of target
+    let currTarget = resolvedTarget;
+    let tail = [];
+    while (!fs.existsSync(currTarget) && currTarget !== path.dirname(currTarget)) {
+        tail.unshift(path.basename(currTarget));
+        currTarget = path.dirname(currTarget);
+    }
+    if (fs.existsSync(currTarget)) {
+        const canonicalCurr = fs.realpathSync(currTarget);
+        resolvedTarget = path.join(canonicalCurr, ...tail);
+    }
+
+    if (resolvedTarget === canonicalRoot) {
+        throw new Error(`Target directory ${resolvedTarget} cannot be equal to allowed root ${canonicalRoot}`);
+    }
+
+    const rel = path.relative(canonicalRoot, resolvedTarget);
     if (rel.startsWith('..') || path.isAbsolute(rel) || rel === '') {
-        throw new Error(`Target directory ${resolvedTarget} is not strictly contained within allowed root ${resolvedRoot}`);
+        throw new Error(`Target directory ${resolvedTarget} is not strictly contained within allowed root ${canonicalRoot}`);
     }
 
-    let curr = resolvedRoot;
+    let curr = canonicalRoot;
     const parts = rel.split(path.sep);
     for (const part of parts) {
         curr = path.join(curr, part);
         if (fs.existsSync(curr)) {
             const lstat = fs.lstatSync(curr);
             if (lstat.isSymbolicLink()) {
-                const real = fs.realpathSync(curr);
-                const realRel = path.relative(resolvedRoot, real);
-                if (realRel.startsWith('..') || path.isAbsolute(realRel)) {
-                    throw new Error(`Target directory ${resolvedTarget} traverses symlink ${curr} pointing outside allowed root ${resolvedRoot}`);
-                }
+                throw new Error(`Target directory component ${curr} cannot be a symbolic link`);
             }
         }
     }
@@ -81,6 +100,12 @@ export async function stageHostApp(options = {}) {
         }
     }
 
+    // Revalidate target immediately before removal
+    if (options.targetDir) {
+        const testRoot = options.allowedTestRoot || options.testRoot;
+        validateStageTargetDir(options.targetDir, testRoot);
+    }
+
     if (fs.existsSync(stagedAppDir)) {
         fs.rmSync(stagedAppDir, { recursive: true, force: true });
     }
@@ -112,31 +137,32 @@ export function parseAndClassifyPrincipal(codesignInfo, reqInfo, verificationPas
     }
 
     const infoLines = (codesignInfo || '').split('\n').map(l => l.trim());
-    let identifier = null;
-    let signature = null;
-    let teamId = null;
-    let authority = null;
-    let hasContradictoryMeta = false;
+    const identifiers = [];
+    const signatures = [];
+    const teamIds = [];
+    const authorities = [];
 
     for (const line of infoLines) {
         if (line.startsWith('Identifier=')) {
-            if (identifier !== null && identifier !== line.slice(11).trim()) hasContradictoryMeta = true;
-            identifier = line.slice(11).trim();
+            identifiers.push(line.slice(11).trim());
         } else if (line.startsWith('Signature=')) {
-            if (signature !== null && signature !== line.slice(10).trim()) hasContradictoryMeta = true;
-            signature = line.slice(10).trim();
+            signatures.push(line.slice(10).trim());
         } else if (line.startsWith('TeamIdentifier=')) {
-            if (teamId !== null && teamId !== line.slice(15).trim()) hasContradictoryMeta = true;
-            teamId = line.slice(15).trim();
+            teamIds.push(line.slice(15).trim());
         } else if (line.startsWith('Authority=')) {
-            if (authority !== null && authority !== line.slice(10).trim()) hasContradictoryMeta = true;
-            authority = line.slice(10).trim();
+            authorities.push(line.slice(10).trim());
         }
     }
 
-    if (hasContradictoryMeta) {
-        return { classification: 'unsigned_or_invalid', details: 'Contradictory signature metadata' };
+    // Check for duplicate metadata keys
+    if (identifiers.length > 1 || signatures.length > 1 || teamIds.length > 1 || authorities.length > 1) {
+        return { classification: 'unsigned_or_invalid', details: 'Duplicate metadata keys detected' };
     }
+
+    const identifier = identifiers[0] || null;
+    const signature = signatures[0] || null;
+    const teamId = teamIds[0] || null;
+    const authority = authorities[0] || null;
 
     const expectedIdentifier = 'com.saariuslystoned.agy-computer-use.host';
     if (!identifier || identifier !== expectedIdentifier) {
@@ -148,10 +174,18 @@ export function parseAndClassifyPrincipal(codesignInfo, reqInfo, verificationPas
         };
     }
 
-    const isExplicitAdHocSignature = (signature === 'adhoc') || (authority === 'adhoc') || (authority && authority.includes('adhoc'));
-    const isTeamNotSet = (teamId === 'not set');
+    if (!signature) {
+        return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Missing signature line' };
+    }
 
-    if (isExplicitAdHocSignature && (isTeamNotSet || teamId === null)) {
+    // Exact ad-hoc checks
+    if (signature === 'adhoc') {
+        if (teamId !== 'not set') {
+            return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Ad-hoc signature cannot have non-"not set" TeamIdentifier' };
+        }
+        if (authority && authority !== 'not set' && authority !== 'adhoc') {
+            return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Ad-hoc signature cannot have conflicting authority' };
+        }
         if (options.requireStable) {
             return {
                 classification: 'ad_hoc_ephemeral',
@@ -168,13 +202,14 @@ export function parseAndClassifyPrincipal(codesignInfo, reqInfo, verificationPas
         };
     }
 
+    // Non-ad-hoc team signature checks
+    const isRecognizedTeamSignature = /^size=\d+$/.test(signature);
+    if (!isRecognizedTeamSignature) {
+        return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Unrecognized signature format' };
+    }
+
     if (!teamId || teamId === 'not set') {
-        return {
-            classification: 'unsigned_or_invalid',
-            identifier,
-            teamId: null,
-            details: 'Non-ad-hoc signature missing valid TeamIdentifier'
-        };
+        return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Team signature missing TeamIdentifier' };
     }
 
     const reqStr = (reqInfo || '').trim();
@@ -188,30 +223,25 @@ export function parseAndClassifyPrincipal(codesignInfo, reqInfo, verificationPas
         return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Disallowed OR or alternate clauses in designated requirement' };
     }
 
-    const hasExactId = designatedBody.includes(`identifier "${expectedIdentifier}"`);
-    const hasExactTeam = designatedBody.includes(`certificate leaf[subject.OU] = "${teamId}"`);
-
-    const idMatches = designatedBody.match(/identifier\s+"([^"]+)"/g) || [];
-    const teamMatches = designatedBody.match(/certificate\s+leaf\[subject\.OU\]\s*=\s*"([^"]+)"/g) || [];
-
-    if (idMatches.length !== 1 || teamMatches.length !== 1) {
-        return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Duplicate or contradictory requirement predicates' };
+    // Parse exact conjunction predicates: identifier "<expected>", anchor apple generic, certificate leaf[subject.OU] = "<teamId>"
+    const predicates = designatedBody.split('and').map(p => p.trim());
+    if (predicates.length !== 3) {
+        return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Requirement must contain exactly three conjunctive predicates' };
     }
 
-    if (hasExactId && hasExactTeam) {
-        return {
-            classification: 'stable_team_signed_candidate',
-            identifier,
-            teamId,
-            details: 'Valid team signature candidate'
-        };
+    const expectedPred0 = `identifier "${expectedIdentifier}"`;
+    const expectedPred1 = 'anchor apple generic';
+    const expectedPred2 = `certificate leaf[subject.OU] = "${teamId}"`;
+
+    if (predicates[0] !== expectedPred0 || predicates[1] !== expectedPred1 || predicates[2] !== expectedPred2) {
+        return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Designated requirement predicates do not match exact canonical conjunction' };
     }
 
     return {
-        classification: 'unsigned_or_invalid',
+        classification: 'stable_team_signed_candidate',
         identifier,
         teamId,
-        details: 'Non-ad-hoc signature missing required team designated requirement'
+        details: 'Valid team signature candidate'
     };
 }
 

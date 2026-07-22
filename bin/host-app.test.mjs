@@ -13,11 +13,16 @@ function computeTreeDigest(dirPath) {
         for (const item of items) {
             const fullPath = path.join(current, item.name);
             const relPath = path.relative(dirPath, fullPath);
-            if (item.isDirectory()) {
-                entries.push({ relPath, isFile: false });
+            const lst = fs.lstatSync(fullPath);
+            const mode = lst.mode & 0o777;
+            let typeStr = 'other';
+            if (lst.isFile()) typeStr = 'file';
+            else if (lst.isDirectory()) typeStr = 'directory';
+            else if (lst.isSymbolicLink()) typeStr = 'symlink';
+
+            entries.push({ relPath, typeStr, mode, fullPath, isFile: lst.isFile() });
+            if (lst.isDirectory()) {
                 walk(fullPath);
-            } else if (item.isFile()) {
-                entries.push({ relPath, isFile: true, fullPath });
             }
         }
     }
@@ -26,7 +31,7 @@ function computeTreeDigest(dirPath) {
 
     const hash = crypto.createHash('sha256');
     for (const entry of entries) {
-        hash.update(entry.relPath);
+        hash.update(`${entry.relPath}:${entry.typeStr}:${entry.mode}:`);
         if (entry.isFile) {
             hash.update(fs.readFileSync(entry.fullPath));
         }
@@ -161,7 +166,7 @@ test('RP-2: Pure classifier authority for 13 principal states', async (t) => {
     });
 
     await t.test('3. Exact valid team candidate -> stable_team_signed_candidate', () => {
-        const codesignOutput = 'Identifier=com.saariuslystoned.agy-computer-use.host\nSignature=signed\nTeamIdentifier=TEAM123456\nAuthority=Developer ID Application: Test (TEAM123456)';
+        const codesignOutput = 'Identifier=com.saariuslystoned.agy-computer-use.host\nSignature=size=4520\nTeamIdentifier=TEAM123456\nAuthority=Developer ID Application: Test (TEAM123456)';
         const reqOutput = 'designated => identifier "com.saariuslystoned.agy-computer-use.host" and anchor apple generic and certificate leaf[subject.OU] = "TEAM123456"';
         const res = parseAndClassifyPrincipal(codesignOutput, reqOutput, true);
         assert.equal(res.classification, 'stable_team_signed_candidate');
@@ -251,7 +256,19 @@ test('E2-P2: Component-aware stage target directory validation discriminators', 
 
         // 4. Valid nested target passes
         const validSubdir = path.join(testRoot, 'sub/target.app');
-        assert.equal(validateStageTargetDir(validSubdir, testRoot), path.resolve(validSubdir));
+        assert.equal(validateStageTargetDir(validSubdir, testRoot), path.join(fs.realpathSync(testRoot), 'sub/target.app'));
+
+        // 5. Symlinked allowed root pointing outside rejection & mutant proof
+        const realOutsideDir = fs.mkdtempSync('/tmp/agy-outside-real-');
+        const outsideSentinel = path.join(realOutsideDir, 'sentinel.txt');
+        fs.writeFileSync(outsideSentinel, 'SAFE');
+
+        const symlinkRoot = path.join(testRoot, 'symlink-root');
+        fs.symlinkSync(realOutsideDir, symlinkRoot);
+
+        assert.throws(() => validateStageTargetDir(path.join(symlinkRoot, 'sub.app'), symlinkRoot), /cannot be a symbolic link/);
+        assert.equal(fs.existsSync(outsideSentinel), true, 'Outside sentinel must survive symlinked root rejection');
+        fs.rmSync(realOutsideDir, { recursive: true, force: true });
     } finally {
         fs.rmSync(testRoot, { recursive: true, force: true });
     }
