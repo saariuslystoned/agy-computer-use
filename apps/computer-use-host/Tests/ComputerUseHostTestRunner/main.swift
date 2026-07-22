@@ -3,6 +3,9 @@ import CoreGraphics
 import ImageIO
 import CryptoKit
 import ComputerUseHostLib
+#if canImport(ScreenCaptureKit)
+import ScreenCaptureKit
+#endif
 
 private final class AtomicCounter: @unchecked Sendable {
     private var val: Int = 0
@@ -149,13 +152,9 @@ public actor ManualSleeper: Sleeper {
     }
 
     public func cancelAll() {
-        let order = pendingOrder
-        pendingOrder.removeAll()
-        for id in order {
-            if case .pending(let continuation) = waiters[id] {
-                waiters.removeValue(forKey: id)
-                continuation.resume(throwing: CancellationError())
-            }
+        let keys = Array(waiters.keys)
+        for id in keys {
+            cancel(id: id)
         }
     }
 
@@ -195,6 +194,8 @@ public final class ScriptedPOSIXSyscalls: POSIXSyscallProviding, @unchecked Send
     public var unlinkatCallCount: Int = 0
     public var closeCallCount: Int = 0
     public var unlinkedFiles: [String] = []
+    public var openedDescriptors: [Int32] = []
+    public var closedDescriptors: [Int32] = []
 
     public init() {}
 
@@ -222,7 +223,13 @@ public final class ScriptedPOSIXSyscalls: POSIXSyscallProviding, @unchecked Send
         let hook = acceptHook
         lock.unlock()
         if let res = hook?(socket, address, addressLen) { return res }
-        return underlying.accept(socket, address, addressLen)
+        let fd = underlying.accept(socket, address, addressLen)
+        if fd >= 0 {
+            lock.lock()
+            openedDescriptors.append(fd)
+            lock.unlock()
+        }
+        return fd
     }
 
     public func read(_ fd: Int32, _ buf: UnsafeMutableRawPointer?, _ count: Int) -> Int {
@@ -252,9 +259,36 @@ public final class ScriptedPOSIXSyscalls: POSIXSyscallProviding, @unchecked Send
     }
 
     public func bind(_ socket: Int32, _ address: UnsafePointer<sockaddr>?, _ addressLen: socklen_t) -> Int32 { clearErrno(); return underlying.bind(socket, address, addressLen) }
-    public func socket(_ domain: Int32, _ type: Int32, _ protocol: Int32) -> Int32 { clearErrno(); return underlying.socket(domain, type, `protocol`) }
-    public func open(_ path: UnsafePointer<CChar>, _ oflag: Int32, _ mode: mode_t) -> Int32 { clearErrno(); return underlying.open(path, oflag, mode) }
-    public func openat(_ dirFd: Int32, _ path: UnsafePointer<CChar>, _ oflag: Int32, _ mode: mode_t) -> Int32 { clearErrno(); return underlying.openat(dirFd, path, oflag, mode) }
+    public func socket(_ domain: Int32, _ type: Int32, _ protocol: Int32) -> Int32 {
+        clearErrno()
+        let fd = underlying.socket(domain, type, `protocol`)
+        if fd >= 0 {
+            lock.lock()
+            openedDescriptors.append(fd)
+            lock.unlock()
+        }
+        return fd
+    }
+    public func open(_ path: UnsafePointer<CChar>, _ oflag: Int32, _ mode: mode_t) -> Int32 {
+        clearErrno()
+        let fd = underlying.open(path, oflag, mode)
+        if fd >= 0 {
+            lock.lock()
+            openedDescriptors.append(fd)
+            lock.unlock()
+        }
+        return fd
+    }
+    public func openat(_ dirFd: Int32, _ path: UnsafePointer<CChar>, _ oflag: Int32, _ mode: mode_t) -> Int32 {
+        clearErrno()
+        let fd = underlying.openat(dirFd, path, oflag, mode)
+        if fd >= 0 {
+            lock.lock()
+            openedDescriptors.append(fd)
+            lock.unlock()
+        }
+        return fd
+    }
     public func fcntl(_ fd: Int32, _ cmd: Int32, _ arg: Int32) -> Int32 { clearErrno(); return underlying.fcntl(fd, cmd, arg) }
     public func getsockopt(_ socket: Int32, _ level: Int32, _ optionName: Int32, _ optionValue: UnsafeMutableRawPointer?, _ optionLen: UnsafeMutablePointer<socklen_t>?) -> Int32 { clearErrno(); return underlying.getsockopt(socket, level, optionName, optionValue, optionLen) }
     public func lstat(_ path: UnsafePointer<CChar>, _ buf: UnsafeMutablePointer<stat>?) -> Int32 { clearErrno(); return underlying.lstat(path, buf) }
@@ -276,6 +310,7 @@ public final class ScriptedPOSIXSyscalls: POSIXSyscallProviding, @unchecked Send
         clearErrno()
         lock.lock()
         closeCallCount += 1
+        closedDescriptors.append(fd)
         lock.unlock()
         return underlying.close(fd)
     }
@@ -1258,7 +1293,7 @@ public struct ComputerUseHostTestRunner {
             (0, 100),
             (-1, -1),
             (Int.max, Int.max),
-            (8001, 8000)
+            (5213, 12277) // Exact 64,000,001 (64M+1)
         ]
 
         for (pw, ph) in invalidDimensions {
@@ -1290,6 +1325,66 @@ public struct ComputerUseHostTestRunner {
             assertEqual(await engine18_granted.frameworkInvocationCount, 0, "Framework allocation must not be called on invalid dimensions (\(pw)x\(ph))")
             assertEqual(await engine18_granted.encoderInvocationCount, 0, "JPEG encoder must not be called on invalid dimensions (\(pw)x\(ph))")
         }
+
+        // Test exact 64M limit (8000 x 8000 = 64,000,000) with lightweight fake injected dependencies
+        let fakeCGImage = CGImage(
+            width: 8000,
+            height: 8000,
+            bitsPerComponent: 8,
+            bitsPerPixel: 8,
+            bytesPerRow: 8000,
+            space: CGColorSpaceCreateDeviceGray(),
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
+            provider: CGDataProvider(data: Data(repeating: 0, count: 64_000_000) as CFData)!,
+            decode: nil,
+            shouldInterpolate: false,
+            intent: .defaultIntent
+        )!
+
+        let engine64M = SCScreenshotCaptureEngine(
+            authorizer: FakeScreenRecordingAuthorizer(granted: true),
+            contentLoader: {
+                // Return dummy SCShareableContent
+                try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            },
+            imageCapturer: { filter, config in
+                return fakeCGImage
+            },
+            jpegEncoder: { image, quality in
+                return Data([
+                    0xFF, 0xD8,
+                    0xFF, 0xC0, 0x00, 0x11, 0x08, 0x1F, 0x40, 0x1F, 0x40, 0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01,
+                    0xFF, 0xDA, 0x00, 0x0C, 0x03, 0x01, 0x00, 0x02, 0x11, 0x03, 0x11, 0x00, 0x3F, 0x00,
+                    0x00,
+                    0xFF, 0xD9
+                ])
+            }
+        )
+
+        let valid64MTop = DisplayTopology(
+            version: "v1.0",
+            primaryDisplayId: 1,
+            displays: [
+                DisplayInfo(
+                    id: 1,
+                    widthPoints: 8000,
+                    heightPoints: 8000,
+                    scaleFactor: 1.0,
+                    originX: 0,
+                    originY: 0,
+                    pixelWidth: 8000,
+                    pixelHeight: 8000,
+                    rotation: 0.0
+                )
+            ]
+        )
+
+        let frame64M = try await engine64M.captureDisplay(displayId: 1, topology: valid64MTop)
+        assertEqual(frame64M.pixelWidth, 8000)
+        assertEqual(frame64M.pixelHeight, 8000)
+        assertEqual(await engine64M.contentLoaderInvocationCount, 1, "Content loader must be invoked exactly once for 64M boundary")
+        assertEqual(await engine64M.frameworkInvocationCount, 1, "Framework capturer must be invoked exactly once for 64M boundary")
+        assertEqual(await engine64M.encoderInvocationCount, 1, "JPEG encoder must be invoked exactly once for 64M boundary")
     }
 
     public static func run19_PureJPEGValidatorExactAndNear10MiBBoundaries() async throws {
@@ -1972,7 +2067,8 @@ public struct ComputerUseHostTestRunner {
 
         var sockStat = stat()
         assertTrue(scriptedSyscalls.lstat(sockPath, &sockStat) != 0, "Failed socket file must be removed after listen failure rollback")
-        assertTrue(scriptedSyscalls.closeCallCount > 0, "Descriptors must be closed on listen failure rollback")
+        assertTrue(!scriptedSyscalls.openedDescriptors.isEmpty, "Opened descriptors list must be non-empty")
+        assertTrue(scriptedSyscalls.openedDescriptors.allSatisfy { scriptedSyscalls.closedDescriptors.contains($0) }, "All opened descriptor IDs must be closed upon rollback")
         assertTrue(scriptedSyscalls.unlinkatCallCount > 0, "Descriptor-relative unlinkat must be called on rollback")
         assertTrue(scriptedSyscalls.unlinkedFiles.contains("host.sock"), "Descriptor-relative unlinkat must unlink host.sock token")
 
@@ -2222,6 +2318,113 @@ public struct ComputerUseHostTestRunner {
         try await runWithWatchdog(name: "test34_PositiveByteAdvancesClockPastDeadlineReturnsTimeout") { try await run34_PositiveByteAdvancesClockPastDeadlineReturnsTimeout() }
         try await runWithWatchdog(name: "test35_InjectedListenFailurePostBindRollback") { try await run35_InjectedListenFailurePostBindRollback() }
         try await runWithWatchdog(name: "test36_FourSurfaceAuthorityBijection") { try await run36_FourSurfaceAuthorityBijection() }
-        fputs("[ComputerUseHostTestRunner] Executed 36 native test cases successfully. ALL PASSED.\n", stderr)
+        try await runWithWatchdog(name: "test37_ManualSleeperSevenDeterministicScenarios") { try await run37_ManualSleeperSevenDeterministicScenarios() }
+        fputs("[ComputerUseHostTestRunner] Executed 37 native test cases successfully. ALL PASSED.\n", stderr)
+    }
+
+    public static func run37_ManualSleeperSevenDeterministicScenarios() async throws {
+        // 1. Early wake followed by re-arm
+        let sleeper1 = ManualSleeper()
+        let t1 = Task { try await sleeper1.sleep(nanoseconds: 100_000_000) }
+        await sleeper1.waitUntilArmed(count: 1)
+        await sleeper1.advance()
+        try await t1.value
+
+        let t2 = Task { try await sleeper1.sleep(nanoseconds: 100_000_000) }
+        await sleeper1.waitUntilArmed(count: 2)
+        await sleeper1.advance()
+        try await t2.value
+
+        // 2. Exactly one later timeout response under HostServer
+        let controlledEngine = ControlledCaptureEngine()
+        let sleeper2 = ManualSleeper()
+        let manualClock = TestManualClock()
+        let server2 = HostServer(
+            authorizer: FakeScreenRecordingAuthorizer(granted: true),
+            topologyProvider: FakeDisplayTopologyProvider(),
+            captureEngine: controlledEngine,
+            axEngine: DisabledAXInspector(),
+            inputEngine: DisabledInputInjector(),
+            observationTimeoutSec: 1.0,
+            sleeper: sleeper2,
+            clock: manualClock
+        )
+
+        let reqTask1 = Task { await server2.handleRequest(IPCRequest(id: "timeout-1", method: "observe")) }
+        await controlledEngine.waitUntilRegistered(count: 1)
+        await sleeper2.waitUntilArmed(count: 1)
+        manualClock.advance(by: .seconds(2))
+        await sleeper2.advance()
+        let resp1 = await reqTask1.value
+        assertTrue(!resp1.success, "Scenario 2: First request must timeout")
+        assertEqual(resp1.error?.code, "TIMEOUT")
+
+        let frame2 = try FakeCaptureEngine().generateDTO(topology: FakeDisplayTopologyProvider().getTopology())
+        let reqTask2 = Task { await server2.handleRequest(IPCRequest(id: "timeout-2", method: "observe")) }
+        await controlledEngine.waitUntilRegistered(count: 2)
+        try await controlledEngine.complete(index: 1, with: .success(frame2))
+        let resp2 = await reqTask2.value
+        assertTrue(resp2.success, "Scenario 2: Second request must complete independently with status 0")
+
+        // 3. Cancellation before registration
+        let sleeper3 = ManualSleeper()
+        let t3 = Task {
+            try Task.checkCancellation()
+            try await sleeper3.sleep(nanoseconds: 100_000_000)
+        }
+        t3.cancel()
+        var threwCancel3 = false
+        do { try await t3.value } catch is CancellationError { threwCancel3 = true } catch {}
+        assertTrue(threwCancel3, "Scenario 3: Cancellation before registration must throw CancellationError")
+
+        // 4. Cancellation after registration
+        let sleeper4 = ManualSleeper()
+        let t4 = Task { try await sleeper4.sleep(nanoseconds: 100_000_000) }
+        await sleeper4.waitUntilArmed(count: 1)
+        t4.cancel()
+        var threwCancel4 = false
+        do { try await t4.value } catch is CancellationError { threwCancel4 = true } catch {}
+        assertTrue(threwCancel4, "Scenario 4: Cancellation after registration must throw CancellationError")
+
+        // 5. Cancellation racing buffered advance
+        let sleeper5 = ManualSleeper()
+        await sleeper5.advance() // Buffered advance = 1
+        let t5 = Task {
+            try Task.checkCancellation()
+            try await sleeper5.sleep(nanoseconds: 100_000_000)
+        }
+        t5.cancel()
+        var threwCancel5 = false
+        do { try await t5.value } catch is CancellationError { threwCancel5 = true } catch {}
+        assertTrue(threwCancel5, "Scenario 5: Cancellation racing buffered advance must throw CancellationError")
+
+        // 6. Two-waiter isolation
+        let sleeper6 = ManualSleeper()
+        let w1 = Task { try await sleeper6.sleep(nanoseconds: 100_000_000) }
+        let w2 = Task { try await sleeper6.sleep(nanoseconds: 100_000_000) }
+        await sleeper6.waitUntilArmed(count: 2)
+        w1.cancel()
+        var threwCancel6 = false
+        do { try await w1.value } catch is CancellationError { threwCancel6 = true } catch {}
+        assertTrue(threwCancel6, "Scenario 6: Cancelled waiter 1 must throw CancellationError")
+
+        await sleeper6.advance()
+        try await w2.value
+
+        // 7. Non-cancellation sleeper error propagation
+        struct CustomSleeperError: Error, Equatable {}
+        struct ThrowingSleeper: Sleeper {
+            func sleep(nanoseconds: UInt64) async throws {
+                throw CustomSleeperError()
+            }
+        }
+        let throwingSleeper = ThrowingSleeper()
+        var threwCustomError = false
+        do {
+            try await throwingSleeper.sleep(nanoseconds: 100_000_000)
+        } catch is CustomSleeperError {
+            threwCustomError = true
+        } catch {}
+        assertTrue(threwCustomError, "Scenario 7: Non-cancellation sleeper error must propagate exact error")
     }
 }

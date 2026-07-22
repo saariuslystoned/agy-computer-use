@@ -144,7 +144,10 @@ public actor SCScreenshotCaptureEngine: DisplayCaptureEngine {
         frameworkInvocationCount += 1
         let cgImage = try await imageCapturer(contentFilter, streamConfig)
 
-        // 5. Validate and encode image via pure validator + injected encoder
+        // 5. Validate CGImage dimensions and encode image via pure validator + injected encoder
+        guard cgImage.width == targetDisplay.pixelWidth, cgImage.height == targetDisplay.pixelHeight else {
+            throw ComputerUseError.targetUnreachable(reason: "Captured CGImage dimensions (\(cgImage.width)x\(cgImage.height)) mismatch requested topology (\(targetDisplay.pixelWidth)x\(targetDisplay.pixelHeight))")
+        }
         encoderInvocationCount += 1
         let (_, base64Str) = try SCScreenshotCaptureEngine.validateAndEncode(image: cgImage, targetDisplay: targetDisplay, quality: 0.8, jpegEncoder: self.jpegEncoder)
 

@@ -162,6 +162,7 @@ jobs:
           echo "$TEST_OUT" | grep -F "test34_PositiveByteAdvancesClockPastDeadlineReturnsTimeout"
           echo "$TEST_OUT" | grep -F "test35_InjectedListenFailurePostBindRollback"
           echo "$TEST_OUT" | grep -F "test36_FourSurfaceAuthorityBijection"
+          echo "$TEST_OUT" | grep -F "test37_ManualSleeperSevenDeterministicScenarios"
 
       - name: Build Release Executable & Guard Binary Symbols
         run: |

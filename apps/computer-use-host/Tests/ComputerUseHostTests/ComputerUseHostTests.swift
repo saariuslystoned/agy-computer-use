@@ -184,6 +184,10 @@ public final class ComputerUseHostTests: XCTestCase {
         try runSync { try await ComputerUseHostTestRunner.run36_FourSurfaceAuthorityBijection() }
     }
 
+    public func test37_ManualSleeperSevenDeterministicScenarios() throws {
+        try runSync { try await ComputerUseHostTestRunner.run37_ManualSleeperSevenDeterministicScenarios() }
+    }
+
     nonisolated(unsafe) public static let __allTests = [
         ("test01_LengthPrefixedFraming", test01_LengthPrefixedFraming),
         ("test02_OversizedFramingHeaderRejection", test02_OversizedFramingHeaderRejection),
@@ -221,6 +225,7 @@ public final class ComputerUseHostTests: XCTestCase {
         ("test34_PositiveByteAdvancesClockPastDeadlineReturnsTimeout", test34_PositiveByteAdvancesClockPastDeadlineReturnsTimeout),
         ("test35_InjectedListenFailurePostBindRollback", test35_InjectedListenFailurePostBindRollback),
         ("test36_FourSurfaceAuthorityBijection", test36_FourSurfaceAuthorityBijection),
+        ("test37_ManualSleeperSevenDeterministicScenarios", test37_ManualSleeperSevenDeterministicScenarios),
     ]
 }
 #endif

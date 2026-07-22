@@ -283,6 +283,17 @@ public final class SocketListener: @unchecked Sendable {
                 throw ComputerUseError.ipcError(reason: "Failed to bind socket at \(socketPath): errno \(err)")
             }
 
+            var boundStat = stat()
+            guard syscalls.fstatat(self.dirFd, socketFilename, &boundStat, AT_SYMLINK_NOFOLLOW) == 0,
+                  boundStat.st_uid == syscalls.getuid(),
+                  (boundStat.st_mode & S_IFMT) == S_IFSOCK else {
+                throw ComputerUseError.ipcError(reason: "Bound socket state revalidation failed via fstatat")
+            }
+            self.boundDev = boundStat.st_dev
+            self.boundInode = boundStat.st_ino
+            boundDevForRollback = boundStat.st_dev
+            boundInodeForRollback = boundStat.st_ino
+
             // Post-bind parent directory revalidation via retained descriptor AND lstat pathname
             var postBindDirStat = stat()
             var postBindPathStat = stat()
@@ -297,17 +308,6 @@ public final class SocketListener: @unchecked Sendable {
                   (postBindPathStat.st_mode & 0o777) == 0o700 else {
                 throw ComputerUseError.ipcError(reason: "Post-bind parent directory revalidation failed: path replaced after bind")
             }
-
-            var boundStat = stat()
-            guard syscalls.fstatat(self.dirFd, socketFilename, &boundStat, AT_SYMLINK_NOFOLLOW) == 0,
-                  boundStat.st_uid == syscalls.getuid(),
-                  (boundStat.st_mode & S_IFMT) == S_IFSOCK else {
-                throw ComputerUseError.ipcError(reason: "Bound socket state revalidation failed via fstatat")
-            }
-            self.boundDev = boundStat.st_dev
-            self.boundInode = boundStat.st_ino
-            boundDevForRollback = boundStat.st_dev
-            boundInodeForRollback = boundStat.st_ino
 
             let listenRes = syscalls.listen(serverFd, 5)
             guard listenRes == 0 else {
