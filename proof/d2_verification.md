@@ -22,7 +22,6 @@
   - Status / Conclusion: `completed` / `success`
 
 ## 3. Audits & Steering Acceptance
-- **Antigravity Read-Only Skeptic Verdict**: `SKEPTIC_PASS(57b055050cebf35d64b18dfaae262ecffabfc4be, 7420c51cb96d470c458c99f51d50e465ed98c13bcd6a1c313d1a852367cd0249)`
 - **Codex Steering Review**: Two independent exact-head Codex reviews accepted source SHA $S$; one static finding was explicitly revised to ACCEPT after proving that the production UDS JSON path encodes whole-valued doubles as JSON integers and `AnyCodable` decodes `Int` before `Double`.
 - **Native Test Authority Gate**: Clean `38/38` native test pass executed by Codex at exact source $S$.
 
@@ -35,7 +34,7 @@
 
 ## 5. Covered Source Boundaries (Milestone D2)
 - **Deterministic EINTR & EIO Authority (`run10_EINTRRetryPath`)**: Injected initial 1 x -1/EINTR for `accept`, 4-byte header `read`, request body `read`, and response `write` with atomic counter assertions (`acceptInjections == 1`, `headerReadInjections == 1`, `bodyReadInjections == 1`, `responseWriteInjections == 1`, `acceptCallCount == 2`, `readCallCount == 4`, `writeCallCount == 2`). Full decoded `status` wire payload authority (`connected`, `tcc_permission_state`, `accessibility_available`, `accessibility_trusted`, `input_mutation_state`, `topology_version`, `primary_display_id`, `display_count`, `topology`). Same-listener recovery verification (`acceptCallCount == 3`, `readCallCount == 6`, `writeCallCount == 3`). Separate 1 x -1/EIO response-write discriminator proving write is NOT retried (`writeCallCount == 1`) and peer experiences read failure / EOF. Throw-safe checked cleanup with descriptor accounting (`areAllDescriptorsClosed == true`). Complete elimination of process-wide `SIGUSR1` and `kill(getpid(), ...)` from host test runner.
-- **Cohesive Source Checkpoint Lineage**: `30893a8` (socket authority), `dc6d21f` (post-cycle scope adjudication), `53b1433` (image capture authority C3/C4), `57b0550` (test10 EINTR & EIO authority).
+- **Cohesive Source Checkpoint Lineage**: `30893a883645f8169b1d6794a209ae357d13bac2` (AGENTS teamwork-authority contract), `dc6d21f03a1ad762416f79b290aaa70acaf73f00` (R3 socket authority), `53b1433c8c6095e54232ceb770cea36f8e84b356` (image capture authority C3/C4), `57b0550b1d41588c99783ca7992d49e9e1a486b7` (deterministic test10 EINTR/EIO authority).
 - **Four Test Surfaces Registration**: `run10_EINTRRetryPath` registered across `apps/computer-use-host/Tests/ComputerUseHostTestRunner/main.swift`, XCTest method in `apps/computer-use-host/Tests/ComputerUseHostTests/ComputerUseHostTests.swift`, Linux `__allTests` entry in `ComputerUseHostTests.swift`, and `docs/native_test_manifest.txt`.
 
 ## 6. Safety & Operational Invariants
@@ -46,5 +45,5 @@
 
 ## 7. Lineage Assertions
 - Source commit $S$ (`57b0550b1d41588c99783ca7992d49e9e1a486b7`) has parent $S^\wedge = 53b1433c8c6095e54232ceb770cea36f8e84b356$.
-- Proof child commit $P$ has exact parent $P^\wedge = S = 57b0550b1d41588c99783ca7992d49e9e1a486b7$.
+- Proof child commit $P$ (`15be6fbaf989ed9d4e887c6672c3d87ab92c59c1`) has exact parent $P^\wedge = S = 57b0550b1d41588c99783ca7992d49e9e1a486b7$.
 - `git diff-tree --no-commit-id --name-only -r P` touches strictly `proof/d2_verification.md`.
