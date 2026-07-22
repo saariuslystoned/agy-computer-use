@@ -728,6 +728,41 @@ test('E2-P2: Rejection table for stage target directory validation', async () =>
         );
         assert.equal(harness.removalSpyCount, 0, 'Removal spy count must be 0 on dangling intermediate rejection');
     });
+
+    // 12. Parent fixture removal survives a throwing deferred cleanup (ARP2-I2b)
+    let capturedParentTmp = null;
+    let laterCleanupRan = false;
+    const subcaseCleanupErr = new Error('UNIQUE_SUBCASE_CLEANUP_ERROR_67890');
+
+    let caughtSubcaseErr = null;
+    try {
+        await testRejectionSubcase('cleanuperr', async (parentTmp, outsideDir, deferCleanup) => {
+            capturedParentTmp = parentTmp;
+            deferCleanup(() => {
+                throw subcaseCleanupErr;
+            });
+            deferCleanup(() => {
+                laterCleanupRan = true;
+            });
+            const missingRoot = path.join(parentTmp, 'missing_root');
+            assert.throws(
+                () => validateStageTargetDir(path.join(missingRoot, 'target.app'), missingRoot),
+                /does not exist/
+            );
+        });
+    } catch (e) {
+        caughtSubcaseErr = e;
+    }
+
+    assert.strictEqual(caughtSubcaseErr, subcaseCleanupErr, 'testRejectionSubcase must reject with the exact deferred cleanup Error object');
+    assert.equal(laterCleanupRan, true, 'Later deferred cleanup must still run after earlier cleanup throws');
+    assert.ok(capturedParentTmp, 'Parent tmp directory path must have been captured');
+    assert.equal(fs.existsSync(capturedParentTmp), false, 'Captured parentTmp must be deleted even when deferred cleanup throws');
+    assert.throws(
+        () => fs.lstatSync(capturedParentTmp),
+        (e) => e.code === 'ENOENT',
+        'lstatSync on capturedParentTmp must throw ENOENT'
+    );
 });
 
 test('AR-P2: Final revalidation race authority - fixed production target in disposable child', async () => {
@@ -990,23 +1025,26 @@ test('ARP2-I1: Restoration snapshot inode discriminator test', async () => {
     }
 });
 
-test('ARP2-I2: Deferred cleanup error propagation discriminator test', async () => {
-    let cb1Run = false;
-    let cb2Run = false;
-    let cb3Run = false;
+test('ARP2-I2a: Deferred cleanup first-error retention and execution order discriminator test', async () => {
+    const callOrder = [];
+    const firstErr = new Error('UNIQUE_FIRST_CLEANUP_ERROR');
+    const secondErr = new Error('UNIQUE_SECOND_CLEANUP_ERROR');
 
-    const cb1 = () => { cb1Run = true; };
-    const cb2 = () => { cb2Run = true; throw new Error('UNIQUE_CLEANUP_ERROR_12345'); };
-    const cb3 = () => { cb3Run = true; };
+    const cb1 = () => { callOrder.push(1); };
+    const cb2 = () => { callOrder.push(2); throw firstErr; };
+    const cb3 = () => { callOrder.push(3); throw secondErr; };
+    const cb4 = () => { callOrder.push(4); };
 
-    assert.throws(
-        () => runAllDeferredCleanups([cb1, cb2, cb3]),
-        /UNIQUE_CLEANUP_ERROR_12345/
-    );
+    let caughtErr = null;
+    try {
+        runAllDeferredCleanups([cb1, cb2, cb3, cb4]);
+    } catch (e) {
+        caughtErr = e;
+    }
 
-    assert.equal(cb1Run, true, 'First cleanup callback must run');
-    assert.equal(cb2Run, true, 'Second cleanup callback must run and throw');
-    assert.equal(cb3Run, true, 'Third cleanup callback must still run even after second throws');
+    assert.strictEqual(caughtErr, firstErr, 'runAllDeferredCleanups must rethrow the exact first Error object by reference');
+    assert.notStrictEqual(caughtErr, secondErr, 'runAllDeferredCleanups must NOT rethrow the second Error object');
+    assert.deepStrictEqual(callOrder, [1, 2, 3, 4], 'All deferred cleanups must execute in exact registration order');
 });
 
 test('ARP2-C2: Negative authority discriminators for TestStagingHarness private identity and state', async () => {
