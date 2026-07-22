@@ -40,51 +40,278 @@ public final class TestManualClock: HostClock, @unchecked Sendable {
     }
 }
 
+public struct SleeperSnapshot: Equatable, Sendable {
+    public let targetState: ManualSleeper.WaiterState?
+    public let pendingIDs: [UInt64]
+    public let bufferedAdvances: Int
+
+    public init(targetState: ManualSleeper.WaiterState?, pendingIDs: [UInt64], bufferedAdvances: Int) {
+        self.targetState = targetState
+        self.pendingIDs = pendingIDs
+        self.bufferedAdvances = bufferedAdvances
+    }
+}
+
+public struct SleeperInvariantError: Error, Equatable, Sendable {
+    public enum Stage: String, Equatable, Sendable {
+        case markRegistering
+        case publication
+        case finish
+    }
+
+    public let stage: Stage
+    public let message: String
+
+    public init(stage: Stage, message: String = "Sleeper invariant error") {
+        self.stage = stage
+        self.message = message
+    }
+}
+
 public final class ManualSleeper: Sleeper, @unchecked Sendable {
+    public enum WaiterState: Equatable, @unchecked Sendable {
+        case reserved
+        case registering
+        case suspended(CheckedContinuation<Void, Error>)
+        case waking
+        case cancelledBeforePublish
+        case cancelledAfterWake
+        case corruptedTestState
+
+        public static func == (lhs: WaiterState, rhs: WaiterState) -> Bool {
+            switch (lhs, rhs) {
+            case (.reserved, .reserved),
+                 (.registering, .registering),
+                 (.waking, .waking),
+                 (.cancelledBeforePublish, .cancelledBeforePublish),
+                 (.cancelledAfterWake, .cancelledAfterWake),
+                 (.corruptedTestState, .corruptedTestState):
+                return true
+            case (.suspended, .suspended):
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
+    public struct Hooks: Sendable {
+        public let afterReserveBeforeRegistering: (@Sendable (ManualSleeper, UInt64) -> Void)?
+        public let preRegistration: (@Sendable (ManualSleeper, UInt64) -> Void)?
+        public let afterSuspendedPublication: (@Sendable (ManualSleeper, UInt64) -> Void)?
+        public let observerRegistered: (@Sendable (Int) -> Void)?
+        public let wakeSelected: (@Sendable (ManualSleeper, UInt64) -> Void)?
+        public let postResumeBeforeFinish: (@Sendable (ManualSleeper, UInt64) -> Void)?
+
+        public init(
+            afterReserveBeforeRegistering: (@Sendable (ManualSleeper, UInt64) -> Void)? = nil,
+            preRegistration: (@Sendable (ManualSleeper, UInt64) -> Void)? = nil,
+            afterSuspendedPublication: (@Sendable (ManualSleeper, UInt64) -> Void)? = nil,
+            observerRegistered: (@Sendable (Int) -> Void)? = nil,
+            wakeSelected: (@Sendable (ManualSleeper, UInt64) -> Void)? = nil,
+            postResumeBeforeFinish: (@Sendable (ManualSleeper, UInt64) -> Void)? = nil
+        ) {
+            self.afterReserveBeforeRegistering = afterReserveBeforeRegistering
+            self.preRegistration = preRegistration
+            self.afterSuspendedPublication = afterSuspendedPublication
+            self.observerRegistered = observerRegistered
+            self.wakeSelected = wakeSelected
+            self.postResumeBeforeFinish = postResumeBeforeFinish
+        }
+    }
+
     private let lock = NSLock()
     private var nextWaiterID: UInt64 = 0
-    private var waiters: [UInt64: CheckedContinuation<Void, Error>] = [:]
+    private var waiterStates: [UInt64: WaiterState] = [:]
     private var pendingOrder: [UInt64] = []
-    private var armedWaiters: [Int: [CheckedContinuation<Void, Never>]] = [:]
-    private var totalArmedCount: Int = 0
+    private var issuedWaiters: [Int: [CheckedContinuation<Void, Never>]] = [:]
+    private var suspendedWaiters: [Int: [CheckedContinuation<Void, Never>]] = [:]
     private var bufferedAdvances: Int = 0
+    private var totalSuspendedRecorded: Int = 0
 
-    public init() {}
+    private(set) public var issuedCount: Int = 0
+    private(set) public var succeededCount: Int = 0
+    private(set) public var cancelledCount: Int = 0
+    private(set) public var invariantCount: Int = 0
 
-    private func reserveID() -> UInt64 {
-        lock.lock(); defer { lock.unlock() }
+    public let hooks: Hooks
+
+    public init(hooks: Hooks = Hooks()) {
+        self.hooks = hooks
+    }
+
+    public func getState(id: UInt64) -> WaiterState? {
+        lock.lock()
+        defer { lock.unlock() }
+        return waiterStates[id]
+    }
+
+    public func snapshot(for id: UInt64) -> SleeperSnapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        return SleeperSnapshot(
+            targetState: waiterStates[id],
+            pendingIDs: pendingOrder,
+            bufferedAdvances: bufferedAdvances
+        )
+    }
+
+    public func corruptStateForTest(id: UInt64, newState: WaiterState?) {
+        lock.lock()
+        defer { lock.unlock() }
+        if let newState = newState {
+            waiterStates[id] = newState
+        } else {
+            waiterStates.removeValue(forKey: id)
+            pendingOrder.removeAll { $0 == id }
+        }
+    }
+
+    private func reserveIDLocked() -> (UInt64, [CheckedContinuation<Void, Never>]) {
+        lock.lock()
+        defer { lock.unlock() }
         nextWaiterID += 1
-        return nextWaiterID
+        issuedCount += 1
+        let id = nextWaiterID
+        waiterStates[id] = .reserved
+        let issuedToResume = collectIssuedWaitersLocked()
+        return (id, issuedToResume)
+    }
+
+    private func markRegisteringLocked(id: UInt64) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let state = waiterStates[id] else {
+            invariantCount += 1
+            throw SleeperInvariantError(stage: .markRegistering, message: "Missing state on markRegistering")
+        }
+        switch state {
+        case .reserved:
+            waiterStates[id] = .registering
+        case .cancelledBeforePublish:
+            break
+        default:
+            waiterStates.removeValue(forKey: id)
+            pendingOrder.removeAll { $0 == id }
+            invariantCount += 1
+            throw SleeperInvariantError(stage: .markRegistering, message: "Invalid state \(state) on markRegistering")
+        }
+    }
+
+    private enum PublicationAction {
+        case failCancellation
+        case wakeImmediately
+        case suspended
+        case invariantError(SleeperInvariantError)
+    }
+
+    private func installPublicationLocked(id: UInt64, continuation: CheckedContinuation<Void, Error>) -> (PublicationAction, [CheckedContinuation<Void, Never>], [CheckedContinuation<Void, Never>]) {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard let state = waiterStates[id] else {
+            invariantCount += 1
+            return (.invariantError(SleeperInvariantError(stage: .publication, message: "Missing state on publication")), [], [])
+        }
+
+        switch state {
+        case .cancelledBeforePublish:
+            waiterStates.removeValue(forKey: id)
+            cancelledCount += 1
+            return (.failCancellation, [], [])
+        case .registering, .reserved:
+            if bufferedAdvances > 0 {
+                bufferedAdvances -= 1
+                waiterStates[id] = .waking
+                let issued = collectIssuedWaitersLocked()
+                return (.wakeImmediately, issued, [])
+            }
+            waiterStates[id] = .suspended(continuation)
+            pendingOrder.append(id)
+            totalSuspendedRecorded += 1
+            let issued = collectIssuedWaitersLocked()
+            let suspendedObs = collectSuspendedWaitersLocked()
+            return (.suspended, issued, suspendedObs)
+        default:
+            waiterStates.removeValue(forKey: id)
+            pendingOrder.removeAll { $0 == id }
+            invariantCount += 1
+            return (.invariantError(SleeperInvariantError(stage: .publication, message: "Invalid state \(state) on publication")), [], [])
+        }
+    }
+
+    private enum WakeResult {
+        case cancelled
+        case succeeded
+        case invariantError(SleeperInvariantError)
+    }
+
+    private func finishWakeLocked(id: UInt64) -> WakeResult {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let state = waiterStates.removeValue(forKey: id) else {
+            invariantCount += 1
+            return .invariantError(SleeperInvariantError(stage: .finish, message: "Missing state on finishWake"))
+        }
+        switch state {
+        case .waking:
+            succeededCount += 1
+            return .succeeded
+        case .cancelledAfterWake:
+            cancelledCount += 1
+            return .cancelled
+        default:
+            pendingOrder.removeAll { $0 == id }
+            invariantCount += 1
+            return .invariantError(SleeperInvariantError(stage: .finish, message: "Invalid state \(state) on finishWake"))
+        }
     }
 
     public func sleep(nanoseconds: UInt64) async throws {
-        try Task.checkCancellation()
-
-        let id = reserveID()
+        let (id, issuedToResume) = reserveIDLocked()
+        for iObs in issuedToResume { iObs.resume() }
 
         return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                lock.lock()
-                if Task.isCancelled {
-                    lock.unlock()
+            hooks.afterReserveBeforeRegistering?(self, id)
+
+            try markRegisteringLocked(id: id)
+
+            hooks.preRegistration?(self, id)
+
+            var wasImmediateWake = false
+
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                let (action, issuedToResume, suspendedToResume) = installPublicationLocked(id: id, continuation: continuation)
+                for iObs in issuedToResume { iObs.resume() }
+                for sObs in suspendedToResume { sObs.resume() }
+
+                switch action {
+                case .failCancellation:
                     continuation.resume(throwing: CancellationError())
-                    return
-                }
-                if self.bufferedAdvances > 0 {
-                    self.bufferedAdvances -= 1
-                    self.totalArmedCount += 1
-                    let armedToResume = self.collectArmedWaitersLocked()
-                    lock.unlock()
-                    for armed in armedToResume { armed.resume() }
+                case .wakeImmediately:
+                    wasImmediateWake = true
                     continuation.resume()
-                    return
+                case .suspended:
+                    hooks.afterSuspendedPublication?(self, id)
+                case .invariantError(let err):
+                    continuation.resume(throwing: err)
                 }
-                self.waiters[id] = continuation
-                self.pendingOrder.append(id)
-                self.totalArmedCount += 1
-                let armedToResume = self.collectArmedWaitersLocked()
-                lock.unlock()
-                for armed in armedToResume { armed.resume() }
+            }
+
+            if wasImmediateWake {
+                hooks.wakeSelected?(self, id)
+            } else {
+                hooks.postResumeBeforeFinish?(self, id)
+            }
+
+            let res = finishWakeLocked(id: id)
+            switch res {
+            case .cancelled:
+                throw CancellationError()
+            case .invariantError(let err):
+                throw err
+            case .succeeded:
+                break
             }
         } onCancel: {
             self.cancel(id: id)
@@ -93,75 +320,221 @@ public final class ManualSleeper: Sleeper, @unchecked Sendable {
 
     public func cancel(id: UInt64) {
         lock.lock()
-        let cont = waiters.removeValue(forKey: id)
-        pendingOrder.removeAll { $0 == id }
-        lock.unlock()
-        cont?.resume(throwing: CancellationError())
-    }
-
-    public func advance() {
-        lock.lock()
-        if pendingOrder.isEmpty {
-            bufferedAdvances += 1
+        guard let state = waiterStates[id] else {
             lock.unlock()
             return
         }
-        let id = pendingOrder.removeFirst()
-        let cont = waiters.removeValue(forKey: id)
-        lock.unlock()
-        cont?.resume()
+        switch state {
+        case .reserved, .registering:
+            waiterStates[id] = .cancelledBeforePublish
+            lock.unlock()
+        case .suspended(let cont):
+            waiterStates.removeValue(forKey: id)
+            pendingOrder.removeAll { $0 == id }
+            cancelledCount += 1
+            lock.unlock()
+            cont.resume(throwing: CancellationError())
+        case .waking:
+            waiterStates[id] = .cancelledAfterWake
+            lock.unlock()
+        case .cancelledBeforePublish, .cancelledAfterWake, .corruptedTestState:
+            lock.unlock()
+        }
+    }
+
+    private enum AdvanceAction {
+        case buffered, wake(CheckedContinuation<Void, Error>, UInt64), none
+    }
+
+    public func advance() {
+        let action: AdvanceAction = {
+            lock.lock()
+            defer { lock.unlock() }
+            if pendingOrder.isEmpty {
+                bufferedAdvances += 1
+                return .buffered
+            }
+            let id = pendingOrder.removeFirst()
+            guard let state = waiterStates[id] else {
+                return .none
+            }
+            if case .suspended(let cont) = state {
+                waiterStates[id] = .waking
+                return .wake(cont, id)
+            }
+            return .none
+        }()
+
+        if case .wake(let cont, let id) = action {
+            hooks.wakeSelected?(self, id)
+            cont.resume()
+        }
     }
 
     public func advanceAll() {
-        lock.lock()
-        let continuations = pendingOrder.compactMap { waiters.removeValue(forKey: $0) }
-        pendingOrder.removeAll()
-        waiters.removeAll()
-        lock.unlock()
-        for cont in continuations { cont.resume() }
+        let wakes: [(CheckedContinuation<Void, Error>, UInt64)] = {
+            lock.lock()
+            defer { lock.unlock() }
+            var items: [(CheckedContinuation<Void, Error>, UInt64)] = []
+            for id in pendingOrder {
+                if let state = waiterStates[id], case .suspended(let cont) = state {
+                    waiterStates[id] = .waking
+                    items.append((cont, id))
+                }
+            }
+            pendingOrder.removeAll()
+            return items
+        }()
+
+        for (cont, id) in wakes {
+            hooks.wakeSelected?(self, id)
+            cont.resume()
+        }
     }
 
     public func cancelAll() {
         lock.lock()
-        let continuations = Array(waiters.values)
-        waiters.removeAll()
+        var suspendedToCancel: [CheckedContinuation<Void, Error>] = []
+        for (id, state) in waiterStates {
+            switch state {
+            case .reserved, .registering:
+                waiterStates[id] = .cancelledBeforePublish
+            case .suspended(let cont):
+                suspendedToCancel.append(cont)
+                cancelledCount += 1
+            case .waking:
+                waiterStates[id] = .cancelledAfterWake
+            case .cancelledBeforePublish, .cancelledAfterWake, .corruptedTestState:
+                break
+            }
+        }
+        let keysToRemove = waiterStates.compactMap { (k, v) -> UInt64? in
+            if case .suspended = v { return k }
+            return nil
+        }
+        for k in keysToRemove { waiterStates.removeValue(forKey: k) }
         pendingOrder.removeAll()
+
+        let issuedToResume = issuedWaiters.values.flatMap { $0 }
+        issuedWaiters.removeAll()
+        let suspendedObs = suspendedWaiters.values.flatMap { $0 }
+        suspendedWaiters.removeAll()
+        bufferedAdvances = 0
         lock.unlock()
-        for cont in continuations { cont.resume(throwing: CancellationError()) }
+
+        for cont in suspendedToCancel { cont.resume(throwing: CancellationError()) }
+        for iObs in issuedToResume { iObs.resume() }
+        for sObs in suspendedObs { sObs.resume() }
     }
 
-    public func isArmed(count: Int) -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        return totalArmedCount >= count
+    public func waitUntilIssued(count: Int) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            if issuedCount >= count {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                issuedWaiters[count, default: []].append(continuation)
+                lock.unlock()
+            }
+        }
     }
 
-    public func addArmedWaiter(count: Int, continuation: CheckedContinuation<Void, Never>) {
-        lock.lock(); defer { lock.unlock() }
-        armedWaiters[count, default: []].append(continuation)
-    }
+    public func waitUntilSuspended(count: Int) async {
+        let (alreadySuspended, registeredHook): (Bool, ((Int) -> Void)?) = {
+            lock.lock()
+            defer { lock.unlock() }
+            if totalSuspendedRecorded >= count {
+                return (true, nil)
+            } else {
+                return (false, hooks.observerRegistered)
+            }
+        }()
 
-    public func waitUntilArmed(count: Int) async {
-        if isArmed(count: count) {
+        if alreadySuspended {
             return
         }
+
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            addArmedWaiter(count: count, continuation: continuation)
+            lock.lock()
+            if totalSuspendedRecorded >= count {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                suspendedWaiters[count, default: []].append(continuation)
+                lock.unlock()
+                if let obsHook = registeredHook {
+                    obsHook(count)
+                }
+            }
         }
+    }
+
+    public func assertCounters(issued: Int, succeeded: Int, cancelled: Int, line: Int = #line) {
+        lock.lock()
+        let i = issuedCount
+        let s = succeededCount
+        let c = cancelledCount
+        let inv = invariantCount
+        lock.unlock()
+
+        assertEqual(i, issued, "Exact issued counter mismatch at line \(line)")
+        assertEqual(s, succeeded, "Exact succeeded counter mismatch at line \(line)")
+        assertEqual(c, cancelled, "Exact cancelled counter mismatch at line \(line)")
+        assertEqual(inv, 0, "Invariant count must be zero at line \(line)")
+    }
+
+    public func assertZeroState(line: Int = #line) {
+        lock.lock()
+        let stateCount = waiterStates.count
+        let pendingCount = pendingOrder.count
+        let issuedObsCount = issuedWaiters.values.reduce(0) { $0 + $1.count }
+        let suspendedObsCount = suspendedWaiters.values.reduce(0) { $0 + $1.count }
+        let advances = bufferedAdvances
+        lock.unlock()
+
+        assertEqual(stateCount, 0, "waiterStates must be empty at line \(line)")
+        assertEqual(pendingCount, 0, "pendingOrder must be empty at line \(line)")
+        assertEqual(issuedObsCount, 0, "issuedWaiters must be empty at line \(line)")
+        assertEqual(suspendedObsCount, 0, "suspendedWaiters must be empty at line \(line)")
+        assertEqual(advances, 0, "bufferedAdvances must be 0 at line \(line)")
     }
 
     public func assertNoUnresolvedContinuations() {
         lock.lock()
-        let pending = waiters.count
-        let armed = armedWaiters.values.reduce(0) { $0 + $1.count }
+        let statesCount = waiterStates.count
+        let issuedObs = issuedWaiters.values.reduce(0) { $0 + $1.count }
+        let suspendedObs = suspendedWaiters.values.reduce(0) { $0 + $1.count }
+        let pending = pendingOrder.count
+        let advances = bufferedAdvances
+        let issued = issuedCount
+        let succeeded = succeededCount
+        let cancelled = cancelledCount
+        let inv = invariantCount
         lock.unlock()
-        assertTrue(pending == 0 && armed == 0, "No unresolved continuations must remain in ManualSleeper")
+
+        assertTrue(statesCount == 0 && issuedObs == 0 && suspendedObs == 0 && pending == 0 && advances == 0,
+            "No active states (\(statesCount)), issued observers (\(issuedObs)), suspended observers (\(suspendedObs)), pending (\(pending)), or advances (\(advances)) must remain in ManualSleeper")
+        assertEqual(issued, succeeded + cancelled,
+            "Exact monotonic terminal counters reconciliation: issued (\(issued)) == succeeded (\(succeeded)) + cancelled (\(cancelled))")
+        assertEqual(inv, 0, "Invariant count must be zero")
     }
 
-    private func collectArmedWaitersLocked() -> [CheckedContinuation<Void, Never>] {
-        let currentCount = totalArmedCount
+    private func collectIssuedWaitersLocked() -> [CheckedContinuation<Void, Never>] {
+        let currentCount = issuedCount
         var toResume: [CheckedContinuation<Void, Never>] = []
-        for (targetCount, waiters) in armedWaiters where currentCount >= targetCount {
-            armedWaiters.removeValue(forKey: targetCount)
+        for (targetCount, waiters) in issuedWaiters where currentCount >= targetCount {
+            issuedWaiters.removeValue(forKey: targetCount)
+            toResume.append(contentsOf: waiters)
+        }
+        return toResume
+    }
+
+    private func collectSuspendedWaitersLocked() -> [CheckedContinuation<Void, Never>] {
+        let currentCount = totalSuspendedRecorded
+        var toResume: [CheckedContinuation<Void, Never>] = []
+        for (targetCount, waiters) in suspendedWaiters where currentCount >= targetCount {
+            suspendedWaiters.removeValue(forKey: targetCount)
             toResume.append(contentsOf: waiters)
         }
         return toResume
@@ -177,6 +550,9 @@ public final class ScriptedPOSIXSyscalls: POSIXSyscallProviding, @unchecked Send
     public var readHook: ((Int32, UnsafeMutableRawPointer?, Int) -> Int?)?
     public var writeHook: ((Int32, UnsafeRawPointer?, Int) -> Int?)?
     public var listenHook: ((Int32, Int32) -> Int32?)?
+    public var bindHook: ((Int32, UnsafePointer<sockaddr>?, socklen_t) -> Int32?)?
+    public var fstatatHook: ((Int32, UnsafePointer<CChar>, UnsafeMutablePointer<stat>?, Int32) -> Int32?)?
+    public var lstatHook: ((UnsafePointer<CChar>, UnsafeMutablePointer<stat>?) -> Int32?)?
 
     public var acceptCallCount: Int = 0
     public var readCallCount: Int = 0
@@ -186,8 +562,47 @@ public final class ScriptedPOSIXSyscalls: POSIXSyscallProviding, @unchecked Send
     public var unlinkedFiles: [String] = []
     public var openedDescriptors: [Int32] = []
     public var closedDescriptors: [Int32] = []
+    public var openCounts: [Int32: Int] = [:]
+    public var closeCounts: [Int32: Int] = [:]
+
+    private var nextGeneration: UInt64 = 0
+    private var activeGenerations: [UInt64: Int32] = [:]
+    private var closedGenerations: Set<UInt64> = []
 
     public init() {}
+
+    private func trackOpen(fd: Int32) {
+        guard fd >= 0 else { return }
+        lock.lock()
+        nextGeneration += 1
+        let gen = nextGeneration
+        activeGenerations[gen] = fd
+        openedDescriptors.append(fd)
+        openCounts[fd, default: 0] += 1
+        lock.unlock()
+    }
+
+    private func trackCloseSuccess(fd: Int32) {
+        lock.lock()
+        closeCallCount += 1
+        closedDescriptors.append(fd)
+        closeCounts[fd, default: 0] += 1
+        if let (gen, _) = activeGenerations.first(where: { $1 == fd }) {
+            activeGenerations.removeValue(forKey: gen)
+            closedGenerations.insert(gen)
+        }
+        lock.unlock()
+    }
+
+    public var areAllDescriptorsClosed: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return activeGenerations.isEmpty
+    }
+
+    public var activeGenerationCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return activeGenerations.count
+    }
 
     public var lastErrno: Int32 {
         lock.lock(); defer { lock.unlock() }
@@ -215,9 +630,7 @@ public final class ScriptedPOSIXSyscalls: POSIXSyscallProviding, @unchecked Send
         if let res = hook?(socket, address, addressLen) { return res }
         let fd = underlying.accept(socket, address, addressLen)
         if fd >= 0 {
-            lock.lock()
-            openedDescriptors.append(fd)
-            lock.unlock()
+            trackOpen(fd: fd)
         }
         return fd
     }
@@ -248,42 +661,54 @@ public final class ScriptedPOSIXSyscalls: POSIXSyscallProviding, @unchecked Send
         return underlying.listen(socket, backlog)
     }
 
-    public func bind(_ socket: Int32, _ address: UnsafePointer<sockaddr>?, _ addressLen: socklen_t) -> Int32 { clearErrno(); return underlying.bind(socket, address, addressLen) }
+    public func bind(_ socket: Int32, _ address: UnsafePointer<sockaddr>?, _ addressLen: socklen_t) -> Int32 {
+        clearErrno()
+        if let res = bindHook?(socket, address, addressLen) { return res }
+        return underlying.bind(socket, address, addressLen)
+    }
+
     public func socket(_ domain: Int32, _ type: Int32, _ protocol: Int32) -> Int32 {
         clearErrno()
         let fd = underlying.socket(domain, type, `protocol`)
         if fd >= 0 {
-            lock.lock()
-            openedDescriptors.append(fd)
-            lock.unlock()
+            trackOpen(fd: fd)
         }
         return fd
     }
+
     public func open(_ path: UnsafePointer<CChar>, _ oflag: Int32, _ mode: mode_t) -> Int32 {
         clearErrno()
         let fd = underlying.open(path, oflag, mode)
         if fd >= 0 {
-            lock.lock()
-            openedDescriptors.append(fd)
-            lock.unlock()
+            trackOpen(fd: fd)
         }
         return fd
     }
+
     public func openat(_ dirFd: Int32, _ path: UnsafePointer<CChar>, _ oflag: Int32, _ mode: mode_t) -> Int32 {
         clearErrno()
         let fd = underlying.openat(dirFd, path, oflag, mode)
         if fd >= 0 {
-            lock.lock()
-            openedDescriptors.append(fd)
-            lock.unlock()
+            trackOpen(fd: fd)
         }
         return fd
     }
+
     public func fcntl(_ fd: Int32, _ cmd: Int32, _ arg: Int32) -> Int32 { clearErrno(); return underlying.fcntl(fd, cmd, arg) }
     public func getsockopt(_ socket: Int32, _ level: Int32, _ optionName: Int32, _ optionValue: UnsafeMutableRawPointer?, _ optionLen: UnsafeMutablePointer<socklen_t>?) -> Int32 { clearErrno(); return underlying.getsockopt(socket, level, optionName, optionValue, optionLen) }
-    public func lstat(_ path: UnsafePointer<CChar>, _ buf: UnsafeMutablePointer<stat>?) -> Int32 { clearErrno(); return underlying.lstat(path, buf) }
+    public func lstat(_ path: UnsafePointer<CChar>, _ buf: UnsafeMutablePointer<stat>?) -> Int32 {
+        clearErrno()
+        if let res = lstatHook?(path, buf) { return res }
+        return underlying.lstat(path, buf)
+    }
+
     public func fstat(_ fd: Int32, _ buf: UnsafeMutablePointer<stat>?) -> Int32 { clearErrno(); return underlying.fstat(fd, buf) }
-    public func fstatat(_ dirFd: Int32, _ path: UnsafePointer<CChar>, _ buf: UnsafeMutablePointer<stat>?, _ flag: Int32) -> Int32 { clearErrno(); return underlying.fstatat(dirFd, path, buf, flag) }
+    public func fstatat(_ dirFd: Int32, _ path: UnsafePointer<CChar>, _ buf: UnsafeMutablePointer<stat>?, _ flag: Int32) -> Int32 {
+        clearErrno()
+        if let res = fstatatHook?(dirFd, path, buf, flag) { return res }
+        return underlying.fstatat(dirFd, path, buf, flag)
+    }
+
     public func fileFlock(_ fd: Int32, _ operation: Int32) -> Int32 { clearErrno(); return underlying.fileFlock(fd, operation) }
     public func unlink(_ path: UnsafePointer<CChar>) -> Int32 { clearErrno(); return underlying.unlink(path) }
     public func unlinkat(_ dirFd: Int32, _ path: UnsafePointer<CChar>, _ flag: Int32) -> Int32 {
@@ -298,11 +723,11 @@ public final class ScriptedPOSIXSyscalls: POSIXSyscallProviding, @unchecked Send
     public func mkdir(_ path: UnsafePointer<CChar>, _ mode: mode_t) -> Int32 { clearErrno(); return underlying.mkdir(path, mode) }
     public func close(_ fd: Int32) -> Int32 {
         clearErrno()
-        lock.lock()
-        closeCallCount += 1
-        closedDescriptors.append(fd)
-        lock.unlock()
-        return underlying.close(fd)
+        let ret = underlying.close(fd)
+        if ret == 0 {
+            trackCloseSuccess(fd: fd)
+        }
+        return ret
     }
     public func getuid() -> uid_t { underlying.getuid() }
     public func setsockopt(_ socket: Int32, _ level: Int32, _ optionName: Int32, _ optionValue: UnsafeRawPointer?, _ optionLen: socklen_t) -> Int32 { clearErrno(); return underlying.setsockopt(socket, level, optionName, optionValue, optionLen) }
@@ -1602,7 +2027,7 @@ public struct ComputerUseHostTestRunner {
 
         let reqATask = Task { await fenceServer.handleRequest(IPCRequest(id: "fence-A", method: "observe")) }
         await controlledEngine.waitUntilRegistered(count: 1)
-        await sleeper.waitUntilArmed(count: 1)
+        await sleeper.waitUntilIssued(count: 1)
         manualClock.advance(by: .seconds(5))
         sleeper.advance()
 
@@ -1716,7 +2141,7 @@ public struct ComputerUseHostTestRunner {
 
         let taskA = Task { await server.handleRequest(IPCRequest(id: "orphan-A", method: "observe")) }
         await controlledEngine.waitUntilRegistered(count: 1)
-        await sleeper.waitUntilArmed(count: 1)
+        await sleeper.waitUntilIssued(count: 1)
         manualClock.advance(by: .seconds(5))
         sleeper.advance()
 
@@ -2058,7 +2483,7 @@ public struct ComputerUseHostTestRunner {
         var sockStat = stat()
         assertTrue(scriptedSyscalls.lstat(sockPath, &sockStat) != 0, "Failed socket file must be removed after listen failure rollback")
         assertTrue(!scriptedSyscalls.openedDescriptors.isEmpty, "Opened descriptors list must be non-empty")
-        assertTrue(scriptedSyscalls.openedDescriptors.allSatisfy { scriptedSyscalls.closedDescriptors.contains($0) }, "All opened descriptor IDs must be closed upon rollback")
+        assertTrue(scriptedSyscalls.areAllDescriptorsClosed, "All opened descriptors must be closed as a multiset (openCount == closeCount)")
         assertTrue(scriptedSyscalls.unlinkatCallCount > 0, "Descriptor-relative unlinkat must be called on rollback")
         assertTrue(scriptedSyscalls.unlinkedFiles.contains("host.sock"), "Descriptor-relative unlinkat must unlink host.sock token")
 
@@ -2077,6 +2502,111 @@ public struct ComputerUseHostTestRunner {
 
         listener.stop()
         assertTrue(scriptedSyscalls.lstat(sockPath, &sockStat) != 0, "Socket file must be unlinked on listener stop")
+        assertTrue(scriptedSyscalls.areAllDescriptorsClosed, "All descriptors must be closed as a multiset after listener stop")
+
+        // Pre-bind parent swap test
+        let preBindDir = "/tmp/agy-prebind-\(UUID().uuidString)"
+        let preBindSockPath = "\(preBindDir)/host.sock"
+        var fstatatCallCount = 0
+        let preBindSyscalls = ScriptedPOSIXSyscalls()
+        preBindSyscalls.fstatatHook = { dirFd, path, buf, flag in
+            fstatatCallCount += 1
+            if fstatatCallCount == 1, let buf = buf {
+                // Return mismatched inode for parentDir revalidation pre-bind
+                buf.pointee.st_dev = 9999
+                buf.pointee.st_ino = 9999
+                buf.pointee.st_mode = S_IFDIR | 0o700
+                buf.pointee.st_uid = getuid()
+                return 0
+            }
+            return nil
+        }
+        let preBindListener = SocketListener(
+            socketPath: preBindSockPath,
+            server: HostServer(authorizer: FakeScreenRecordingAuthorizer(), topologyProvider: FakeDisplayTopologyProvider(), captureEngine: FakeCaptureEngine(), axEngine: DisabledAXInspector(), inputEngine: DisabledInputInjector()),
+            perFrameTimeoutSec: 1.0,
+            syscalls: preBindSyscalls
+        )
+        var preBindThrew = false
+        do { try preBindListener.start() } catch { preBindThrew = true }
+        assertTrue(preBindThrew, "SocketListener.start must throw on pre-bind parent swap revalidation failure")
+        assertTrue(preBindSyscalls.areAllDescriptorsClosed, "All descriptors must be closed after pre-bind swap failure")
+
+        preBindSyscalls.fstatatHook = nil
+        var validStartThrew = false
+        do { try preBindListener.start() } catch { validStartThrew = true }
+        assertTrue(!validStartThrew, "Valid start must succeed after pre-bind swap failure")
+        preBindListener.stop()
+        assertTrue(preBindSyscalls.areAllDescriptorsClosed, "All descriptors must be closed after stop")
+
+        // Refusal of FIFO or non-socket file at socket path (and inode survival)
+        let fifoDir = "/tmp/agy-fifo-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: fifoDir, withIntermediateDirectories: true, attributes: [FileAttributeKey.posixPermissions: 0o700])
+        let fifoPath = "\(fifoDir)/host.sock"
+        mkfifo(fifoPath, 0o600)
+        var preFifoStat = stat()
+        assertEqual(lstat(fifoPath, &preFifoStat), 0)
+        let origFifoInode = preFifoStat.st_ino
+
+        let fifoListener = SocketListener(
+            socketPath: fifoPath,
+            server: HostServer(authorizer: FakeScreenRecordingAuthorizer(), topologyProvider: FakeDisplayTopologyProvider(), captureEngine: FakeCaptureEngine(), axEngine: DisabledAXInspector(), inputEngine: DisabledInputInjector()),
+            perFrameTimeoutSec: 1.0,
+            syscalls: scriptedSyscalls
+        )
+        var fifoThrew = false
+        do { try fifoListener.start() } catch { fifoThrew = true }
+        assertTrue(fifoThrew, "SocketListener.start must refuse FIFO file at socket path")
+
+        var postFifoStat = stat()
+        assertEqual(lstat(fifoPath, &postFifoStat), 0, "Original FIFO file must survive start failure")
+        assertEqual(postFifoStat.st_ino, origFifoInode, "Original FIFO inode must remain unchanged")
+        assertTrue((postFifoStat.st_mode & S_IFMT) == S_IFIFO, "Original FIFO type must remain S_IFIFO")
+        assertTrue(scriptedSyscalls.areAllDescriptorsClosed, "All descriptors must be closed after FIFO refusal")
+
+        unlink(fifoPath)
+        var fifoStartThrew = false
+        do { try fifoListener.start() } catch { fifoStartThrew = true }
+        assertTrue(!fifoStartThrew, "Valid start must succeed after FIFO removal")
+        fifoListener.stop()
+        rmdir(fifoDir)
+
+        // Foreign replacement file survival on stop()
+        let foreignDir = "/tmp/agy-foreign-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: foreignDir, withIntermediateDirectories: true, attributes: [FileAttributeKey.posixPermissions: 0o700])
+        let foreignSockPath = "\(foreignDir)/host.sock"
+        let foreignListener = SocketListener(
+            socketPath: foreignSockPath,
+            server: HostServer(authorizer: FakeScreenRecordingAuthorizer(), topologyProvider: FakeDisplayTopologyProvider(), captureEngine: FakeCaptureEngine(), axEngine: DisabledAXInspector(), inputEngine: DisabledInputInjector()),
+            perFrameTimeoutSec: 1.0,
+            syscalls: scriptedSyscalls
+        )
+        try foreignListener.start()
+
+        unlink(foreignSockPath)
+        let foreignFd = open(foreignSockPath, O_CREAT | O_WRONLY, 0o600)
+        assertTrue(foreignFd >= 0)
+        close(foreignFd)
+        var foreignStat = stat()
+        assertEqual(lstat(foreignSockPath, &foreignStat), 0)
+
+        foreignListener.stop()
+        var postStopStat = stat()
+        assertEqual(lstat(foreignSockPath, &postStopStat), 0, "Foreign replacement file must survive listener.stop()")
+        assertEqual(postStopStat.st_ino, foreignStat.st_ino, "Foreign replacement file inode must remain untouched")
+        unlink(foreignSockPath)
+        rmdir(foreignDir)
+
+        // Descriptor bookkeeping fd-reuse / failed-close discriminator test
+        let discSyscalls = ScriptedPOSIXSyscalls()
+        let fd1 = discSyscalls.open("/dev/null", O_RDONLY, 0)
+        assertTrue(fd1 >= 0)
+        assertEqual(discSyscalls.activeGenerationCount, 1)
+        assertTrue(!discSyscalls.areAllDescriptorsClosed)
+        let closeRes = discSyscalls.close(fd1)
+        assertEqual(closeRes, 0)
+        assertEqual(discSyscalls.activeGenerationCount, 0)
+        assertTrue(discSyscalls.areAllDescriptorsClosed)
     }
 
     public struct FourSurfaces {
@@ -2313,119 +2843,414 @@ public struct ComputerUseHostTestRunner {
     }
 
     public static func run37_ManualSleeperSevenDeterministicScenarios() async throws {
-        // 1. Early wake followed by re-arm
-        let sleeper1 = ManualSleeper()
+        final class TestGate: @unchecked Sendable {
+            private let cond = NSCondition()
+            private var arrivedCount: Int = 0
+            private var released: Bool = false
+            private var waiterCount: Int = 0
+
+            func signalArrived(timeoutSec: Double = 5.0) {
+                cond.lock()
+                arrivedCount += 1
+                waiterCount += 1
+                cond.broadcast()
+                let deadline = Date().addingTimeInterval(timeoutSec)
+                while !released {
+                    if !cond.wait(until: deadline) {
+                        waiterCount -= 1
+                        cond.unlock()
+                        fatalError("TestGate timeout waiting for release")
+                    }
+                }
+                waiterCount -= 1
+                cond.unlock()
+            }
+
+            func waitUntilArrived(targetCount: Int = 1, timeoutSec: Double = 5.0) {
+                cond.lock()
+                let deadline = Date().addingTimeInterval(timeoutSec)
+                while arrivedCount < targetCount {
+                    if !cond.wait(until: deadline) {
+                        cond.unlock()
+                        fatalError("TestGate timeout waiting for arrival (arrived: \(arrivedCount), target: \(targetCount))")
+                    }
+                }
+                cond.unlock()
+            }
+
+            func release() {
+                cond.lock()
+                released = true
+                cond.broadcast()
+                cond.unlock()
+            }
+
+            func assertClosed(line: Int = #line) {
+                cond.lock()
+                let rel = released
+                let wc = waiterCount
+                cond.unlock()
+                assertTrue(rel, "TestGate must be released at line \(line)")
+                assertEqual(wc, 0, "TestGate must have 0 live waiters at line \(line)")
+            }
+        }
+
+        // 1. Discriminator 1: Registering + cancelAll -> (1, 0, 1)
+        let gate1 = TestGate()
+        let sleeper1 = ManualSleeper(hooks: ManualSleeper.Hooks(
+            preRegistration: { sleeper, id in
+                assertEqual(sleeper.getState(id: id), .registering)
+                gate1.signalArrived()
+            }
+        ))
         let t1 = Task { try await sleeper1.sleep(nanoseconds: 100_000_000) }
-        await sleeper1.waitUntilArmed(count: 1)
-        sleeper1.advance()
-        try await t1.value
-
-        let t2 = Task { try await sleeper1.sleep(nanoseconds: 100_000_000) }
-        await sleeper1.waitUntilArmed(count: 2)
-        sleeper1.advance()
-        try await t2.value
+        gate1.waitUntilArrived()
+        sleeper1.cancelAll()
+        assertEqual(sleeper1.getState(id: 1), .cancelledBeforePublish)
+        gate1.release()
+        var threw1 = false
+        do { try await t1.value } catch is CancellationError { threw1 = true } catch {}
+        assertTrue(threw1, "Discriminator 1: Paused at registration gate must throw CancellationError on cancelAll")
+        sleeper1.assertCounters(issued: 1, succeeded: 0, cancelled: 1)
         sleeper1.assertNoUnresolvedContinuations()
+        gate1.assertClosed()
 
-        // 2. Exactly one later timeout response under HostServer
+        // 2. Discriminator 2: Buffered cancellation -> (2, 1, 1)
+        let gate2 = TestGate()
+        let sleeper2 = ManualSleeper(hooks: ManualSleeper.Hooks(
+            preRegistration: { _, id in
+                if id == 1 { gate2.signalArrived() }
+            }
+        ))
+        let tA2 = Task { try await sleeper2.sleep(nanoseconds: 100_000_000) }
+        gate2.waitUntilArrived()
+        sleeper2.advance() // Creates 1 real buffer
+        tA2.cancel()        // Cancels tA2 -> state becomes cancelledBeforePublish
+        assertEqual(sleeper2.getState(id: 1), .cancelledBeforePublish)
+        gate2.release()
+        var threwA2 = false
+        do { try await tA2.value } catch is CancellationError { threwA2 = true } catch {}
+        assertTrue(threwA2, "Discriminator 2: Cancelled waiter must throw CancellationError without consuming buffer")
+
+        let tB2 = Task { try await sleeper2.sleep(nanoseconds: 100_000_000) }
+        try await tB2.value // tB2 consumes the buffered advance successfully
+        sleeper2.assertCounters(issued: 2, succeeded: 1, cancelled: 1)
+        sleeper2.assertNoUnresolvedContinuations()
+        gate2.assertClosed()
+
+        // 3. Discriminator 3: Cancel after wake selection with postResumeBeforeFinish gate -> (1, 0, 1)
+        let postResumeGate3 = TestGate()
+        let sleeper3 = ManualSleeper(hooks: ManualSleeper.Hooks(
+            postResumeBeforeFinish: { _, _ in postResumeGate3.signalArrived() }
+        ))
+        let t3 = Task { try await sleeper3.sleep(nanoseconds: 100_000_000) }
+        await sleeper3.waitUntilSuspended(count: 1)
+        if case .suspended = sleeper3.getState(id: 1) {} else { assertTrue(false, "Discriminator 3: State 1 must be .suspended") }
+        sleeper3.advance() // Selects t3 for wake -> state becomes waking, resumes continuation, pauses at postResumeBeforeFinish
+        postResumeGate3.waitUntilArrived()
+        t3.cancel()        // Cancels t3 -> state becomes cancelledAfterWake
+        assertEqual(sleeper3.getState(id: 1), .cancelledAfterWake)
+        postResumeGate3.release()
+        var threw3 = false
+        do { try await t3.value } catch is CancellationError { threw3 = true } catch {}
+        assertTrue(threw3, "Discriminator 3: Cancellation after wake selection must throw CancellationError")
+        sleeper3.assertCounters(issued: 1, succeeded: 0, cancelled: 1)
+        sleeper3.assertNoUnresolvedContinuations()
+        postResumeGate3.assertClosed()
+
+        // 4. Discriminator 4: Mixed cancelAll (one registering, one suspended) -> (2, 0, 2)
+        let gate4 = TestGate()
+        let sleeper4 = ManualSleeper(hooks: ManualSleeper.Hooks(
+            preRegistration: { _, id in
+                if id == 1 { gate4.signalArrived() }
+            }
+        ))
+        let tA4 = Task { try await sleeper4.sleep(nanoseconds: 100_000_000) }
+        gate4.waitUntilArrived() // tA4 is at registering
+        let tB4 = Task { try await sleeper4.sleep(nanoseconds: 100_000_000) }
+        await sleeper4.waitUntilSuspended(count: 1) // tB4 is suspended
+        assertEqual(sleeper4.getState(id: 1), .registering)
+        if case .suspended = sleeper4.getState(id: 2) {} else { assertTrue(false, "Discriminator 4: State 2 must be .suspended") }
+        sleeper4.cancelAll()
+        assertEqual(sleeper4.getState(id: 1), .cancelledBeforePublish)
+        gate4.release()
+        var threwA4 = false, threwB4 = false
+        do { try await tA4.value } catch is CancellationError { threwA4 = true } catch {}
+        do { try await tB4.value } catch is CancellationError { threwB4 = true } catch {}
+        assertTrue(threwA4 && threwB4, "Discriminator 4: Both registering and suspended waiters must throw CancellationError on cancelAll")
+        sleeper4.assertCounters(issued: 2, succeeded: 0, cancelled: 2)
+        sleeper4.assertNoUnresolvedContinuations()
+        gate4.assertClosed()
+
+        // 5. Discriminator 5: Honest observer registration gate proof & two-waiter isolation -> (2, 1, 1)
+        let obsGate5 = TestGate()
+        let regGate5 = TestGate()
+        let sleeper5 = ManualSleeper(hooks: ManualSleeper.Hooks(
+            preRegistration: { _, id in
+                if id == 1 { regGate5.signalArrived() }
+            },
+            observerRegistered: { count in
+                if count == 1 { obsGate5.signalArrived() }
+            }
+        ))
+        let w1 = Task { try await sleeper5.sleep(nanoseconds: 100_000_000) }
+        regGate5.waitUntilArrived() // w1 is paused at preRegistration
+
+        let obsTask = Task { await sleeper5.waitUntilSuspended(count: 1) }
+        obsGate5.waitUntilArrived() // Proves waitUntilSuspended registered while w1 was paused!
+        obsGate5.release()
+
+        regGate5.release() // w1 completes registration and suspends
+        await obsTask.value // obsTask resolves now that count == 1
+
+        let w2 = Task { try await sleeper5.sleep(nanoseconds: 100_000_000) }
+        await sleeper5.waitUntilSuspended(count: 2)
+        if case .suspended = sleeper5.getState(id: 1) {} else { assertTrue(false, "Discriminator 5: State 1 must be .suspended") }
+        if case .suspended = sleeper5.getState(id: 2) {} else { assertTrue(false, "Discriminator 5: State 2 must be .suspended") }
+        w1.cancel()
+        var threwW1 = false
+        do { try await w1.value } catch is CancellationError { threwW1 = true } catch {}
+        assertTrue(threwW1, "Discriminator 5: Cancelled waiter 1 must throw CancellationError")
+
+        sleeper5.advance()
+        try await w2.value
+        sleeper5.assertCounters(issued: 2, succeeded: 1, cancelled: 1)
+        sleeper5.assertNoUnresolvedContinuations()
+        obsGate5.assertClosed()
+        regGate5.assertClosed()
+
+        // 6. Discriminator 6 (R1-C2A): Exact publication-boundary state snapshot -> (1, 1, 0)
+        let pubGate6 = TestGate()
+        let sleeper6 = ManualSleeper(hooks: ManualSleeper.Hooks(
+            afterSuspendedPublication: { _, _ in pubGate6.signalArrived() }
+        ))
+        let t6 = Task { try await sleeper6.sleep(nanoseconds: 100_000_000) }
+        pubGate6.waitUntilArrived()
+        let snapPre = sleeper6.snapshot(for: 1)
+        if case .suspended = snapPre.targetState {} else { assertTrue(false, "R1-C2A: Target state must be .suspended") }
+        assertEqual(snapPre.pendingIDs, [1], "R1-C2A: Pending IDs snapshot must be [1]")
+        assertEqual(snapPre.bufferedAdvances, 0, "R1-C2A: Buffered advances snapshot must be 0")
+
+        sleeper6.advance() // Resumes published waiter, state becomes .waking
+        let snapPost = sleeper6.snapshot(for: 1)
+        assertEqual(snapPost.targetState, .waking, "R1-C2A: Target state after advance must be .waking")
+        assertEqual(snapPost.pendingIDs, [], "R1-C2A: Pending IDs after advance must be []")
+        assertEqual(snapPost.bufferedAdvances, 0, "R1-C2A: Buffered advances after advance must be 0")
+
+        pubGate6.release()
+        try await t6.value
+        sleeper6.assertCounters(issued: 1, succeeded: 1, cancelled: 0)
+        sleeper6.assertNoUnresolvedContinuations()
+        pubGate6.assertClosed()
+
+        // 7. Discriminator 7: Direct lost-wake boundary (advance before publication) -> (1, 1, 0)
+        let gate7 = TestGate()
+        let sleeper7 = ManualSleeper(hooks: ManualSleeper.Hooks(
+            preRegistration: { _, _ in gate7.signalArrived() }
+        ))
+        let t7 = Task { try await sleeper7.sleep(nanoseconds: 100_000_000) }
+        gate7.waitUntilArrived()
+        sleeper7.advance() // Advance before publication callback
+        gate7.release()
+        try await t7.value // Must consume buffer and succeed without ever suspending
+        sleeper7.assertCounters(issued: 1, succeeded: 1, cancelled: 0)
+        sleeper7.assertNoUnresolvedContinuations()
+        gate7.assertClosed()
+
+        // 8. Discriminator 8 (R1-C3A): Cancellation while paused at earliest afterReserveBeforeRegistering boundary -> (1, 0, 1)
+        let gateReserveCancel = TestGate()
+        let sleeperReserveCancel = ManualSleeper(hooks: ManualSleeper.Hooks(
+            afterReserveBeforeRegistering: { sleeper, id in
+                assertEqual(sleeper.getState(id: id), .reserved)
+                gateReserveCancel.signalArrived()
+            }
+        ))
+        let tRes = Task { try await sleeperReserveCancel.sleep(nanoseconds: 100_000_000) }
+        gateReserveCancel.waitUntilArrived()
+        tRes.cancel() // Cancellation handler executes while paused inside afterReserveBeforeRegistering
+        assertEqual(sleeperReserveCancel.getState(id: 1), .cancelledBeforePublish)
+        gateReserveCancel.release()
+        var threwRes = false
+        do { try await tRes.value } catch is CancellationError { threwRes = true } catch {}
+        assertTrue(threwRes, "Discriminator 8: Cancellation at afterReserveBeforeRegistering boundary must throw CancellationError")
+        sleeperReserveCancel.assertCounters(issued: 1, succeeded: 0, cancelled: 1)
+        sleeperReserveCancel.assertNoUnresolvedContinuations()
+        gateReserveCancel.assertClosed()
+
+        // 9. Negative Invariant 1: Missing state before markRegistering throws SleeperInvariantError
+        let gateNeg1 = TestGate()
+        let sleeperNeg1 = ManualSleeper(hooks: ManualSleeper.Hooks(
+            afterReserveBeforeRegistering: { sleeper, id in
+                sleeper.corruptStateForTest(id: id, newState: nil)
+                gateNeg1.signalArrived()
+            }
+        ))
+        let tNeg1 = Task { try await sleeperNeg1.sleep(nanoseconds: 100_000_000) }
+        gateNeg1.waitUntilArrived()
+        gateNeg1.release()
+        var stageNeg1: SleeperInvariantError.Stage?
+        do { try await tNeg1.value } catch let err as SleeperInvariantError { stageNeg1 = err.stage } catch {}
+        assertEqual(stageNeg1, .markRegistering, "Negative Invariant 1: Error stage must be .markRegistering")
+        assertEqual(sleeperNeg1.issuedCount, 1)
+        assertEqual(sleeperNeg1.succeededCount, 0)
+        assertEqual(sleeperNeg1.cancelledCount, 0)
+        assertEqual(sleeperNeg1.invariantCount, 1)
+        sleeperNeg1.assertZeroState()
+        gateNeg1.assertClosed()
+
+        // 10. Negative Invariant 2: Invalid existing state before markRegistering throws SleeperInvariantError
+        let gateNeg2 = TestGate()
+        let sleeperNeg2 = ManualSleeper(hooks: ManualSleeper.Hooks(
+            afterReserveBeforeRegistering: { sleeper, id in
+                sleeper.corruptStateForTest(id: id, newState: .corruptedTestState)
+                gateNeg2.signalArrived()
+            }
+        ))
+        let tNeg2 = Task { try await sleeperNeg2.sleep(nanoseconds: 100_000_000) }
+        gateNeg2.waitUntilArrived()
+        gateNeg2.release()
+        var stageNeg2: SleeperInvariantError.Stage?
+        do { try await tNeg2.value } catch let err as SleeperInvariantError { stageNeg2 = err.stage } catch {}
+        assertEqual(stageNeg2, .markRegistering, "Negative Invariant 2: Error stage must be .markRegistering")
+        assertEqual(sleeperNeg2.issuedCount, 1)
+        assertEqual(sleeperNeg2.succeededCount, 0)
+        assertEqual(sleeperNeg2.cancelledCount, 0)
+        assertEqual(sleeperNeg2.invariantCount, 1)
+        sleeperNeg2.assertZeroState()
+        gateNeg2.assertClosed()
+
+        // 11. Negative Invariant 3: Missing state before publication throws SleeperInvariantError
+        let gateNeg3 = TestGate()
+        let sleeperNeg3 = ManualSleeper(hooks: ManualSleeper.Hooks(
+            preRegistration: { sleeper, id in
+                sleeper.corruptStateForTest(id: id, newState: nil)
+                gateNeg3.signalArrived()
+            }
+        ))
+        let tNeg3 = Task { try await sleeperNeg3.sleep(nanoseconds: 100_000_000) }
+        gateNeg3.waitUntilArrived()
+        gateNeg3.release()
+        var stageNeg3: SleeperInvariantError.Stage?
+        do { try await tNeg3.value } catch let err as SleeperInvariantError { stageNeg3 = err.stage } catch {}
+        assertEqual(stageNeg3, .publication, "Negative Invariant 3: Error stage must be .publication")
+        assertEqual(sleeperNeg3.issuedCount, 1)
+        assertEqual(sleeperNeg3.succeededCount, 0)
+        assertEqual(sleeperNeg3.cancelledCount, 0)
+        assertEqual(sleeperNeg3.invariantCount, 1)
+        sleeperNeg3.assertZeroState()
+        gateNeg3.assertClosed()
+
+        // 12. Negative Invariant 4: Invalid existing state before publication throws SleeperInvariantError
+        let gateNeg4 = TestGate()
+        let sleeperNeg4 = ManualSleeper(hooks: ManualSleeper.Hooks(
+            preRegistration: { sleeper, id in
+                sleeper.corruptStateForTest(id: id, newState: .corruptedTestState)
+                gateNeg4.signalArrived()
+            }
+        ))
+        let tNeg4 = Task { try await sleeperNeg4.sleep(nanoseconds: 100_000_000) }
+        gateNeg4.waitUntilArrived()
+        gateNeg4.release()
+        var stageNeg4: SleeperInvariantError.Stage?
+        do { try await tNeg4.value } catch let err as SleeperInvariantError { stageNeg4 = err.stage } catch {}
+        assertEqual(stageNeg4, .publication, "Negative Invariant 4: Error stage must be .publication")
+        assertEqual(sleeperNeg4.issuedCount, 1)
+        assertEqual(sleeperNeg4.succeededCount, 0)
+        assertEqual(sleeperNeg4.cancelledCount, 0)
+        assertEqual(sleeperNeg4.invariantCount, 1)
+        sleeperNeg4.assertZeroState()
+        gateNeg4.assertClosed()
+
+        // 13. Negative Invariant 5: Missing state on finish path throws SleeperInvariantError
+        let postResumeGateNeg5 = TestGate()
+        let sleeperNeg5 = ManualSleeper(hooks: ManualSleeper.Hooks(
+            postResumeBeforeFinish: { sleeper, id in
+                sleeper.corruptStateForTest(id: id, newState: nil)
+                postResumeGateNeg5.signalArrived()
+            }
+        ))
+        let tNeg5 = Task { try await sleeperNeg5.sleep(nanoseconds: 100_000_000) }
+        await sleeperNeg5.waitUntilSuspended(count: 1)
+        sleeperNeg5.advance() // State becomes .waking, continuation resumes, hits postResumeBeforeFinish
+        postResumeGateNeg5.waitUntilArrived()
+        postResumeGateNeg5.release()
+        var stageNeg5: SleeperInvariantError.Stage?
+        do { try await tNeg5.value } catch let err as SleeperInvariantError { stageNeg5 = err.stage } catch {}
+        assertEqual(stageNeg5, .finish, "Negative Invariant 5: Error stage must be .finish")
+        assertEqual(sleeperNeg5.issuedCount, 1)
+        assertEqual(sleeperNeg5.succeededCount, 0)
+        assertEqual(sleeperNeg5.cancelledCount, 0)
+        assertEqual(sleeperNeg5.invariantCount, 1)
+        sleeperNeg5.assertZeroState()
+        postResumeGateNeg5.assertClosed()
+
+        // 14. HostServer deadline authority: early wake -> re-arm -> single timeout response
         let controlledEngine = ControlledCaptureEngine()
-        let sleeper2 = ManualSleeper()
+        let sleeper14 = ManualSleeper()
         let manualClock = TestManualClock()
-        let server2 = HostServer(
+        let server14 = HostServer(
             authorizer: FakeScreenRecordingAuthorizer(granted: true),
             topologyProvider: FakeDisplayTopologyProvider(),
             captureEngine: controlledEngine,
             axEngine: DisabledAXInspector(),
             inputEngine: DisabledInputInjector(),
             observationTimeoutSec: 1.0,
-            sleeper: sleeper2,
+            sleeper: sleeper14,
             clock: manualClock
         )
 
-        let reqTask1 = Task { await server2.handleRequest(IPCRequest(id: "timeout-1", method: "observe")) }
+        let reqTask1 = Task { await server14.handleRequest(IPCRequest(id: "timeout-1", method: "observe")) }
         await controlledEngine.waitUntilRegistered(count: 1)
-        await sleeper2.waitUntilArmed(count: 1)
+        await sleeper14.waitUntilIssued(count: 1)
+
+        manualClock.advance(by: .milliseconds(500))
+        sleeper14.advance()
+        await sleeper14.waitUntilIssued(count: 2)
+
         manualClock.advance(by: .seconds(2))
-        sleeper2.advance()
+        sleeper14.advance()
+
         let resp1 = await reqTask1.value
-        assertTrue(!resp1.success, "Scenario 2: First request must timeout")
+        assertTrue(!resp1.success, "HostServer deadline: First request must timeout")
         assertEqual(resp1.error?.code, "TIMEOUT")
 
+        try await controlledEngine.complete(index: 0, with: .failure(ComputerUseError.timeout(operation: "observe", seconds: 1.0)))
+        await controlledEngine.waitUntilExited(count: 1)
+        assertEqual(await controlledEngine.pendingCount, 0, "HostServer deadline: Pending capture count must be zero")
+
         let frame2 = try FakeCaptureEngine().generateDTO(topology: FakeDisplayTopologyProvider().getTopology())
-        let reqTask2 = Task { await server2.handleRequest(IPCRequest(id: "timeout-2", method: "observe")) }
+        let reqTask2 = Task { await server14.handleRequest(IPCRequest(id: "timeout-2", method: "observe")) }
         await controlledEngine.waitUntilRegistered(count: 2)
         try await controlledEngine.complete(index: 1, with: .success(frame2))
         let resp2 = await reqTask2.value
-        assertTrue(resp2.success, "Scenario 2: Second request must complete independently with status 0")
-        sleeper2.assertNoUnresolvedContinuations()
+        assertTrue(resp2.success, "HostServer deadline: Second request must complete independently")
+        assertEqual(await controlledEngine.pendingCount, 0, "HostServer deadline: Pending capture count zero")
+        sleeper14.assertNoUnresolvedContinuations()
 
-        // 3. Cancellation before registration
-        let sleeper3 = ManualSleeper()
-        let t3 = Task {
-            try Task.checkCancellation()
-            try await sleeper3.sleep(nanoseconds: 100_000_000)
-        }
-        t3.cancel()
-        var threwCancel3 = false
-        do { try await t3.value } catch is CancellationError { threwCancel3 = true } catch {}
-        assertTrue(threwCancel3, "Scenario 3: Cancellation before registration must throw CancellationError")
-        sleeper3.assertNoUnresolvedContinuations()
-
-        // 4. Cancellation after registration
-        let sleeper4 = ManualSleeper()
-        let t4 = Task { try await sleeper4.sleep(nanoseconds: 100_000_000) }
-        await sleeper4.waitUntilArmed(count: 1)
-        t4.cancel()
-        var threwCancel4 = false
-        do { try await t4.value } catch is CancellationError { threwCancel4 = true } catch {}
-        assertTrue(threwCancel4, "Scenario 4: Cancellation after registration must throw CancellationError")
-        sleeper4.assertNoUnresolvedContinuations()
-
-        // 5. Cancellation racing buffered advance
-        let sleeper5 = ManualSleeper()
-        sleeper5.advance() // Buffered advance = 1
-        let t5 = Task {
-            try Task.checkCancellation()
-            try await sleeper5.sleep(nanoseconds: 100_000_000)
-        }
-        t5.cancel()
-        var threwCancel5 = false
-        do { try await t5.value } catch is CancellationError { threwCancel5 = true } catch {}
-        assertTrue(threwCancel5, "Scenario 5: Cancellation racing buffered advance must throw CancellationError")
-        sleeper5.assertNoUnresolvedContinuations()
-
-        // 6. Two-waiter isolation
-        let sleeper6 = ManualSleeper()
-        let w1 = Task { try await sleeper6.sleep(nanoseconds: 100_000_000) }
-        let w2 = Task { try await sleeper6.sleep(nanoseconds: 100_000_000) }
-        await sleeper6.waitUntilArmed(count: 2)
-        w1.cancel()
-        var threwCancel6 = false
-        do { try await w1.value } catch is CancellationError { threwCancel6 = true } catch {}
-        assertTrue(threwCancel6, "Scenario 6: Cancelled waiter 1 must throw CancellationError")
-
-        sleeper6.advance()
-        try await w2.value
-        sleeper6.assertNoUnresolvedContinuations()
-
-        // 7. Non-cancellation sleeper error propagation through HostServer production logic
+        // 15. Non-cancellation sleeper error propagation through HostServer production logic & capture exit
         struct CustomSleeperError: Error, Equatable {}
         struct ThrowingSleeper: Sleeper {
             func sleep(nanoseconds: UInt64) async throws {
                 throw CustomSleeperError()
             }
         }
-        let controlledEngine7 = ControlledCaptureEngine()
+        let controlledEngine15 = ControlledCaptureEngine()
         let throwingServer = HostServer(
             authorizer: FakeScreenRecordingAuthorizer(granted: true),
             topologyProvider: FakeDisplayTopologyProvider(),
-            captureEngine: controlledEngine7,
+            captureEngine: controlledEngine15,
             axEngine: DisabledAXInspector(),
             inputEngine: DisabledInputInjector(),
             observationTimeoutSec: 1.0,
             sleeper: ThrowingSleeper()
         )
-        let resp7 = await throwingServer.handleRequest(IPCRequest(id: "err-1", method: "observe"))
-        assertTrue(!resp7.success, "Scenario 7: Injected sleeper error must cause request failure")
-        assertEqual(resp7.error?.code, "HOST_ERROR", "Scenario 7: Error code must be HOST_ERROR")
+        let reqTask15 = Task { await throwingServer.handleRequest(IPCRequest(id: "err-1", method: "observe")) }
+        await controlledEngine15.waitUntilRegistered(count: 1)
+        let resp15 = await reqTask15.value
+        assertTrue(!resp15.success, "Scenario 15: Injected sleeper error must cause request failure")
+        assertEqual(resp15.error?.code, "HOST_ERROR", "Scenario 15: Error code must be HOST_ERROR")
+        try await controlledEngine15.complete(index: 0, with: .failure(CustomSleeperError()))
+        await controlledEngine15.waitUntilExited(count: 1)
+        assertEqual(await controlledEngine15.pendingCount, 0, "Scenario 15: Pending capture count must be zero")
     }
 }
