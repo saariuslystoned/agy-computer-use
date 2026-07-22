@@ -321,6 +321,42 @@ test('E2-P2: Component-aware stage target directory validation discriminators', 
     }
 });
 
+test('AR-P2: Clean-export discriminator for fresh checkout staging', async () => {
+    const exportTmpDir = fs.mkdtempSync('/tmp/agy-clean-export-');
+    fs.chmodSync(exportTmpDir, 0o700);
+
+    try {
+        fs.cpSync(process.cwd(), exportTmpDir, {
+            recursive: true,
+            filter: (src) => {
+                const rel = path.relative(process.cwd(), src);
+                if (rel.includes('.build') || rel.includes('.git') || rel.includes('node_modules')) {
+                    return false;
+                }
+                return true;
+            }
+        });
+
+        assert.equal(fs.existsSync(path.join(exportTmpDir, 'apps/computer-use-host/.build')), false, 'Clean export must not contain pre-existing .build directory');
+
+        const binScript = path.join(exportTmpDir, 'bin/host-app.mjs');
+        const { stageHostApp: exportStageHostApp, classifyPrincipal: exportClassifyPrincipal } = await import(`file://${binScript}`);
+
+        const stageRes = await exportStageHostApp({ projectRoot: exportTmpDir, build: true });
+        assert.equal(stageRes.success, true);
+        assert.equal(fs.existsSync(stageRes.appPath), true, 'Staged app must exist in clean export');
+
+        const classification = await exportClassifyPrincipal(stageRes.appPath);
+        assert.equal(classification.classification, 'ad_hoc_ephemeral', 'Staged app in clean export must classify as ad_hoc_ephemeral');
+
+        const stableCheck = await exportClassifyPrincipal(stageRes.appPath, { requireStable: true });
+        assert.equal(stableCheck.classification, 'ad_hoc_ephemeral');
+        assert.ok(stableCheck.error, '--require-stable must produce error for ad_hoc_ephemeral');
+    } finally {
+        fs.rmSync(exportTmpDir, { recursive: true, force: true });
+    }
+});
+
 test('RP-3: Prove deterministic restaging of one built input', async () => {
     const initialStage = await stageHostApp({ build: true });
     assert.equal(initialStage.success, true);

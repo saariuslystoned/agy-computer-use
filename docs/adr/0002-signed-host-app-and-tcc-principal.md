@@ -1,4 +1,4 @@
-# ADR 0002: Signed Native Host App as Sole TCC Principal
+# ADR 0002: Staged Background Host App as TCC Principal
 
 - **Status**: Accepted
 - **Date**: 2026-07-21

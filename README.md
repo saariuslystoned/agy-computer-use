@@ -29,7 +29,7 @@ flowchart TD
         SocketClient["Unix Domain Socket IPC Client"]
     end
 
-    subgraph Native ["Signed Native Host (ComputerUseHost)"]
+    subgraph Native ["Staged Background Host (ComputerUseHost)"]
         SocketServer["Unix Domain Socket Listener (0700)"]
         AXEngine["AXUIElement Inspector (Disabled in D2)"]
         CapEngine["Screen Capture Engine (macOS 14+ SCScreenshotManager)"]

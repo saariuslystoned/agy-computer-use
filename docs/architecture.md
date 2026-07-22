@@ -4,9 +4,9 @@
 
 `agy-computer-use` bridges Google Antigravity / Gemini 3.6 Flash with macOS UI automation capabilities via a dual-process architecture:
 
-1. **Signed Native Host (`apps/computer-use-host`)**:
+1. **Staged Background Host (`apps/computer-use-host`)**:
    - Built with Swift targeting macOS 14.0+.
-   - Single TCC permission principal for Accessibility (`AXUIElement`) and Screen Recording (`ScreenCaptureKit`).
+   - Single TCC permission principal (currently staged as an `ad_hoc_ephemeral` bundle) for Accessibility (`AXUIElement`) and Screen Recording (`ScreenCaptureKit`). A future non-ad-hoc team-signed candidate may become the durable TCC principal only after separately gated signing, installation, launch, and TCC proof.
    - Serves as the single source of truth for display topology, coordinate transformations (converting between physical pixels, logical points, and normalized `0...999` agent grid), and negative screen origins.
    - Listens on a Unix domain socket in an owner-only runtime directory (`chmod 0700`).
 

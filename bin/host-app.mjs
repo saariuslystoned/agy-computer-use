@@ -9,7 +9,6 @@ const execFileAsync = promisify(execFile);
 
 export function validateStageTargetDir(targetDir, allowedRoot) {
     const resolvedRoot = path.resolve(allowedRoot);
-    let resolvedTarget = path.resolve(targetDir);
 
     if (!fs.existsSync(resolvedRoot)) {
         throw new Error(`Allowed root ${resolvedRoot} does not exist`);
@@ -19,10 +18,13 @@ export function validateStageTargetDir(targetDir, allowedRoot) {
     if (rootLstat.isSymbolicLink()) {
         throw new Error(`Allowed root ${resolvedRoot} cannot be a symbolic link`);
     }
+    if (!rootLstat.isDirectory()) {
+        throw new Error(`Allowed root ${resolvedRoot} must be a directory, not a regular file or non-directory`);
+    }
 
     const canonicalRoot = fs.realpathSync(resolvedRoot);
+    let resolvedTarget = path.resolve(targetDir);
 
-    // Canonicalize existing target or deepest existing parent of target
     let currTarget = resolvedTarget;
     let tail = [];
     while (!fs.existsSync(currTarget) && currTarget !== path.dirname(currTarget)) {
@@ -64,16 +66,21 @@ export async function stageHostApp(options = {}) {
     const hostPackageDir = path.join(root, 'apps/computer-use-host');
 
     let stagedAppDir;
+    let stagingRoot;
+
     if (options.targetDir) {
-        const testRoot = options.allowedTestRoot || options.testRoot;
-        if (!testRoot) {
+        stagingRoot = options.allowedTestRoot || options.testRoot;
+        if (!stagingRoot) {
             throw new Error(`Test-injected targetDir ${options.targetDir} requires explicit allowedTestRoot option`);
         }
-        stagedAppDir = validateStageTargetDir(options.targetDir, testRoot);
+        stagedAppDir = validateStageTargetDir(options.targetDir, stagingRoot);
     } else {
-        const defaultStagingRoot = path.join(hostPackageDir, '.build/staged');
-        stagedAppDir = path.join(defaultStagingRoot, 'ComputerUseHost.app');
-        validateStageTargetDir(stagedAppDir, defaultStagingRoot);
+        stagingRoot = path.join(hostPackageDir, '.build/staged');
+        if (!fs.existsSync(stagingRoot)) {
+            fs.mkdirSync(stagingRoot, { recursive: true, mode: 0o700 });
+        }
+        stagedAppDir = path.join(stagingRoot, 'ComputerUseHost.app');
+        validateStageTargetDir(stagedAppDir, stagingRoot);
     }
 
     const contentsDir = path.join(stagedAppDir, 'Contents');
@@ -101,10 +108,7 @@ export async function stageHostApp(options = {}) {
     }
 
     // Revalidate target immediately before removal
-    if (options.targetDir) {
-        const testRoot = options.allowedTestRoot || options.testRoot;
-        validateStageTargetDir(options.targetDir, testRoot);
-    }
+    validateStageTargetDir(stagedAppDir, stagingRoot);
 
     if (fs.existsSync(stagedAppDir)) {
         fs.rmSync(stagedAppDir, { recursive: true, force: true });
@@ -147,22 +151,26 @@ export function parseAndClassifyPrincipal(codesignInfo, reqInfo, verificationPas
             identifiers.push(line.slice(11).trim());
         } else if (line.startsWith('Signature=')) {
             signatures.push(line.slice(10).trim());
+        } else if (line.startsWith('Signature size=')) {
+            signatures.push(line.trim());
         } else if (line.startsWith('TeamIdentifier=')) {
             teamIds.push(line.slice(15).trim());
         } else if (line.startsWith('Authority=')) {
-            authorities.push(line.slice(10).trim());
+            const authVal = line.slice(10).trim();
+            if (authVal === '') {
+                return { classification: 'unsigned_or_invalid', details: 'Empty authority value detected' };
+            }
+            authorities.push(authVal);
         }
     }
 
-    // Check for duplicate metadata keys
-    if (identifiers.length > 1 || signatures.length > 1 || teamIds.length > 1 || authorities.length > 1) {
+    if (identifiers.length > 1 || signatures.length > 1 || teamIds.length > 1) {
         return { classification: 'unsigned_or_invalid', details: 'Duplicate metadata keys detected' };
     }
 
     const identifier = identifiers[0] || null;
     const signature = signatures[0] || null;
     const teamId = teamIds[0] || null;
-    const authority = authorities[0] || null;
 
     const expectedIdentifier = 'com.saariuslystoned.agy-computer-use.host';
     if (!identifier || identifier !== expectedIdentifier) {
@@ -178,13 +186,14 @@ export function parseAndClassifyPrincipal(codesignInfo, reqInfo, verificationPas
         return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Missing signature line' };
     }
 
-    // Exact ad-hoc checks
     if (signature === 'adhoc') {
         if (teamId !== 'not set') {
             return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Ad-hoc signature cannot have non-"not set" TeamIdentifier' };
         }
-        if (authority && authority !== 'not set' && authority !== 'adhoc') {
-            return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Ad-hoc signature cannot have conflicting authority' };
+        for (const auth of authorities) {
+            if (auth !== 'not set' && auth !== 'adhoc') {
+                return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Ad-hoc signature cannot have conflicting authority' };
+            }
         }
         if (options.requireStable) {
             return {
@@ -202,14 +211,22 @@ export function parseAndClassifyPrincipal(codesignInfo, reqInfo, verificationPas
         };
     }
 
-    // Non-ad-hoc team signature checks
-    const isRecognizedTeamSignature = /^size=\d+$/.test(signature);
-    if (!isRecognizedTeamSignature) {
-        return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Unrecognized signature format' };
+    const teamSigMatch = signature.match(/^(?:Signature\s+)?size=([1-9][0-9]*)$/) || signature.match(/^Signature size=([1-9][0-9]*)$/);
+    if (!teamSigMatch) {
+        return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Unrecognized or zero signature size format' };
     }
 
     if (!teamId || teamId === 'not set') {
-        return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Team signature missing TeamIdentifier' };
+        return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Team signature missing valid TeamIdentifier' };
+    }
+
+    if (authorities.length === 0) {
+        return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Team signature missing Authority chain' };
+    }
+    for (const auth of authorities) {
+        if (auth.toLowerCase().includes('adhoc')) {
+            return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Team signature cannot contain adhoc in Authority chain' };
+        }
     }
 
     const reqStr = (reqInfo || '').trim();
@@ -223,18 +240,37 @@ export function parseAndClassifyPrincipal(codesignInfo, reqInfo, verificationPas
         return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Disallowed OR or alternate clauses in designated requirement' };
     }
 
-    // Parse exact conjunction predicates: identifier "<expected>", anchor apple generic, certificate leaf[subject.OU] = "<teamId>"
     const predicates = designatedBody.split('and').map(p => p.trim());
-    if (predicates.length !== 3) {
-        return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Requirement must contain exactly three conjunctive predicates' };
-    }
 
     const expectedPred0 = `identifier "${expectedIdentifier}"`;
     const expectedPred1 = 'anchor apple generic';
     const expectedPred2 = `certificate leaf[subject.OU] = "${teamId}"`;
 
-    if (predicates[0] !== expectedPred0 || predicates[1] !== expectedPred1 || predicates[2] !== expectedPred2) {
-        return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Designated requirement predicates do not match exact canonical conjunction' };
+    let foundId = false;
+    let foundAnchor = false;
+    let foundTeam = false;
+
+    const allowedOidRegex = /^certificate\s+1\.2\.840\.113635\.100\.\d+\.\d+(\s+\/\*\s*exists\s*\*\/)?$/;
+
+    for (const pred of predicates) {
+        if (pred === expectedPred0) {
+            if (foundId) return { classification: 'unsigned_or_invalid', details: 'Duplicate identifier predicate' };
+            foundId = true;
+        } else if (pred === expectedPred1) {
+            if (foundAnchor) return { classification: 'unsigned_or_invalid', details: 'Duplicate anchor predicate' };
+            foundAnchor = true;
+        } else if (pred === expectedPred2) {
+            if (foundTeam) return { classification: 'unsigned_or_invalid', details: 'Duplicate team predicate' };
+            foundTeam = true;
+        } else if (allowedOidRegex.test(pred)) {
+            // Allowlisted Apple OID predicate
+        } else {
+            return { classification: 'unsigned_or_invalid', identifier, teamId, details: `Unrecognized requirement predicate: ${pred}` };
+        }
+    }
+
+    if (!foundId || !foundAnchor || !foundTeam) {
+        return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Missing required designated requirement predicate' };
     }
 
     return {

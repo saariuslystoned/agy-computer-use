@@ -9,7 +9,7 @@
 ## Decision
 1. **Scope**:
    - Provide visual observation (ScreenCaptureKit / screenshot), accessibility graph extraction (`AXUIElement`), coordinate mapping (`0...999` grid), and low-level mouse/keyboard input synthesis (`CGEvent`).
-   - Deliver an MCP server bridge communicating with a signed native macOS host app over local Unix domain socket IPC.
+   - Deliver an MCP server bridge communicating with a staged background macOS host app (currently `ad_hoc_ephemeral`) over local Unix domain socket IPC.
 
 2. **Non-Goals**:
    - Web browser DOM scraping (handled via DevTools MCP tools).
