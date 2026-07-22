@@ -541,6 +541,42 @@ public final class ManualSleeper: Sleeper, @unchecked Sendable {
     }
 }
 
+public struct UnlinkatEvent: Equatable, Sendable {
+    public let sequence: Int
+    public let dirFd: Int32
+    public let activeDirGen: UInt64?
+    public let basename: String
+    public let flags: Int32
+    public let preCallTargetStatResult: Int32
+    public let targetDev: dev_t?
+    public let targetInode: ino_t?
+    public let targetUid: uid_t?
+    public let targetMode: mode_t?
+    public let result: Int32
+}
+
+public struct OpenEvent: Equatable, Sendable {
+    public let sequence: Int
+    public let fd: Int32
+    public let generation: UInt64
+    public let path: String
+}
+
+public struct CloseEvent: Equatable, Sendable {
+    public let sequence: Int
+    public let fd: Int32
+    public let generation: UInt64?
+    public let result: Int32
+    public let errnoVal: Int32
+}
+
+public struct BoundSocketToken: Equatable, Sendable {
+    public let dev: dev_t
+    public let inode: ino_t
+    public let uid: uid_t
+    public let mode: mode_t
+}
+
 public final class ScriptedPOSIXSyscalls: POSIXSyscallProviding, @unchecked Sendable {
     private let underlying = DarwinPOSIXSyscalls.shared
     private let lock = NSLock()
@@ -553,55 +589,74 @@ public final class ScriptedPOSIXSyscalls: POSIXSyscallProviding, @unchecked Send
     public var bindHook: ((Int32, UnsafePointer<sockaddr>?, socklen_t) -> Int32?)?
     public var fstatatHook: ((Int32, UnsafePointer<CChar>, UnsafeMutablePointer<stat>?, Int32) -> Int32?)?
     public var lstatHook: ((UnsafePointer<CChar>, UnsafeMutablePointer<stat>?) -> Int32?)?
+    public var openHook: ((UnsafePointer<CChar>, Int32, mode_t) -> Int32?)?
+    public var closeHook: ((Int32) -> Int32?)?
 
     public var acceptCallCount: Int = 0
     public var readCallCount: Int = 0
     public var writeCallCount: Int = 0
     public var unlinkatCallCount: Int = 0
     public var closeCallCount: Int = 0
+    public var bindCallCount: Int = 0
+    public var listenCallCount: Int = 0
     public var unlinkedFiles: [String] = []
     public var openedDescriptors: [Int32] = []
     public var closedDescriptors: [Int32] = []
     public var openCounts: [Int32: Int] = [:]
     public var closeCounts: [Int32: Int] = [:]
 
+    public var openEvents: [OpenEvent] = []
+    public var closeEvents: [CloseEvent] = []
+    public var unlinkatEvents: [UnlinkatEvent] = []
+
     private var nextGeneration: UInt64 = 0
-    private var activeGenerations: [UInt64: Int32] = [:]
-    private var closedGenerations: Set<UInt64> = []
+    private var fdGenerations: [Int32: [UInt64]] = [:]
+    private var unresolvedGenerations: Set<UInt64> = []
 
     public init() {}
 
-    private func trackOpen(fd: Int32) {
+    private func trackOpenSuccess(fd: Int32, path: String) {
         guard fd >= 0 else { return }
         lock.lock()
         nextGeneration += 1
         let gen = nextGeneration
-        activeGenerations[gen] = fd
+        fdGenerations[fd, default: []].append(gen)
+        openEvents.append(OpenEvent(sequence: openEvents.count + 1, fd: fd, generation: gen, path: path))
         openedDescriptors.append(fd)
         openCounts[fd, default: 0] += 1
         lock.unlock()
     }
 
-    private func trackCloseSuccess(fd: Int32) {
+    private func trackCloseCall(fd: Int32, result: Int32, err: Int32) {
         lock.lock()
         closeCallCount += 1
-        closedDescriptors.append(fd)
-        closeCounts[fd, default: 0] += 1
-        if let (gen, _) = activeGenerations.first(where: { $1 == fd }) {
-            activeGenerations.removeValue(forKey: gen)
-            closedGenerations.insert(gen)
+        if result == 0 {
+            closedDescriptors.append(fd)
+            closeCounts[fd, default: 0] += 1
+            let poppedGen = fdGenerations[fd]?.popLast()
+            if let gen = poppedGen {
+                unresolvedGenerations.remove(gen)
+            }
+            closeEvents.append(CloseEvent(sequence: closeEvents.count + 1, fd: fd, generation: poppedGen, result: 0, errnoVal: 0))
+        } else {
+            let activeGen = fdGenerations[fd]?.last
+            if let gen = activeGen {
+                unresolvedGenerations.insert(gen)
+            }
+            closeEvents.append(CloseEvent(sequence: closeEvents.count + 1, fd: fd, generation: activeGen, result: -1, errnoVal: err))
         }
         lock.unlock()
     }
 
     public var areAllDescriptorsClosed: Bool {
         lock.lock(); defer { lock.unlock() }
-        return activeGenerations.isEmpty
+        let activeTotal = fdGenerations.values.reduce(0) { $0 + $1.count }
+        return activeTotal == 0 && unresolvedGenerations.isEmpty
     }
 
     public var activeGenerationCount: Int {
         lock.lock(); defer { lock.unlock() }
-        return activeGenerations.count
+        return fdGenerations.values.reduce(0) { $0 + $1.count }
     }
 
     public var lastErrno: Int32 {
@@ -630,7 +685,7 @@ public final class ScriptedPOSIXSyscalls: POSIXSyscallProviding, @unchecked Send
         if let res = hook?(socket, address, addressLen) { return res }
         let fd = underlying.accept(socket, address, addressLen)
         if fd >= 0 {
-            trackOpen(fd: fd)
+            trackOpenSuccess(fd: fd, path: "accept(\(socket))")
         }
         return fd
     }
@@ -657,13 +712,21 @@ public final class ScriptedPOSIXSyscalls: POSIXSyscallProviding, @unchecked Send
 
     public func listen(_ socket: Int32, _ backlog: Int32) -> Int32 {
         clearErrno()
-        if let res = listenHook?(socket, backlog) { return res }
+        lock.lock()
+        listenCallCount += 1
+        let hook = listenHook
+        lock.unlock()
+        if let res = hook?(socket, backlog) { return res }
         return underlying.listen(socket, backlog)
     }
 
     public func bind(_ socket: Int32, _ address: UnsafePointer<sockaddr>?, _ addressLen: socklen_t) -> Int32 {
         clearErrno()
-        if let res = bindHook?(socket, address, addressLen) { return res }
+        lock.lock()
+        bindCallCount += 1
+        let hook = bindHook
+        lock.unlock()
+        if let res = hook?(socket, address, addressLen) { return res }
         return underlying.bind(socket, address, addressLen)
     }
 
@@ -671,25 +734,36 @@ public final class ScriptedPOSIXSyscalls: POSIXSyscallProviding, @unchecked Send
         clearErrno()
         let fd = underlying.socket(domain, type, `protocol`)
         if fd >= 0 {
-            trackOpen(fd: fd)
+            trackOpenSuccess(fd: fd, path: "socket(\(domain),\(type))")
         }
         return fd
     }
 
     public func open(_ path: UnsafePointer<CChar>, _ oflag: Int32, _ mode: mode_t) -> Int32 {
         clearErrno()
+        lock.lock()
+        let hook = openHook
+        lock.unlock()
+        let pathStr = String(cString: path)
+        if let res = hook?(path, oflag, mode) {
+            if res >= 0 {
+                trackOpenSuccess(fd: res, path: pathStr)
+            }
+            return res
+        }
         let fd = underlying.open(path, oflag, mode)
         if fd >= 0 {
-            trackOpen(fd: fd)
+            trackOpenSuccess(fd: fd, path: pathStr)
         }
         return fd
     }
 
     public func openat(_ dirFd: Int32, _ path: UnsafePointer<CChar>, _ oflag: Int32, _ mode: mode_t) -> Int32 {
         clearErrno()
+        let pathStr = String(cString: path)
         let fd = underlying.openat(dirFd, path, oflag, mode)
         if fd >= 0 {
-            trackOpen(fd: fd)
+            trackOpenSuccess(fd: fd, path: pathStr)
         }
         return fd
     }
@@ -713,20 +787,53 @@ public final class ScriptedPOSIXSyscalls: POSIXSyscallProviding, @unchecked Send
     public func unlink(_ path: UnsafePointer<CChar>) -> Int32 { clearErrno(); return underlying.unlink(path) }
     public func unlinkat(_ dirFd: Int32, _ path: UnsafePointer<CChar>, _ flag: Int32) -> Int32 {
         clearErrno()
+        var targetStat = stat()
+        let preStatRes = underlying.fstatat(dirFd, path, &targetStat, AT_SYMLINK_NOFOLLOW)
+
         lock.lock()
         unlinkatCallCount += 1
-        unlinkedFiles.append(String(cString: path))
+        let pathStr = String(cString: path)
+        unlinkedFiles.append(pathStr)
+        let activeDirGen = fdGenerations[dirFd]?.last
         lock.unlock()
-        return underlying.unlinkat(dirFd, path, flag)
+
+        let res = underlying.unlinkat(dirFd, path, flag)
+        let err = lastErrno
+
+        lock.lock()
+        unlinkatEvents.append(UnlinkatEvent(
+            sequence: unlinkatEvents.count + 1,
+            dirFd: dirFd,
+            activeDirGen: activeDirGen,
+            basename: pathStr,
+            flags: flag,
+            preCallTargetStatResult: preStatRes,
+            targetDev: preStatRes == 0 ? targetStat.st_dev : nil,
+            targetInode: preStatRes == 0 ? targetStat.st_ino : nil,
+            targetUid: preStatRes == 0 ? targetStat.st_uid : nil,
+            targetMode: preStatRes == 0 ? targetStat.st_mode : nil,
+            result: res
+        ))
+        lock.unlock()
+
+        if res != 0 { setErrno(err) }
+        return res
     }
     public func rmdir(_ path: UnsafePointer<CChar>) -> Int32 { clearErrno(); return underlying.rmdir(path) }
     public func mkdir(_ path: UnsafePointer<CChar>, _ mode: mode_t) -> Int32 { clearErrno(); return underlying.mkdir(path, mode) }
     public func close(_ fd: Int32) -> Int32 {
         clearErrno()
-        let ret = underlying.close(fd)
-        if ret == 0 {
-            trackCloseSuccess(fd: fd)
+        lock.lock()
+        let hook = closeHook
+        lock.unlock()
+        if let res = hook?(fd) {
+            let err = lastErrno
+            trackCloseCall(fd: fd, result: res, err: res != 0 ? err : 0)
+            return res
         }
+        let ret = underlying.close(fd)
+        let err = lastErrno
+        trackCloseCall(fd: fd, result: ret, err: ret != 0 ? err : 0)
         return ret
     }
     public func getuid() -> uid_t { underlying.getuid() }
@@ -2571,162 +2678,571 @@ public struct ComputerUseHostTestRunner {
     }
 
     public static func run35_InjectedListenFailurePostBindRollback() async throws {
-        let parentDir = "/tmp/agy-test-c35-\(UUID().uuidString)"
-        let sockPath = "\(parentDir)/host.sock"
-        let scriptedSyscalls = ScriptedPOSIXSyscalls()
-
-        scriptedSyscalls.listenHook = { sock, backlog in
-            scriptedSyscalls.setErrno(EADDRINUSE)
-            return -1
-        }
-
-        let listener = SocketListener(
-            socketPath: sockPath,
-            server: HostServer(authorizer: FakeScreenRecordingAuthorizer(), topologyProvider: FakeDisplayTopologyProvider(), captureEngine: FakeCaptureEngine(), axEngine: DisabledAXInspector(), inputEngine: DisabledInputInjector()),
-            perFrameTimeoutSec: 1.0,
-            syscalls: scriptedSyscalls
-        )
-
-        var threw = false
+        // R3-1 — Self-discriminator for Virtual Numeric FD 77 (Open / Close Generation Ledger)
         do {
-            try listener.start()
-        } catch {
-            threw = true
-        }
-        assertTrue(threw, "SocketListener.start must throw when listen returns error")
-
-        var origLockStat = stat()
-        let lockPath = "\(parentDir)/host.lock"
-        assertEqual(scriptedSyscalls.lstat(lockPath, &origLockStat), 0, "Persistent host.lock inode must remain after listen failure rollback")
-        let origLockInode = origLockStat.st_ino
-
-        var sockStat = stat()
-        assertTrue(scriptedSyscalls.lstat(sockPath, &sockStat) != 0, "Failed socket file must be removed after listen failure rollback")
-        assertTrue(!scriptedSyscalls.openedDescriptors.isEmpty, "Opened descriptors list must be non-empty")
-        assertTrue(scriptedSyscalls.areAllDescriptorsClosed, "All opened descriptors must be closed as a multiset (openCount == closeCount)")
-        assertTrue(scriptedSyscalls.unlinkatCallCount > 0, "Descriptor-relative unlinkat must be called on rollback")
-        assertTrue(scriptedSyscalls.unlinkedFiles.contains("host.sock"), "Descriptor-relative unlinkat must unlink host.sock token")
-
-        scriptedSyscalls.listenHook = nil
-        var secondStartThrew = false
-        do {
-            try listener.start()
-        } catch {
-            secondStartThrew = true
-        }
-        assertTrue(!secondStartThrew, "Subsequent SocketListener.start must succeed after rollback")
-
-        var postRestartLockStat = stat()
-        assertEqual(scriptedSyscalls.lstat(lockPath, &postRestartLockStat), 0, "Persistent host.lock inode must exist after restart")
-        assertEqual(postRestartLockStat.st_ino, origLockInode, "Persistent host.lock inode must remain unchanged after listen failure rollback & restart")
-
-        listener.stop()
-        assertTrue(scriptedSyscalls.lstat(sockPath, &sockStat) != 0, "Socket file must be unlinked on listener stop")
-        assertTrue(scriptedSyscalls.areAllDescriptorsClosed, "All descriptors must be closed as a multiset after listener stop")
-
-        // Pre-bind parent swap test
-        let preBindDir = "/tmp/agy-prebind-\(UUID().uuidString)"
-        let preBindSockPath = "\(preBindDir)/host.sock"
-        var fstatatCallCount = 0
-        let preBindSyscalls = ScriptedPOSIXSyscalls()
-        preBindSyscalls.fstatatHook = { dirFd, path, buf, flag in
-            fstatatCallCount += 1
-            if fstatatCallCount == 1, let buf = buf {
-                // Return mismatched inode for parentDir revalidation pre-bind
-                buf.pointee.st_dev = 9999
-                buf.pointee.st_ino = 9999
-                buf.pointee.st_mode = S_IFDIR | 0o700
-                buf.pointee.st_uid = getuid()
+            let discSyscalls = ScriptedPOSIXSyscalls()
+            var closeAttempt = 0
+            discSyscalls.openHook = { _, _, _ in 77 }
+            discSyscalls.closeHook = { fd in
+                guard fd == 77 else { return nil }
+                closeAttempt += 1
+                if closeAttempt == 1 {
+                    discSyscalls.setErrno(EINTR)
+                    return -1
+                }
                 return 0
             }
-            return nil
+
+            let virtualFd = discSyscalls.open("/dev/test77", O_RDWR, 0o600)
+            assertEqual(virtualFd, 77)
+            assertEqual(discSyscalls.activeGenerationCount, 1)
+            assertTrue(!discSyscalls.areAllDescriptorsClosed)
+            assertEqual(discSyscalls.openEvents.count, 1)
+            assertEqual(discSyscalls.openEvents[0].sequence, 1)
+            assertEqual(discSyscalls.openEvents[0].fd, 77)
+            assertEqual(discSyscalls.openEvents[0].path, "/dev/test77")
+            let g1 = discSyscalls.openEvents[0].generation
+
+            let failedCloseRes = discSyscalls.close(77)
+            assertEqual(failedCloseRes, -1)
+            assertEqual(discSyscalls.lastErrno, EINTR)
+            assertEqual(discSyscalls.activeGenerationCount, 1)
+            assertTrue(!discSyscalls.areAllDescriptorsClosed)
+            assertEqual(discSyscalls.closeEvents.count, 1)
+            assertEqual(discSyscalls.closeEvents[0].sequence, 1)
+            assertEqual(discSyscalls.closeEvents[0].fd, 77)
+            assertEqual(discSyscalls.closeEvents[0].generation, g1)
+            assertEqual(discSyscalls.closeEvents[0].result, -1)
+            assertEqual(discSyscalls.closeEvents[0].errnoVal, EINTR)
+
+            let virtualFd2 = discSyscalls.open("/dev/test77", O_RDWR, 0o600)
+            assertEqual(virtualFd2, 77)
+            assertEqual(discSyscalls.activeGenerationCount, 2)
+            assertEqual(discSyscalls.openEvents.count, 2)
+            assertEqual(discSyscalls.openEvents[0].sequence, 1)
+            assertEqual(discSyscalls.openEvents[0].fd, 77)
+            assertEqual(discSyscalls.openEvents[0].generation, g1)
+            assertEqual(discSyscalls.openEvents[0].path, "/dev/test77")
+            assertEqual(discSyscalls.openEvents[1].sequence, 2)
+            assertEqual(discSyscalls.openEvents[1].fd, 77)
+            assertEqual(discSyscalls.openEvents[1].path, "/dev/test77")
+            let g2 = discSyscalls.openEvents[1].generation
+            assertTrue(g1 < g2)
+
+            let closeResG2 = discSyscalls.close(77)
+            assertEqual(closeResG2, 0)
+            assertEqual(discSyscalls.activeGenerationCount, 1)
+            assertTrue(!discSyscalls.areAllDescriptorsClosed, "G1 must remain unresolved after G2 close")
+            assertEqual(discSyscalls.closeEvents.count, 2)
+            assertEqual(discSyscalls.closeEvents[1].sequence, 2)
+            assertEqual(discSyscalls.closeEvents[1].fd, 77)
+            assertEqual(discSyscalls.closeEvents[1].generation, g2)
+            assertEqual(discSyscalls.closeEvents[1].result, 0)
+            assertEqual(discSyscalls.closeEvents[1].errnoVal, 0)
+
+            let closeResG1 = discSyscalls.close(77)
+            assertEqual(closeResG1, 0)
+            assertEqual(discSyscalls.activeGenerationCount, 0)
+            assertTrue(discSyscalls.areAllDescriptorsClosed, "All generations must be closed after G1 retry")
+            assertEqual(discSyscalls.closeEvents.count, 3)
+            assertEqual(discSyscalls.closeEvents[2].sequence, 3)
+            assertEqual(discSyscalls.closeEvents[2].fd, 77)
+            assertEqual(discSyscalls.closeEvents[2].generation, g1)
+            assertEqual(discSyscalls.closeEvents[2].result, 0)
+            assertEqual(discSyscalls.closeEvents[2].errnoVal, 0)
         }
-        let preBindListener = SocketListener(
-            socketPath: preBindSockPath,
-            server: HostServer(authorizer: FakeScreenRecordingAuthorizer(), topologyProvider: FakeDisplayTopologyProvider(), captureEngine: FakeCaptureEngine(), axEngine: DisabledAXInspector(), inputEngine: DisabledInputInjector()),
-            perFrameTimeoutSec: 1.0,
-            syscalls: preBindSyscalls
-        )
-        var preBindThrew = false
-        do { try preBindListener.start() } catch { preBindThrew = true }
-        assertTrue(preBindThrew, "SocketListener.start must throw on pre-bind parent swap revalidation failure")
-        assertTrue(preBindSyscalls.areAllDescriptorsClosed, "All descriptors must be closed after pre-bind swap failure")
 
-        preBindSyscalls.fstatatHook = nil
-        var validStartThrew = false
-        do { try preBindListener.start() } catch { validStartThrew = true }
-        assertTrue(!validStartThrew, "Valid start must succeed after pre-bind swap failure")
-        preBindListener.stop()
-        assertTrue(preBindSyscalls.areAllDescriptorsClosed, "All descriptors must be closed after stop")
+        // R3-2 — Ordinary Listen-Failure Rollback Token and Stage
+        do {
+            let parentDir = "/tmp/agy-test-c35-\(UUID().uuidString)"
+            let sockPath = "\(parentDir)/host.sock"
+            let scriptedSyscalls = ScriptedPOSIXSyscalls()
 
-        // Refusal of FIFO or non-socket file at socket path (and inode survival)
-        let fifoDir = "/tmp/agy-fifo-\(UUID().uuidString)"
-        try FileManager.default.createDirectory(atPath: fifoDir, withIntermediateDirectories: true, attributes: [FileAttributeKey.posixPermissions: 0o700])
-        let fifoPath = "\(fifoDir)/host.sock"
-        mkfifo(fifoPath, 0o600)
-        var preFifoStat = stat()
-        assertEqual(lstat(fifoPath, &preFifoStat), 0)
-        let origFifoInode = preFifoStat.st_ino
+            let listener = SocketListener(
+                socketPath: sockPath,
+                server: HostServer(authorizer: FakeScreenRecordingAuthorizer(), topologyProvider: FakeDisplayTopologyProvider(), captureEngine: FakeCaptureEngine(), axEngine: DisabledAXInspector(), inputEngine: DisabledInputInjector()),
+                perFrameTimeoutSec: 1.0,
+                syscalls: scriptedSyscalls
+            )
 
-        let fifoListener = SocketListener(
-            socketPath: fifoPath,
-            server: HostServer(authorizer: FakeScreenRecordingAuthorizer(), topologyProvider: FakeDisplayTopologyProvider(), captureEngine: FakeCaptureEngine(), axEngine: DisabledAXInspector(), inputEngine: DisabledInputInjector()),
-            perFrameTimeoutSec: 1.0,
-            syscalls: scriptedSyscalls
-        )
-        var fifoThrew = false
-        do { try fifoListener.start() } catch { fifoThrew = true }
-        assertTrue(fifoThrew, "SocketListener.start must refuse FIFO file at socket path")
+            let canonicalSockPath = listener.socketPath
+            let canonicalParentDir = (canonicalSockPath as NSString).deletingLastPathComponent
 
-        var postFifoStat = stat()
-        assertEqual(lstat(fifoPath, &postFifoStat), 0, "Original FIFO file must survive start failure")
-        assertEqual(postFifoStat.st_ino, origFifoInode, "Original FIFO inode must remain unchanged")
-        assertTrue((postFifoStat.st_mode & S_IFMT) == S_IFIFO, "Original FIFO type must remain S_IFIFO")
-        assertTrue(scriptedSyscalls.areAllDescriptorsClosed, "All descriptors must be closed after FIFO refusal")
+            var capturedBoundToken: BoundSocketToken? = nil
+            scriptedSyscalls.listenHook = { sock, backlog in
+                var boundStat = stat()
+                let lstatRes = lstat(canonicalSockPath, &boundStat)
+                assertEqual(lstatRes, 0, "lstat on canonicalSockPath must succeed during listen hook")
+                capturedBoundToken = BoundSocketToken(
+                    dev: boundStat.st_dev,
+                    inode: boundStat.st_ino,
+                    uid: boundStat.st_uid,
+                    mode: boundStat.st_mode
+                )
+                scriptedSyscalls.setErrno(EADDRINUSE)
+                return -1
+            }
 
-        unlink(fifoPath)
-        var fifoStartThrew = false
-        do { try fifoListener.start() } catch { fifoStartThrew = true }
-        assertTrue(!fifoStartThrew, "Valid start must succeed after FIFO removal")
-        fifoListener.stop()
-        rmdir(fifoDir)
+            var startError: ComputerUseError? = nil
+            do { try listener.start() } catch let err as ComputerUseError { startError = err }
+            if case .ipcError(let reason) = startError {
+                assertEqual(reason, "Failed to listen on socket at \(canonicalSockPath): errno \(EADDRINUSE)")
+            } else {
+                assertTrue(false, "Expected ComputerUseError.ipcError but got \(String(describing: startError))")
+            }
+            assertEqual(scriptedSyscalls.bindCallCount, 1)
+            assertEqual(scriptedSyscalls.listenCallCount, 1)
+            assertTrue(capturedBoundToken != nil)
 
-        // Foreign replacement file survival on stop()
-        let foreignDir = "/tmp/agy-foreign-\(UUID().uuidString)"
-        try FileManager.default.createDirectory(atPath: foreignDir, withIntermediateDirectories: true, attributes: [FileAttributeKey.posixPermissions: 0o700])
-        let foreignSockPath = "\(foreignDir)/host.sock"
-        let foreignListener = SocketListener(
-            socketPath: foreignSockPath,
-            server: HostServer(authorizer: FakeScreenRecordingAuthorizer(), topologyProvider: FakeDisplayTopologyProvider(), captureEngine: FakeCaptureEngine(), axEngine: DisabledAXInspector(), inputEngine: DisabledInputInjector()),
-            perFrameTimeoutSec: 1.0,
-            syscalls: scriptedSyscalls
-        )
-        try foreignListener.start()
+            // Supplemental compatibility assertions from base (E5)
+            assertTrue(!scriptedSyscalls.openedDescriptors.isEmpty)
+            assertTrue(scriptedSyscalls.unlinkatCallCount > 0)
+            assertTrue(scriptedSyscalls.unlinkedFiles.contains("host.sock"))
 
-        unlink(foreignSockPath)
-        let foreignFd = open(foreignSockPath, O_CREAT | O_WRONLY, 0o600)
-        assertTrue(foreignFd >= 0)
-        close(foreignFd)
-        var foreignStat = stat()
-        assertEqual(lstat(foreignSockPath, &foreignStat), 0)
+            var origLockStat = stat()
+            let lockPath = "\(canonicalParentDir)/host.lock"
+            assertEqual(scriptedSyscalls.lstat(lockPath, &origLockStat), 0, "Persistent host.lock inode must remain after listen failure rollback")
+            let origLockInode = origLockStat.st_ino
 
-        foreignListener.stop()
-        var postStopStat = stat()
-        assertEqual(lstat(foreignSockPath, &postStopStat), 0, "Foreign replacement file must survive listener.stop()")
-        assertEqual(postStopStat.st_ino, foreignStat.st_ino, "Foreign replacement file inode must remain untouched")
-        unlink(foreignSockPath)
-        rmdir(foreignDir)
+            var sockStat = stat()
+            assertTrue(scriptedSyscalls.lstat(canonicalSockPath, &sockStat) != 0, "Failed socket file must be removed after listen failure rollback")
+            assertTrue(scriptedSyscalls.areAllDescriptorsClosed, "All descriptors must be closed as a multiset after listen failure")
 
-        // Descriptor bookkeeping fd-reuse / failed-close discriminator test
-        let discSyscalls = ScriptedPOSIXSyscalls()
-        let fd1 = discSyscalls.open("/dev/null", O_RDONLY, 0)
-        assertTrue(fd1 >= 0)
-        assertEqual(discSyscalls.activeGenerationCount, 1)
-        assertTrue(!discSyscalls.areAllDescriptorsClosed)
-        let closeRes = discSyscalls.close(fd1)
-        assertEqual(closeRes, 0)
-        assertEqual(discSyscalls.activeGenerationCount, 0)
-        assertTrue(discSyscalls.areAllDescriptorsClosed)
+            assertEqual(scriptedSyscalls.unlinkatEvents.count, 1, "Exactly one rollback unlinkat event must occur")
+            if let evt = scriptedSyscalls.unlinkatEvents.first, let token = capturedBoundToken {
+                assertEqual(evt.sequence, 1)
+                assertEqual(evt.basename, "host.sock")
+                assertEqual(evt.flags, 0)
+                assertEqual(evt.preCallTargetStatResult, 0)
+                assertEqual(evt.result, 0)
+                assertEqual(evt.targetDev, token.dev)
+                assertEqual(evt.targetInode, token.inode)
+                assertEqual(evt.targetUid, token.uid)
+                assertEqual(token.uid, getuid())
+                assertTrue((evt.targetMode! & S_IFMT) == S_IFSOCK)
+                assertTrue((token.mode & S_IFMT) == S_IFSOCK)
+
+                let parentOpenEvents = scriptedSyscalls.openEvents.filter { $0.path == canonicalParentDir }
+                assertEqual(parentOpenEvents.count, 2, "Must find exactly two parent directory open events: prepare then retained start")
+                let prepOpenEvt = parentOpenEvents[0]
+                let retainedOpenEvt = parentOpenEvents[1]
+                assertTrue(retainedOpenEvt.generation > prepOpenEvt.generation, "Retained open generation must be strictly greater than prepare open generation")
+                assertTrue(retainedOpenEvt.generation != prepOpenEvt.generation)
+                assertEqual(evt.dirFd, retainedOpenEvt.fd)
+                assertEqual(evt.activeDirGen, retainedOpenEvt.generation)
+                assertTrue(evt.activeDirGen != prepOpenEvt.generation)
+            }
+
+            scriptedSyscalls.listenHook = nil
+            var secondStartThrew = false
+            do { try listener.start() } catch { secondStartThrew = true }
+            assertTrue(!secondStartThrew, "Subsequent SocketListener.start must succeed after rollback")
+
+            var postRestartLockStat = stat()
+            assertEqual(scriptedSyscalls.lstat(lockPath, &postRestartLockStat), 0)
+            assertEqual(postRestartLockStat.st_ino, origLockInode)
+
+            listener.stop()
+            assertTrue(scriptedSyscalls.lstat(canonicalSockPath, &sockStat) != 0)
+            assertTrue(scriptedSyscalls.areAllDescriptorsClosed)
+            let unlLock = unlink(lockPath)
+            assertEqual(unlLock, 0, "unlink lockPath must succeed")
+            let rmdirRes = rmdir(canonicalParentDir)
+            assertEqual(rmdirRes, 0, "rmdir canonicalParentDir must succeed")
+        }
+
+        // R3-3 — Physical Pre-Bind Parent Swap at the Production lstat Guard
+        do {
+            let preBindDir = "/tmp/agy-prebind-\(UUID().uuidString)"
+            let preBindSockPath = "\(preBindDir)/host.sock"
+            let preBindSyscalls = ScriptedPOSIXSyscalls()
+
+            var origDirStat = stat()
+            var replDirStat = stat()
+            var swapHookFired = 0
+            let origRetainedDir = "\(preBindDir)-orig-retained"
+
+            let preBindListener = SocketListener(
+                socketPath: preBindSockPath,
+                server: HostServer(authorizer: FakeScreenRecordingAuthorizer(), topologyProvider: FakeDisplayTopologyProvider(), captureEngine: FakeCaptureEngine(), axEngine: DisabledAXInspector(), inputEngine: DisabledInputInjector()),
+                perFrameTimeoutSec: 1.0,
+                syscalls: preBindSyscalls
+            )
+
+            let preBindCanonicalSockPath = preBindListener.socketPath
+            let preBindCanonicalDir = (preBindCanonicalSockPath as NSString).deletingLastPathComponent
+
+            preBindSyscalls.lstatHook = { path, buf in
+                let pStr = String(cString: path)
+                if pStr == preBindCanonicalDir {
+                    swapHookFired += 1
+                    if swapHookFired == 1 {
+                        // Pre-bind lstat revalidation call: swap directory on disk physically
+                        let lstatOrigRes = DarwinPOSIXSyscalls.shared.lstat(preBindCanonicalDir, &origDirStat)
+                        assertEqual(lstatOrigRes, 0, "lstat on orig preBindCanonicalDir must succeed")
+                        let renameRes = rename(preBindCanonicalDir, origRetainedDir)
+                        assertEqual(renameRes, 0, "rename preBindCanonicalDir must succeed")
+                        let mkdirRes = mkdir(preBindCanonicalDir, 0o700)
+                        assertEqual(mkdirRes, 0, "mkdir preBindCanonicalDir must succeed")
+                        let lstatReplRes = DarwinPOSIXSyscalls.shared.lstat(preBindCanonicalDir, &replDirStat)
+                        assertEqual(lstatReplRes, 0, "lstat on repl preBindCanonicalDir must succeed")
+                    }
+                }
+                return nil
+            }
+
+            var preBindError: ComputerUseError? = nil
+            do { try preBindListener.start() } catch let err as ComputerUseError { preBindError = err }
+            if case .ipcError(let reason) = preBindError {
+                assertEqual(reason, "Pre-bind parent directory revalidation failed: path replaced or mode altered")
+            } else {
+                assertTrue(false, "Expected ComputerUseError.ipcError but got \(String(describing: preBindError))")
+            }
+            assertEqual(swapHookFired, 1, "Swap hook count must be exactly 1")
+            assertTrue(origDirStat.st_ino != replDirStat.st_ino, "Original and replacement directory inodes must differ")
+            assertEqual(preBindSyscalls.bindCallCount, 0, "Bind count must be 0 on pre-bind swap")
+            assertEqual(preBindSyscalls.listenCallCount, 0, "Listen count must be 0 on pre-bind swap")
+            assertEqual(preBindSyscalls.unlinkatEvents.count, 0, "Unlinkat events must be empty on pre-bind swap")
+            assertTrue(preBindSyscalls.areAllDescriptorsClosed, "All descriptors must close after pre-bind swap failure")
+
+            // Retained orig contains host.lock and no host.sock
+            var lockStat = stat()
+            assertEqual(lstat("\(origRetainedDir)/host.lock", &lockStat), 0, "Original retained dir must contain host.lock")
+            var origSockStat = stat()
+            assertTrue(lstat("\(origRetainedDir)/host.sock", &origSockStat) != 0, "Original retained dir must contain no host.sock")
+
+            // Replacement dir contains no host.sock
+            var replSockStat = stat()
+            assertTrue(lstat("\(preBindCanonicalDir)/host.sock", &replSockStat) != 0, "Replacement dir must contain no host.sock")
+
+            // Cleanup & valid start proof
+            let rmdirRes = rmdir(preBindCanonicalDir)
+            assertEqual(rmdirRes, 0, "rmdir replacement dir must succeed")
+            let restoreRenameRes = rename(origRetainedDir, preBindCanonicalDir)
+            assertEqual(restoreRenameRes, 0, "rename origRetainedDir back must succeed")
+            preBindSyscalls.lstatHook = nil
+
+            var validStartThrew = false
+            do { try preBindListener.start() } catch { validStartThrew = true }
+            assertTrue(!validStartThrew, "Valid start must succeed after restoring parent dir")
+            preBindListener.stop()
+            assertTrue(preBindSyscalls.areAllDescriptorsClosed)
+            let unlLock = unlink("\(preBindCanonicalDir)/host.lock")
+            assertEqual(unlLock, 0, "unlink preBind host.lock must succeed")
+            let finalRmdirRes = rmdir(preBindCanonicalDir)
+            assertEqual(finalRmdirRes, 0, "rmdir preBindCanonicalDir must succeed")
+        }
+
+        // R3-4 — Real Post-Bind Parent Swap and Retained-Directory Rollback
+        do {
+            let postBindDir = "/tmp/agy-postbind-\(UUID().uuidString)"
+            let postBindSockPath = "\(postBindDir)/host.sock"
+            let postBindSyscalls = ScriptedPOSIXSyscalls()
+
+            let postBindListener = SocketListener(
+                socketPath: postBindSockPath,
+                server: HostServer(authorizer: FakeScreenRecordingAuthorizer(), topologyProvider: FakeDisplayTopologyProvider(), captureEngine: FakeCaptureEngine(), axEngine: DisabledAXInspector(), inputEngine: DisabledInputInjector()),
+                perFrameTimeoutSec: 1.0,
+                syscalls: postBindSyscalls
+            )
+
+            let postBindCanonicalSockPath = postBindListener.socketPath
+            let postBindCanonicalDir = (postBindCanonicalSockPath as NSString).deletingLastPathComponent
+            let origRetainedDir = "\(postBindCanonicalDir)-orig-retained"
+
+            var capturedBoundToken: BoundSocketToken? = nil
+            var foreignSentinelStat = stat()
+            var bindRes: Int32 = -1
+
+            postBindSyscalls.bindHook = { sock, sa, len in
+                bindRes = DarwinPOSIXSyscalls.shared.bind(sock, sa, len)
+                if bindRes == 0 {
+                    var boundStat = stat()
+                    let lstatBoundRes = lstat(postBindCanonicalSockPath, &boundStat)
+                    assertEqual(lstatBoundRes, 0, "lstat on postBindCanonicalSockPath must succeed during bind hook")
+                    capturedBoundToken = BoundSocketToken(
+                        dev: boundStat.st_dev,
+                        inode: boundStat.st_ino,
+                        uid: boundStat.st_uid,
+                        mode: boundStat.st_mode
+                    )
+                    // Physically swap parent directory after bind succeeds
+                    let renameRes = rename(postBindCanonicalDir, origRetainedDir)
+                    assertEqual(renameRes, 0, "rename postBindCanonicalDir must succeed")
+                    let mkdirRes = mkdir(postBindCanonicalDir, 0o700)
+                    assertEqual(mkdirRes, 0, "mkdir postBindCanonicalDir must succeed")
+
+                    // Create foreign sentinel file at replacement canonical host.sock path
+                    let fFd = open(postBindCanonicalSockPath, O_CREAT | O_WRONLY, 0o600)
+                    assertTrue(fFd >= 0, "open foreign sentinel must succeed")
+                    let closeRes = close(fFd)
+                    assertEqual(closeRes, 0, "close foreign sentinel must succeed")
+                    let lstatRes = lstat(postBindCanonicalSockPath, &foreignSentinelStat)
+                    assertEqual(lstatRes, 0, "lstat foreign sentinel must succeed")
+                }
+                return bindRes
+            }
+
+            var postBindError: ComputerUseError? = nil
+            do { try postBindListener.start() } catch let err as ComputerUseError { postBindError = err }
+            if case .ipcError(let reason) = postBindError {
+                assertEqual(reason, "Post-bind parent directory revalidation failed: path replaced after bind")
+            } else {
+                assertTrue(false, "Expected ComputerUseError.ipcError but got \(String(describing: postBindError))")
+            }
+            assertEqual(bindRes, 0, "Real bind result must be 0")
+            assertEqual(postBindSyscalls.bindCallCount, 1)
+            assertEqual(postBindSyscalls.listenCallCount, 0, "Listen count must be 0 on post-bind swap")
+            assertTrue(capturedBoundToken != nil)
+
+            assertEqual(postBindSyscalls.unlinkatEvents.count, 1, "Exactly one rollback unlinkat event must occur")
+            if let evt = postBindSyscalls.unlinkatEvents.first, let token = capturedBoundToken {
+                assertEqual(evt.sequence, 1)
+                assertEqual(evt.basename, "host.sock")
+                assertEqual(evt.flags, 0)
+                assertEqual(evt.preCallTargetStatResult, 0)
+                assertEqual(evt.result, 0)
+                assertEqual(evt.targetDev, token.dev)
+                assertEqual(evt.targetInode, token.inode)
+                assertEqual(evt.targetUid, token.uid)
+                assertEqual(token.uid, getuid())
+                assertTrue((evt.targetMode! & S_IFMT) == S_IFSOCK)
+                assertTrue((token.mode & S_IFMT) == S_IFSOCK)
+
+                let parentOpenEvents = postBindSyscalls.openEvents.filter { $0.path == postBindCanonicalDir }
+                assertEqual(parentOpenEvents.count, 2, "Must find exactly two parent directory open events: prepare then retained start")
+                let prepOpenEvt = parentOpenEvents[0]
+                let retainedOpenEvt = parentOpenEvents[1]
+                assertTrue(retainedOpenEvt.generation > prepOpenEvt.generation, "Retained open generation must be strictly greater than prepare open generation")
+                assertTrue(retainedOpenEvt.generation != prepOpenEvt.generation)
+                assertEqual(evt.dirFd, retainedOpenEvt.fd)
+                assertEqual(evt.activeDirGen, retainedOpenEvt.generation)
+                assertTrue(evt.activeDirGen != prepOpenEvt.generation)
+            }
+
+            // Original bound socket removed from retained orig dir
+            var origSockStat = stat()
+            assertTrue(lstat("\(origRetainedDir)/host.sock", &origSockStat) != 0, "Original bound socket must be unlinked from retained orig dir")
+
+            // Foreign sentinel in replacement dir survives untouched in dev/inode/uid/type
+            var postFailureSentinelStat = stat()
+            assertEqual(lstat(postBindCanonicalSockPath, &postFailureSentinelStat), 0, "Foreign sentinel in replacement dir must survive")
+            assertEqual(postFailureSentinelStat.st_dev, foreignSentinelStat.st_dev, "Foreign sentinel dev must remain untouched")
+            assertEqual(postFailureSentinelStat.st_ino, foreignSentinelStat.st_ino, "Foreign sentinel inode must remain untouched")
+            assertEqual(postFailureSentinelStat.st_uid, foreignSentinelStat.st_uid, "Foreign sentinel uid must remain untouched")
+            assertTrue((postFailureSentinelStat.st_mode & S_IFMT) == S_IFREG, "Foreign sentinel type must remain S_IFREG")
+
+            // Cleanup & valid start proof
+            let unlinkRes = unlink(postBindCanonicalSockPath)
+            assertEqual(unlinkRes, 0, "unlink foreign sentinel must succeed")
+            let rmdirRes = rmdir(postBindCanonicalDir)
+            assertEqual(rmdirRes, 0, "rmdir replacement dir must succeed")
+            let restoreRenameRes = rename(origRetainedDir, postBindCanonicalDir)
+            assertEqual(restoreRenameRes, 0, "rename origRetainedDir back must succeed")
+            postBindSyscalls.bindHook = nil
+
+            var validStartThrew = false
+            do { try postBindListener.start() } catch { validStartThrew = true }
+            assertTrue(!validStartThrew)
+            postBindListener.stop()
+            assertTrue(postBindSyscalls.areAllDescriptorsClosed)
+            let unlLock = unlink("\(postBindCanonicalDir)/host.lock")
+            assertEqual(unlLock, 0, "unlink postBind host.lock must succeed")
+            let finalRmdirRes = rmdir(postBindCanonicalDir)
+            assertEqual(finalRmdirRes, 0, "rmdir postBindCanonicalDir must succeed")
+        }
+
+        // R3-5 — Same-Directory Same-Type Foreign Replacement During Rollback
+        do {
+            let replDir = "/tmp/agy-repl-\(UUID().uuidString)"
+            let replSockPath = "\(replDir)/host.sock"
+            let replSyscalls = ScriptedPOSIXSyscalls()
+
+            let replListener = SocketListener(
+                socketPath: replSockPath,
+                server: HostServer(authorizer: FakeScreenRecordingAuthorizer(), topologyProvider: FakeDisplayTopologyProvider(), captureEngine: FakeCaptureEngine(), axEngine: DisabledAXInspector(), inputEngine: DisabledInputInjector()),
+                perFrameTimeoutSec: 1.0,
+                syscalls: replSyscalls
+            )
+
+            let replCanonicalSockPath = replListener.socketPath
+            let replCanonicalDir = (replCanonicalSockPath as NSString).deletingLastPathComponent
+
+            var origBoundToken: BoundSocketToken? = nil
+            var foreignSockToken: BoundSocketToken? = nil
+            var realBindRes: Int32 = -1
+
+            replSyscalls.bindHook = { sock, sa, len in
+                realBindRes = DarwinPOSIXSyscalls.shared.bind(sock, sa, len)
+                if realBindRes == 0 {
+                    var st = stat()
+                    let lstatBoundRes = lstat(replCanonicalSockPath, &st)
+                    assertEqual(lstatBoundRes, 0, "lstat on replCanonicalSockPath must succeed during bind hook")
+                    origBoundToken = BoundSocketToken(dev: st.st_dev, inode: st.st_ino, uid: st.st_uid, mode: st.st_mode)
+                }
+                return realBindRes
+            }
+
+            replSyscalls.listenHook = { sock, backlog in
+                // Unlink original bound socket, create and bind a NEW unix socket at replCanonicalSockPath
+                let unlRes = unlink(replCanonicalSockPath)
+                assertEqual(unlRes, 0, "unlink original bound socket must succeed")
+                let newFd = socket(AF_UNIX, SOCK_STREAM, 0)
+                assertTrue(newFd >= 0, "socket() for replacement unix socket must succeed")
+                if newFd >= 0 {
+                    var addr = sockaddr_un()
+                    let pathBytes = replCanonicalSockPath.utf8CString
+                    addr.sun_len = UInt8(MemoryLayout<sa_family_t>.size + pathBytes.count)
+                    addr.sun_family = sa_family_t(AF_UNIX)
+                    withUnsafeMutableBytes(of: &addr.sun_path) { ptr in
+                        ptr.initializeMemory(as: CChar.self, repeating: 0)
+                        _ = pathBytes.withUnsafeBufferPointer { bPtr in memcpy(ptr.baseAddress!, bPtr.baseAddress!, bPtr.count) }
+                    }
+                    let sockLen = socklen_t(addr.sun_len)
+                    let foreignBindRes = withUnsafePointer(to: &addr) { ptr in
+                        ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { saPtr in
+                            bind(newFd, saPtr, sockLen)
+                        }
+                    }
+                    assertEqual(foreignBindRes, 0, "bind() for foreign replacement socket must succeed")
+                    let closeRes = close(newFd)
+                    assertEqual(closeRes, 0, "close(newFd) must succeed")
+                }
+
+                var foreignSt = stat()
+                let foreignLstatRes = lstat(replCanonicalSockPath, &foreignSt)
+                assertEqual(foreignLstatRes, 0, "lstat on replacement socket must succeed")
+                if foreignLstatRes == 0 {
+                    foreignSockToken = BoundSocketToken(dev: foreignSt.st_dev, inode: foreignSt.st_ino, uid: foreignSt.st_uid, mode: foreignSt.st_mode)
+                }
+
+                replSyscalls.setErrno(EADDRINUSE)
+                return -1
+            }
+
+            var replError: ComputerUseError? = nil
+            do { try replListener.start() } catch let err as ComputerUseError { replError = err }
+            if case .ipcError(let reason) = replError {
+                assertEqual(reason, "Failed to listen on socket at \(replCanonicalSockPath): errno \(EADDRINUSE)")
+            } else {
+                assertTrue(false, "Expected ComputerUseError.ipcError but got \(String(describing: replError))")
+            }
+            assertEqual(realBindRes, 0, "Real bind result must be 0")
+            assertEqual(replSyscalls.bindCallCount, 1)
+            assertEqual(replSyscalls.listenCallCount, 1)
+            assertTrue(origBoundToken != nil && foreignSockToken != nil)
+            assertTrue(origBoundToken!.inode != foreignSockToken!.inode, "Original and replacement socket inodes must differ")
+
+            var postFailureStat = stat()
+            assertEqual(lstat(replCanonicalSockPath, &postFailureStat), 0, "Replacement socket file must survive")
+            assertEqual(postFailureStat.st_dev, foreignSockToken!.dev, "Replacement socket dev must remain unchanged")
+            assertEqual(postFailureStat.st_ino, foreignSockToken!.inode, "Replacement socket inode must remain unchanged")
+            assertEqual(postFailureStat.st_uid, getuid(), "Replacement socket uid must match getuid()")
+            assertTrue((postFailureStat.st_mode & S_IFMT) == S_IFSOCK, "Replacement file type must remain S_IFSOCK")
+
+            assertEqual(replSyscalls.unlinkatEvents.count, 0, "Unlinkat events list must be exactly empty for same-type replacement")
+            assertTrue(replSyscalls.areAllDescriptorsClosed, "All listener-owned descriptors must be closed")
+
+            let unlinkLockRes = unlink("\(replCanonicalDir)/host.lock")
+            assertEqual(unlinkLockRes, 0, "unlink host.lock must succeed")
+            let unlinkRes = unlink(replCanonicalSockPath)
+            assertEqual(unlinkRes, 0, "unlink replacement socket must succeed")
+            let rmdirRes = rmdir(replCanonicalDir)
+            assertEqual(rmdirRes, 0, "rmdir replCanonicalDir must succeed")
+        }
+
+        // R3-6 — Fresh FIFO Refusal With Exact Zero Side Effects
+        do {
+            let fifoDir = "/tmp/agy-fifo-\(UUID().uuidString)"
+            let fifoSyscalls = ScriptedPOSIXSyscalls()
+            let fifoListener = SocketListener(
+                socketPath: "\(fifoDir)/host.sock",
+                server: HostServer(authorizer: FakeScreenRecordingAuthorizer(), topologyProvider: FakeDisplayTopologyProvider(), captureEngine: FakeCaptureEngine(), axEngine: DisabledAXInspector(), inputEngine: DisabledInputInjector()),
+                perFrameTimeoutSec: 1.0,
+                syscalls: fifoSyscalls
+            )
+
+            let fifoCanonicalSockPath = fifoListener.socketPath
+            let fifoCanonicalDir = (fifoCanonicalSockPath as NSString).deletingLastPathComponent
+
+            let mkdirRes = mkdir(fifoCanonicalDir, 0o700)
+            assertEqual(mkdirRes, 0, "mkdir fifoCanonicalDir must succeed")
+            let mkfifoRes = mkfifo(fifoCanonicalSockPath, 0o600)
+            assertEqual(mkfifoRes, 0, "mkfifo must succeed")
+
+            var preFifoStat = stat()
+            assertEqual(lstat(fifoCanonicalSockPath, &preFifoStat), 0)
+
+            var fifoError: ComputerUseError? = nil
+            do { try fifoListener.start() } catch let err as ComputerUseError { fifoError = err }
+            if case .ipcError(let reason) = fifoError {
+                assertEqual(reason, "Refusing to unlink non-socket file at host.sock")
+            } else {
+                assertTrue(false, "Expected ComputerUseError.ipcError but got \(String(describing: fifoError))")
+            }
+
+            var postFifoStat = stat()
+            assertEqual(lstat(fifoCanonicalSockPath, &postFifoStat), 0, "Original FIFO file must survive start failure")
+            assertEqual(postFifoStat.st_dev, preFifoStat.st_dev, "FIFO dev must remain unchanged")
+            assertEqual(postFifoStat.st_ino, preFifoStat.st_ino, "FIFO inode must remain unchanged")
+            assertEqual(postFifoStat.st_uid, preFifoStat.st_uid, "FIFO uid must remain unchanged")
+            assertTrue((postFifoStat.st_mode & S_IFMT) == S_IFIFO, "Original FIFO type must remain S_IFIFO")
+
+            assertEqual(fifoSyscalls.bindCallCount, 0, "Bind count must be 0 on FIFO refusal")
+            assertEqual(fifoSyscalls.listenCallCount, 0, "Listen count must be 0 on FIFO refusal")
+            assertEqual(fifoSyscalls.unlinkatEvents.count, 0, "Unlinkat events list must be exactly empty on FIFO refusal")
+            assertEqual(fifoSyscalls.activeGenerationCount, 0, "Active generation count must be 0")
+            assertTrue(fifoSyscalls.areAllDescriptorsClosed, "All descriptors must be closed after FIFO refusal")
+
+            let unlinkFifoRes = unlink(fifoCanonicalSockPath)
+            assertEqual(unlinkFifoRes, 0, "unlink FIFO file must succeed")
+            var fifoStartThrew = false
+            do { try fifoListener.start() } catch { fifoStartThrew = true }
+            assertTrue(!fifoStartThrew, "Valid start must succeed after FIFO removal")
+            fifoListener.stop()
+            assertTrue(fifoSyscalls.areAllDescriptorsClosed, "All descriptors must close after valid start/stop")
+            let unlLock = unlink("\(fifoCanonicalDir)/host.lock")
+            assertEqual(unlLock, 0, "unlink fifo host.lock must succeed")
+            let rmdirRes = rmdir(fifoCanonicalDir)
+            assertEqual(rmdirRes, 0, "rmdir fifoCanonicalDir must succeed")
+        }
+
+        // Foreign regular-file survival on stop()
+        do {
+            let foreignDir = "/tmp/agy-foreign-\(UUID().uuidString)"
+            let scriptedSyscalls = ScriptedPOSIXSyscalls()
+            let foreignListener = SocketListener(
+                socketPath: "\(foreignDir)/host.sock",
+                server: HostServer(authorizer: FakeScreenRecordingAuthorizer(), topologyProvider: FakeDisplayTopologyProvider(), captureEngine: FakeCaptureEngine(), axEngine: DisabledAXInspector(), inputEngine: DisabledInputInjector()),
+                perFrameTimeoutSec: 1.0,
+                syscalls: scriptedSyscalls
+            )
+
+            let foreignCanonicalSockPath = foreignListener.socketPath
+            let foreignCanonicalDir = (foreignCanonicalSockPath as NSString).deletingLastPathComponent
+
+            try foreignListener.start()
+
+            let unlinkSockRes = unlink(foreignCanonicalSockPath)
+            assertEqual(unlinkSockRes, 0, "unlink listener host.sock must succeed")
+            let foreignFd = open(foreignCanonicalSockPath, O_CREAT | O_WRONLY, 0o600)
+            assertTrue(foreignFd >= 0, "open foreign regular file must succeed")
+            let closeFdRes = close(foreignFd)
+            assertEqual(closeFdRes, 0, "close foreign regular file must succeed")
+            var foreignStat = stat()
+            assertEqual(lstat(foreignCanonicalSockPath, &foreignStat), 0)
+
+            foreignListener.stop()
+            var postStopStat = stat()
+            assertEqual(lstat(foreignCanonicalSockPath, &postStopStat), 0, "Foreign replacement file must survive listener.stop()")
+            assertEqual(postStopStat.st_ino, foreignStat.st_ino, "Foreign replacement file inode must remain untouched")
+            let unlLock = unlink("\(foreignCanonicalDir)/host.lock")
+            assertEqual(unlLock, 0, "unlink foreign host.lock must succeed")
+            let unlinkRes = unlink(foreignCanonicalSockPath)
+            assertEqual(unlinkRes, 0, "unlink foreign regular file must succeed")
+            let rmdirRes = rmdir(foreignCanonicalDir)
+            assertEqual(rmdirRes, 0, "rmdir foreignCanonicalDir must succeed")
+        }
     }
 
     public struct FourSurfaces {
