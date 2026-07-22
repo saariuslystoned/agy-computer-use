@@ -192,6 +192,10 @@ public final class ComputerUseHostTests: XCTestCase {
         try runSync { try await ComputerUseHostTestRunner.run38_HostServerDeadlineCaptureAuthority() }
     }
 
+    public func test39_HostLifecycleAndSubprocessShutdown() throws {
+        try runSync { try await ComputerUseHostTestRunner.run39_HostLifecycleAndSubprocessShutdown() }
+    }
+
     nonisolated(unsafe) public static let __allTests = [
         ("test01_LengthPrefixedFraming", test01_LengthPrefixedFraming),
         ("test02_OversizedFramingHeaderRejection", test02_OversizedFramingHeaderRejection),
@@ -231,6 +235,7 @@ public final class ComputerUseHostTests: XCTestCase {
         ("test36_FourSurfaceAuthorityBijection", test36_FourSurfaceAuthorityBijection),
         ("test37_ManualSleeperSevenDeterministicScenarios", test37_ManualSleeperSevenDeterministicScenarios),
         ("test38_HostServerDeadlineCaptureAuthority", test38_HostServerDeadlineCaptureAuthority),
+        ("test39_HostLifecycleAndSubprocessShutdown", test39_HostLifecycleAndSubprocessShutdown),
     ]
 }
 #endif

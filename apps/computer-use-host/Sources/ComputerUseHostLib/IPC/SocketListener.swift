@@ -600,6 +600,7 @@ public final class SocketListener: @unchecked Sendable {
         isRunning = false
 
         if serverFd >= 0 {
+            _ = syscalls.shutdown(serverFd, SHUT_RDWR)
             _ = syscalls.close(serverFd)
             serverFd = -1
         }

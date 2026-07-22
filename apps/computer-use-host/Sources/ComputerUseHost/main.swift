@@ -26,19 +26,26 @@ struct ComputerUseHostMain {
             inputEngine: inputEngine
         )
 
-        let listener = SocketListener(server: server)
+        let socketPathOverride = ProcessInfo.processInfo.environment["COMPUTER_USE_SOCKET_PATH"]
+        let listener: SocketListener
+        if let customPath = socketPathOverride, !customPath.isEmpty {
+            listener = SocketListener(socketPath: customPath, server: server)
+        } else {
+            listener = SocketListener(server: server)
+        }
         logStderr("[ComputerUseHost] Socket path: \(listener.socketPath)")
 
-        try listener.start()
+        let lifecycle = HostLifecycle(listener: listener)
+        lifecycle.setupSignalHandlers()
+
+        try lifecycle.start()
         logStderr("[ComputerUseHost] Socket listener bound and listening. Entering event loop...")
 
-        // Process incoming IPC connection loop
-        while true {
-            do {
-                _ = try await listener.acceptAndHandleOneConnection()
-            } catch {
-                logStderr("[ComputerUseHost] IPC connection error: \(error.localizedDescription)")
-            }
+        defer {
+            lifecycle.stop()
+            logStderr("[ComputerUseHost] Host server stopped cleanly.")
         }
+
+        try await lifecycle.runAcceptLoop()
     }
 }

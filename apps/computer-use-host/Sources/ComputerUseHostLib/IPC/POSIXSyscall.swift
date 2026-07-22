@@ -29,6 +29,7 @@ public protocol POSIXSyscallProviding: Sendable {
     func connect(_ socket: Int32, _ address: UnsafePointer<sockaddr>?, _ addressLen: socklen_t) -> Int32
     func poll(_ fds: UnsafeMutablePointer<pollfd>?, _ nfds: nfds_t, _ timeout: Int32) -> Int32
     func getpeereid(_ socket: Int32, _ uid: UnsafeMutablePointer<uid_t>?, _ gid: UnsafeMutablePointer<gid_t>?) -> Int32
+    func shutdown(_ socket: Int32, _ how: Int32) -> Int32
 }
 
 extension POSIXSyscallProviding {
@@ -136,5 +137,8 @@ public final class DarwinPOSIXSyscalls: POSIXSyscallProviding, @unchecked Sendab
     }
     public func getpeereid(_ socket: Int32, _ uid: UnsafeMutablePointer<uid_t>?, _ gid: UnsafeMutablePointer<gid_t>?) -> Int32 {
         Darwin.getpeereid(socket, uid, gid)
+    }
+    public func shutdown(_ socket: Int32, _ how: Int32) -> Int32 {
+        Darwin.shutdown(socket, how)
     }
 }

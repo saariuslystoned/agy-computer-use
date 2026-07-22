@@ -846,6 +846,7 @@ public final class ScriptedPOSIXSyscalls: POSIXSyscallProviding, @unchecked Send
     public func connect(_ socket: Int32, _ address: UnsafePointer<sockaddr>?, _ addressLen: socklen_t) -> Int32 { clearErrno(); return underlying.connect(socket, address, addressLen) }
     public func poll(_ fds: UnsafeMutablePointer<pollfd>?, _ nfds: nfds_t, _ timeout: Int32) -> Int32 { clearErrno(); return underlying.poll(fds, nfds, timeout) }
     public func getpeereid(_ socket: Int32, _ uid: UnsafeMutablePointer<uid_t>?, _ gid: UnsafeMutablePointer<gid_t>?) -> Int32 { clearErrno(); return underlying.getpeereid(socket, uid, gid) }
+    public func shutdown(_ socket: Int32, _ how: Int32) -> Int32 { clearErrno(); return underlying.shutdown(socket, how) }
 }
 
 public final class FakeScreenRecordingAuthorizer: ScreenRecordingAuthorizing, @unchecked Sendable {
@@ -3814,7 +3815,8 @@ public struct ComputerUseHostTestRunner {
         try await runWithWatchdog(name: "test36_FourSurfaceAuthorityBijection") { try await run36_FourSurfaceAuthorityBijection() }
         try await runWithWatchdog(name: "test37_ManualSleeperSevenDeterministicScenarios") { try await run37_ManualSleeperSevenDeterministicScenarios() }
         try await runWithWatchdog(name: "test38_HostServerDeadlineCaptureAuthority") { try await run38_HostServerDeadlineCaptureAuthority() }
-        fputs("[ComputerUseHostTestRunner] Executed 38 native test cases successfully. ALL PASSED.\n", stderr)
+        try await runWithWatchdog(name: "test39_HostLifecycleAndSubprocessShutdown") { try await run39_HostLifecycleAndSubprocessShutdown() }
+        fputs("[ComputerUseHostTestRunner] Executed 39 native test cases successfully. ALL PASSED.\n", stderr)
     }
 
     public enum BudgetWaitResult: Equatable, Sendable {
@@ -5183,5 +5185,70 @@ public struct ComputerUseHostTestRunner {
         let dispC1 = await dispCounter.waitUntilSuspended(count: 1, timeoutSec: 0.05)
         assertEqual(dispC1, .timedOut, "R2SuspensionCounter unreachable target must return .timedOut")
         dispCounter.assertClosed(expectedCount: 0)
+    }
+
+    public static func run39_HostLifecycleAndSubprocessShutdown() async throws {
+        let scripted39 = ScriptedPOSIXSyscalls()
+        let sockPath39 = "/tmp/agy-test-c39-\(UUID().uuidString)/host.sock"
+        try SocketListener.prepareDirectory(at: sockPath39, syscalls: scripted39)
+
+        let listener39 = SocketListener(
+            socketPath: sockPath39,
+            server: HostServer(
+                authorizer: FakeScreenRecordingAuthorizer(granted: true),
+                topologyProvider: FakeDisplayTopologyProvider(),
+                captureEngine: FakeCaptureEngine(),
+                axEngine: DisabledAXInspector(),
+                inputEngine: DisabledInputInjector()
+            ),
+            syscalls: scripted39
+        )
+
+        let lifecycle39 = HostLifecycle(listener: listener39)
+        try lifecycle39.start()
+
+        let loopTask = Task {
+            try await lifecycle39.runAcceptLoop()
+        }
+
+        // Connect client and send status request
+        let clientFd = try connectToSocket(at: listener39.socketPath)
+        try sendIPCRequest(IPCRequest(id: "lc-req-1", method: "status"), to: clientFd)
+        let resp = try readIPCResponse(from: clientFd)
+        assertEqual(resp.id, "lc-req-1")
+        assertTrue(resp.success)
+        close(clientFd)
+
+        // Idempotent stop request
+        lifecycle39.stop()
+        lifecycle39.stop() // repeat stop call
+        assertTrue(lifecycle39.isStoppedState)
+
+        // Accept loop task finishes cleanly without error
+        let loopResult = await loopTask.result
+        switch loopResult {
+        case .success:
+            break
+        case .failure(let err):
+            assertTrue(false, "Accept loop task failed unexpectedly with error: \(err)")
+        }
+
+        assertTrue(scripted39.areAllDescriptorsClosed, "All descriptors must be closed after lifecycle stop")
+
+        // Second bind on clean path must succeed
+        let listener39b = SocketListener(
+            socketPath: sockPath39,
+            server: HostServer(
+                authorizer: FakeScreenRecordingAuthorizer(granted: true),
+                topologyProvider: FakeDisplayTopologyProvider(),
+                captureEngine: FakeCaptureEngine(),
+                axEngine: DisabledAXInspector(),
+                inputEngine: DisabledInputInjector()
+            ),
+            syscalls: scripted39
+        )
+        try listener39b.start()
+        listener39b.stop()
+        assertTrue(scripted39.areAllDescriptorsClosed, "All descriptors must be closed after listener39b stop")
     }
 }
