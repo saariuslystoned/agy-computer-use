@@ -797,80 +797,204 @@ public final class CustomDescriptorProvider: DisplayDescriptorProviding, @unchec
     }
 }
 
+public struct TestCaptureLifecycle: Equatable, Sendable {
+    public let created: Int
+    public let cancelled: Int
+    public let resolved: Int
+    public let exited: Int
+    public let pending: Int
+
+    public init(created: Int, cancelled: Int, resolved: Int, exited: Int, pending: Int) {
+        self.created = created
+        self.cancelled = cancelled
+        self.resolved = resolved
+        self.exited = exited
+        self.pending = pending
+    }
+}
+
 public enum ControlledCaptureEngineError: Error, Equatable {
     case invalidIndex(Int)
 }
 
-public actor ControlledCaptureEngine: DisplayCaptureEngine {
-    private var continuations: [Int: CheckedContinuation<CaptureFrameDTO, Error>] = [:]
-    private var registrationWaiters: [Int: [CheckedContinuation<Void, Never>]] = [:]
-    private var exitWaiters: [Int: [CheckedContinuation<Void, Never>]] = [:]
+public enum ControlledEngineWaitResult: Equatable, Sendable {
+    case satisfied
+    case timedOut
+}
 
-    private(set) public var invocationCount: Int = 0
-    private(set) public var physicalExitCount: Int = 0
+public final class ControlledCaptureEngine: DisplayCaptureEngine, @unchecked Sendable {
+    private enum PredicateKind {
+        case registration
+        case cancellation
+        case exit
+    }
+
+    private let cond = NSCondition()
+    private var continuations: [Int: CheckedContinuation<CaptureFrameDTO, Error>] = [:]
+
+    private var registeredCount: Int = 0
+    private var cancelledCount: Int = 0
+    private var resolvedCount: Int = 0
+    private var exitedCount: Int = 0
+
+    private var liveRegistrationWaiters: Int = 0
+    private var liveCancellationWaiters: Int = 0
+    private var liveExitWaiters: Int = 0
+
+    private func withEngineLock<T>(_ body: () throws -> T) rethrows -> T {
+        cond.lock()
+        defer { cond.unlock() }
+        return try body()
+    }
+
+    public var invocationCount: Int {
+        get async {
+            withEngineLock { registeredCount }
+        }
+    }
+
+    public var physicalExitCount: Int {
+        get async {
+            withEngineLock { exitedCount }
+        }
+    }
 
     public var pendingCount: Int {
-        return continuations.count
+        get async {
+            withEngineLock { continuations.count }
+        }
+    }
+
+    public var lifecycleSnapshot: TestCaptureLifecycle {
+        get async {
+            withEngineLock {
+                TestCaptureLifecycle(
+                    created: registeredCount,
+                    cancelled: cancelledCount,
+                    resolved: resolvedCount,
+                    exited: exitedCount,
+                    pending: continuations.count
+                )
+            }
+        }
     }
 
     public init() {}
 
+    private func recordRegistration(continuation: CheckedContinuation<CaptureFrameDTO, Error>) {
+        cond.lock()
+        let index = registeredCount
+        continuations[index] = continuation
+        registeredCount += 1
+        cond.broadcast()
+        cond.unlock()
+    }
+
+    private func recordCancellation() {
+        cond.lock()
+        cancelledCount += 1
+        cond.broadcast()
+        cond.unlock()
+    }
+
+    private func recordExit() {
+        cond.lock()
+        exitedCount += 1
+        cond.broadcast()
+        cond.unlock()
+    }
+
     public func captureDisplay(displayId: Int?, topology: DisplayTopology) async throws -> CaptureFrameDTO {
-        let index = invocationCount
-        invocationCount += 1
+        defer {
+            recordExit()
+        }
+
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                recordRegistration(continuation: continuation)
+            }
+        } onCancel: {
+            recordCancellation()
+        }
+    }
+
+    private func syncWait(kind: PredicateKind, timeoutSec: Double, predicate: () -> Bool) -> ControlledEngineWaitResult {
+        cond.lock()
+        switch kind {
+        case .registration: liveRegistrationWaiters += 1
+        case .cancellation: liveCancellationWaiters += 1
+        case .exit: liveExitWaiters += 1
+        }
 
         defer {
-            physicalExitCount += 1
-            notifyExitWaiters()
+            switch kind {
+            case .registration: liveRegistrationWaiters -= 1
+            case .cancellation: liveCancellationWaiters -= 1
+            case .exit: liveExitWaiters -= 1
+            }
+            cond.unlock()
         }
 
-        return try await withCheckedThrowingContinuation { continuation in
-            continuations[index] = continuation
-            notifyRegistrationWaiters()
-        }
-    }
-
-    public func waitUntilRegistered(count: Int) async {
-        if invocationCount >= count { return }
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            registrationWaiters[count, default: []].append(continuation)
-        }
-    }
-
-    private func notifyRegistrationWaiters() {
-        let currentCount = invocationCount
-        for (targetCount, waiters) in registrationWaiters where currentCount >= targetCount {
-            registrationWaiters.removeValue(forKey: targetCount)
-            for waiter in waiters {
-                waiter.resume()
+        let deadline = Date().addingTimeInterval(timeoutSec)
+        while !predicate() {
+            if !cond.wait(until: deadline) {
+                if predicate() {
+                    return .satisfied
+                }
+                return .timedOut
             }
         }
+        return .satisfied
     }
 
-    public func waitUntilExited(count: Int) async {
-        if physicalExitCount >= count { return }
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            exitWaiters[count, default: []].append(continuation)
-        }
-    }
-
-    private func notifyExitWaiters() {
-        let currentCount = physicalExitCount
-        for (targetCount, waiters) in exitWaiters where currentCount >= targetCount {
-            exitWaiters.removeValue(forKey: targetCount)
-            for waiter in waiters {
-                waiter.resume()
-            }
+    @discardableResult
+    public func waitUntilRegistered(count: Int, timeoutSec: Double = 2.0) async -> ControlledEngineWaitResult {
+        syncWait(kind: .registration, timeoutSec: timeoutSec) {
+            self.registeredCount >= count
         }
     }
 
     @discardableResult
-    public func complete(index: Int, with result: Result<CaptureFrameDTO, Error>) throws -> Bool {
-        guard let continuation = continuations.removeValue(forKey: index) else {
+    public func waitUntilCancelled(count: Int, timeoutSec: Double = 2.0) async -> ControlledEngineWaitResult {
+        syncWait(kind: .cancellation, timeoutSec: timeoutSec) {
+            self.cancelledCount >= count
+        }
+    }
+
+    @discardableResult
+    public func waitUntilExited(count: Int, timeoutSec: Double = 2.0) async -> ControlledEngineWaitResult {
+        syncWait(kind: .exit, timeoutSec: timeoutSec) {
+            self.exitedCount >= count
+        }
+    }
+
+    private func completeLocked(index: Int) throws -> CheckedContinuation<CaptureFrameDTO, Error> {
+        cond.lock()
+        defer { cond.unlock() }
+        guard let cont = continuations.removeValue(forKey: index) else {
             throw ControlledCaptureEngineError.invalidIndex(index)
         }
+        resolvedCount += 1
+        return cont
+    }
+
+    @discardableResult
+    public func complete(index: Int, with result: Result<CaptureFrameDTO, Error>) async throws -> Bool {
+        let continuation = try completeLocked(index: index)
         continuation.resume(with: result)
         return true
+    }
+
+    public func assertNoWaiters(line: Int = #line) {
+        cond.lock()
+        let regWaiters = liveRegistrationWaiters
+        let exitWaiters = liveExitWaiters
+        let cancelWaiters = liveCancellationWaiters
+        cond.unlock()
+
+        assertEqual(regWaiters, 0, "Registration waiters collection must be empty at line \(line)")
+        assertEqual(exitWaiters, 0, "Exit waiters collection must be empty at line \(line)")
+        assertEqual(cancelWaiters, 0, "Cancellation waiters collection must be empty at line \(line)")
     }
 }
 
@@ -2086,7 +2210,8 @@ public struct ComputerUseHostTestRunner {
     }
 
     public static func run24_RequesterCancellation() async throws {
-        let budget = CaptureBudget(maxConcurrent: 1)
+        let budgetRec = BudgetRecorder()
+        let budget = CaptureBudget(maxConcurrent: 1, countObserver: { budgetRec.record($0) })
         let controlledEngine = ControlledCaptureEngine()
         let server = HostServer(
             authorizer: FakeScreenRecordingAuthorizer(granted: true),
@@ -2114,16 +2239,14 @@ public struct ComputerUseHostTestRunner {
         let frame = try FakeCaptureEngine().generateDTO(topology: FakeDisplayTopologyProvider().getTopology())
         try await controlledEngine.complete(index: 0, with: .success(frame))
         await controlledEngine.waitUntilExited(count: 1)
-        for _ in 0..<100 {
-            if budget.count == 0 { break }
-            try await Task.sleep(nanoseconds: 1_000_000)
-        }
+        await budgetRec.waitUntilTransitions([1, 0])
         assertEqual(budget.count, 0, "Budget must be released on physical capture exit")
         assertEqual(await server.latestCaptureSnapshot, nil, "Cancelled request must never promote capture frame")
     }
 
     public static func run25_TimedOutOrphanCapacity() async throws {
-        let budget = CaptureBudget(maxConcurrent: 1)
+        let budgetRec = BudgetRecorder()
+        let budget = CaptureBudget(maxConcurrent: 1, countObserver: { budgetRec.record($0) })
         let controlledEngine = ControlledCaptureEngine()
         let sleeper = ManualSleeper()
         let manualClock = TestManualClock()
@@ -2162,10 +2285,7 @@ public struct ComputerUseHostTestRunner {
         let frameA = try FakeCaptureEngine().generateDTO(topology: FakeDisplayTopologyProvider().getTopology())
         try await controlledEngine.complete(index: 0, with: .success(frameA))
         await controlledEngine.waitUntilExited(count: 1)
-        for _ in 0..<100 {
-            if budget.count == 0 { break }
-            try await Task.sleep(nanoseconds: 1_000_000)
-        }
+        await budgetRec.waitUntilTransitions([1, 0])
         assertEqual(budget.count, 0, "Budget must be released after orphan task A exits")
 
         let taskC = Task { await server.handleRequest(IPCRequest(id: "orphan-C", method: "observe")) }
@@ -2839,62 +2959,406 @@ public struct ComputerUseHostTestRunner {
         try await runWithWatchdog(name: "test35_InjectedListenFailurePostBindRollback") { try await run35_InjectedListenFailurePostBindRollback() }
         try await runWithWatchdog(name: "test36_FourSurfaceAuthorityBijection") { try await run36_FourSurfaceAuthorityBijection() }
         try await runWithWatchdog(name: "test37_ManualSleeperSevenDeterministicScenarios") { try await run37_ManualSleeperSevenDeterministicScenarios() }
-        fputs("[ComputerUseHostTestRunner] Executed 37 native test cases successfully. ALL PASSED.\n", stderr)
+        try await runWithWatchdog(name: "test38_HostServerDeadlineCaptureAuthority") { try await run38_HostServerDeadlineCaptureAuthority() }
+        fputs("[ComputerUseHostTestRunner] Executed 38 native test cases successfully. ALL PASSED.\n", stderr)
     }
 
-    public static func run37_ManualSleeperSevenDeterministicScenarios() async throws {
-        final class TestGate: @unchecked Sendable {
-            private let cond = NSCondition()
-            private var arrivedCount: Int = 0
-            private var released: Bool = false
-            private var waiterCount: Int = 0
+    public enum BudgetWaitResult: Equatable, Sendable {
+        case satisfied
+        case mismatched
+        case timedOut
+    }
 
-            func signalArrived(timeoutSec: Double = 5.0) {
-                cond.lock()
-                arrivedCount += 1
-                waiterCount += 1
-                cond.broadcast()
-                let deadline = Date().addingTimeInterval(timeoutSec)
-                while !released {
-                    if !cond.wait(until: deadline) {
-                        waiterCount -= 1
-                        cond.unlock()
-                        fatalError("TestGate timeout waiting for release")
-                    }
+    final class BudgetRecorder: @unchecked Sendable {
+        private let cond = NSCondition()
+        private var transitions: [Int] = []
+        private var current: Int = 0
+        private var liveWaiters: Int = 0
+
+        func record(_ count: Int) {
+            cond.lock()
+            transitions.append(count)
+            current = count
+            cond.broadcast()
+            cond.unlock()
+        }
+
+        private func syncWait(expected: [Int], timeoutSec: Double) -> BudgetWaitResult {
+            cond.lock()
+            liveWaiters += 1
+            defer {
+                liveWaiters -= 1
+                cond.unlock()
+            }
+
+            let deadline = Date().addingTimeInterval(timeoutSec)
+            while true {
+                if transitions == expected {
+                    return .satisfied
                 }
-                waiterCount -= 1
-                cond.unlock()
-            }
-
-            func waitUntilArrived(targetCount: Int = 1, timeoutSec: Double = 5.0) {
-                cond.lock()
-                let deadline = Date().addingTimeInterval(timeoutSec)
-                while arrivedCount < targetCount {
-                    if !cond.wait(until: deadline) {
-                        cond.unlock()
-                        fatalError("TestGate timeout waiting for arrival (arrived: \(arrivedCount), target: \(targetCount))")
-                    }
+                if !expected.starts(with: transitions) {
+                    return .mismatched
                 }
-                cond.unlock()
-            }
-
-            func release() {
-                cond.lock()
-                released = true
-                cond.broadcast()
-                cond.unlock()
-            }
-
-            func assertClosed(line: Int = #line) {
-                cond.lock()
-                let rel = released
-                let wc = waiterCount
-                cond.unlock()
-                assertTrue(rel, "TestGate must be released at line \(line)")
-                assertEqual(wc, 0, "TestGate must have 0 live waiters at line \(line)")
+                if !cond.wait(until: deadline) {
+                    if transitions == expected {
+                        return .satisfied
+                    }
+                    if !expected.starts(with: transitions) {
+                        return .mismatched
+                    }
+                    return .timedOut
+                }
             }
         }
 
+        @discardableResult
+        func waitUntilTransitions(_ expected: [Int], timeoutSec: Double = 2.0) async -> BudgetWaitResult {
+            syncWait(expected: expected, timeoutSec: timeoutSec)
+        }
+
+        var list: [Int] {
+            cond.lock()
+            defer { cond.unlock() }
+            return transitions
+        }
+
+        var count: Int {
+            cond.lock()
+            defer { cond.unlock() }
+            return current
+        }
+
+        func assertClosed(expectedTransitions: [Int], current expectedCurrent: Int, line: Int = #line) {
+            cond.lock()
+            let actualTransitions = transitions
+            let actualCurrent = current
+            let waiters = liveWaiters
+            cond.unlock()
+
+            assertEqual(actualTransitions, expectedTransitions, "Budget transitions must match at line \(line)")
+            assertEqual(actualCurrent, expectedCurrent, "Budget current count must match at line \(line)")
+            assertEqual(waiters, 0, "Budget live waiters must be 0 at line \(line)")
+        }
+    }
+
+    final class R2SuspensionCounter: @unchecked Sendable {
+        private let cond = NSCondition()
+        private var count: Int = 0
+        private var liveWaiters: Int = 0
+
+        func signal() {
+            cond.lock()
+            count += 1
+            cond.broadcast()
+            cond.unlock()
+        }
+
+        private func syncWait(count targetCount: Int, timeoutSec: Double) -> ControlledEngineWaitResult {
+            cond.lock()
+            liveWaiters += 1
+            defer {
+                liveWaiters -= 1
+                cond.unlock()
+            }
+
+            let deadline = Date().addingTimeInterval(timeoutSec)
+            while count < targetCount {
+                if !cond.wait(until: deadline) {
+                    if count >= targetCount {
+                        return .satisfied
+                    }
+                    return .timedOut
+                }
+            }
+            return .satisfied
+        }
+
+        @discardableResult
+        func waitUntilSuspended(count targetCount: Int, timeoutSec: Double = 2.0) async -> ControlledEngineWaitResult {
+            syncWait(count: targetCount, timeoutSec: timeoutSec)
+        }
+
+        func assertClosed(expectedCount: Int, line: Int = #line) {
+            cond.lock()
+            let actualCount = count
+            let waiters = liveWaiters
+            cond.unlock()
+
+            assertEqual(actualCount, expectedCount, "R2 suspension count must match at line \(line)")
+            assertEqual(waiters, 0, "R2 suspension live waiters must be 0 at line \(line)")
+        }
+    }
+
+    public enum SleeperTerminalResult: Equatable, Sendable {
+        case succeeded
+        case cancelled
+        case failed
+    }
+
+    public enum SleeperWaitResult: Equatable, Sendable {
+        case satisfied
+        case timedOut
+    }
+
+    final class ObservedSleeper: Sleeper, @unchecked Sendable {
+        private let delegated: Sleeper
+        public let manualSleeper: ManualSleeper
+        private let cond = NSCondition()
+
+        private var issuedCalls: [(id: UInt64, nanoseconds: UInt64)] = []
+        private var activeCalls: Set<UInt64> = []
+        private var terminalResults: [SleeperTerminalResult] = []
+        private var internalInvariantCount: Int = 0
+        private var liveWaiters: Int = 0
+        private var callIdCounter: UInt64 = 0
+
+        init(delegate: Sleeper, manualSleeper: ManualSleeper) {
+            self.delegated = delegate
+            self.manualSleeper = manualSleeper
+        }
+
+        convenience init(sleeper: ManualSleeper) {
+            self.init(delegate: sleeper, manualSleeper: sleeper)
+        }
+
+        var invariants: Int {
+            cond.lock()
+            defer { cond.unlock() }
+            return internalInvariantCount
+        }
+
+        private func recordCallStart(nanoseconds: UInt64) -> UInt64 {
+            cond.lock()
+            defer { cond.unlock() }
+            callIdCounter += 1
+            let callId = callIdCounter
+            issuedCalls.append((id: callId, nanoseconds: nanoseconds))
+            activeCalls.insert(callId)
+            cond.broadcast()
+            return callId
+        }
+
+        private func recordCallEnd(callId: UInt64, result: SleeperTerminalResult) {
+            cond.lock()
+            defer { cond.unlock() }
+            if activeCalls.remove(callId) != nil {
+                terminalResults.append(result)
+            } else {
+                internalInvariantCount += 1
+            }
+            cond.broadcast()
+        }
+
+        func recordInvalidTerminalForTest(callId: UInt64, result: SleeperTerminalResult = .failed) {
+            recordCallEnd(callId: callId, result: result)
+        }
+
+        func sleep(nanoseconds: UInt64) async throws {
+            let callId = recordCallStart(nanoseconds: nanoseconds)
+            do {
+                try await delegated.sleep(nanoseconds: nanoseconds)
+                recordCallEnd(callId: callId, result: .succeeded)
+            } catch is CancellationError {
+                recordCallEnd(callId: callId, result: .cancelled)
+                throw CancellationError()
+            } catch {
+                recordCallEnd(callId: callId, result: .failed)
+                throw error
+            }
+        }
+
+        private func syncWaitTerminal(target: Int, timeoutSec: Double) -> SleeperWaitResult {
+            cond.lock()
+            liveWaiters += 1
+            defer {
+                liveWaiters -= 1
+                cond.unlock()
+            }
+
+            let deadline = Date().addingTimeInterval(timeoutSec)
+            while terminalResults.count < target {
+                if !cond.wait(until: deadline) {
+                    if terminalResults.count >= target {
+                        return .satisfied
+                    }
+                    return .timedOut
+                }
+            }
+            return .satisfied
+        }
+
+        private func syncWaitIssued(target: Int, timeoutSec: Double) -> SleeperWaitResult {
+            cond.lock()
+            liveWaiters += 1
+            defer {
+                liveWaiters -= 1
+                cond.unlock()
+            }
+
+            let deadline = Date().addingTimeInterval(timeoutSec)
+            while issuedCalls.count < target {
+                if !cond.wait(until: deadline) {
+                    if issuedCalls.count >= target {
+                        return .satisfied
+                    }
+                    return .timedOut
+                }
+            }
+            return .satisfied
+        }
+
+        @discardableResult
+        func waitUntilTerminalCount(_ target: Int, timeoutSec: Double = 2.0) async -> SleeperWaitResult {
+            syncWaitTerminal(target: target, timeoutSec: timeoutSec)
+        }
+
+        @discardableResult
+        func waitUntilIssuedCount(_ target: Int, timeoutSec: Double = 2.0) async -> SleeperWaitResult {
+            syncWaitIssued(target: target, timeoutSec: timeoutSec)
+        }
+
+        var issuedCount: Int {
+            cond.lock()
+            defer { cond.unlock() }
+            return issuedCalls.count
+        }
+
+        var issuedDurations: [UInt64] {
+            cond.lock()
+            defer { cond.unlock() }
+            return issuedCalls.map { $0.nanoseconds }
+        }
+
+        var terminals: [SleeperTerminalResult] {
+            cond.lock()
+            defer { cond.unlock() }
+            return terminalResults
+        }
+
+        func assertCloseout(
+            expectedIssuedCount: Int,
+            expectedDurations: [UInt64]? = nil,
+            expectedTerminals: [SleeperTerminalResult],
+            expectedInvariants: Int = 0,
+            line: Int = #line
+        ) {
+            cond.lock()
+            let actualIssuedCount = issuedCalls.count
+            let actualDurations = issuedCalls.map { $0.nanoseconds }
+            let actualTerminals = terminalResults
+            let actualActive = activeCalls.count
+            let actualWaiters = liveWaiters
+            let actualInvariants = internalInvariantCount
+            cond.unlock()
+
+            assertEqual(actualIssuedCount, expectedIssuedCount, "Observed sleeper issued count must match at line \(line)")
+            if let expectedDurations = expectedDurations {
+                assertEqual(actualDurations, expectedDurations, "Observed sleeper durations must match at line \(line)")
+            }
+            assertEqual(actualTerminals, expectedTerminals, "Observed sleeper terminal results must match at line \(line)")
+            assertEqual(actualActive, 0, "Observed sleeper active calls must be 0 at line \(line)")
+            assertEqual(actualWaiters, 0, "Observed sleeper live waiters must be 0 at line \(line)")
+            assertEqual(actualInvariants, expectedInvariants, "Observed sleeper invariant count must be \(expectedInvariants) at line \(line)")
+
+            manualSleeper.assertNoUnresolvedContinuations()
+        }
+    }
+
+    final class CountingAuthorizer: ScreenRecordingAuthorizing, @unchecked Sendable {
+        private let lock = NSLock()
+        private var count: Int = 0
+        let granted: Bool
+        init(granted: Bool = true) { self.granted = granted }
+        var isScreenCaptureAccessGranted: Bool {
+            lock.lock()
+            count += 1
+            lock.unlock()
+            return granted
+        }
+        var callCount: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return count
+        }
+    }
+
+    final class CountingTopologyProvider: DisplayTopologyProviding, @unchecked Sendable {
+        private let lock = NSLock()
+        private var count: Int = 0
+        let topology: DisplayTopology
+        init(topology: DisplayTopology? = nil) {
+            if let top = topology {
+                self.topology = top
+            } else {
+                self.topology = (try! FakeDisplayTopologyProvider().getTopology())
+            }
+        }
+        func getTopology() throws -> DisplayTopology {
+            lock.lock()
+            count += 1
+            lock.unlock()
+            return topology
+        }
+        var callCount: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return count
+        }
+    }
+
+    final class TestGate: @unchecked Sendable {
+        private let cond = NSCondition()
+        private var arrivedCount: Int = 0
+        private var released: Bool = false
+        private var waiterCount: Int = 0
+
+        func signalArrived(timeoutSec: Double = 5.0) {
+            cond.lock()
+            arrivedCount += 1
+            waiterCount += 1
+            cond.broadcast()
+            let deadline = Date().addingTimeInterval(timeoutSec)
+            while !released {
+                if !cond.wait(until: deadline) {
+                    waiterCount -= 1
+                    cond.unlock()
+                    fatalError("TestGate timeout waiting for release")
+                }
+            }
+            waiterCount -= 1
+            cond.unlock()
+        }
+
+        func waitUntilArrived(targetCount: Int = 1, timeoutSec: Double = 5.0) {
+            cond.lock()
+            let deadline = Date().addingTimeInterval(timeoutSec)
+            while arrivedCount < targetCount {
+                if !cond.wait(until: deadline) {
+                    cond.unlock()
+                    fatalError("TestGate timeout waiting for arrival (arrived: \(arrivedCount), target: \(targetCount))")
+                }
+            }
+            cond.unlock()
+        }
+
+        func release() {
+            cond.lock()
+            released = true
+            cond.broadcast()
+            cond.unlock()
+        }
+
+        func assertClosed(line: Int = #line) {
+            cond.lock()
+            let rel = released
+            let wc = waiterCount
+            cond.unlock()
+            assertTrue(rel, "TestGate must be released at line \(line)")
+            assertEqual(wc, 0, "TestGate must have 0 live waiters at line \(line)")
+        }
+    }
+
+    public static func run37_ManualSleeperSevenDeterministicScenarios() async throws {
         // 1. Discriminator 1: Registering + cancelAll -> (1, 0, 1)
         let gate1 = TestGate()
         let sleeper1 = ManualSleeper(hooks: ManualSleeper.Hooks(
@@ -3252,5 +3716,618 @@ public struct ComputerUseHostTestRunner {
         try await controlledEngine15.complete(index: 0, with: .failure(CustomSleeperError()))
         await controlledEngine15.waitUntilExited(count: 1)
         assertEqual(await controlledEngine15.pendingCount, 0, "Scenario 15: Pending capture count must be zero")
+    }
+
+    public static func run38_HostServerDeadlineCaptureAuthority() async throws {
+        final class OutcomeRecorder: @unchecked Sendable {
+            private let lock = NSLock()
+            private(set) var outcomes: [ArbiterResolutionOutcome] = []
+            func record(_ outcome: ArbiterResolutionOutcome) {
+                lock.lock()
+                outcomes.append(outcome)
+                lock.unlock()
+            }
+            var list: [ArbiterResolutionOutcome] {
+                lock.lock()
+                defer { lock.unlock() }
+                return outcomes
+            }
+        }
+
+        // --- Scenario 1: Timeout ---
+        let controlledEngine1 = ControlledCaptureEngine()
+        let counter1 = R2SuspensionCounter()
+        let manualSleeper1 = ManualSleeper(hooks: ManualSleeper.Hooks(afterSuspendedPublication: { _, _ in counter1.signal() }))
+        let sleeper1 = ObservedSleeper(sleeper: manualSleeper1)
+        let clock1 = TestManualClock()
+        let recorder1 = OutcomeRecorder()
+        let budgetRec1 = BudgetRecorder()
+        let budget1 = CaptureBudget(maxConcurrent: 2, countObserver: { budgetRec1.record($0) })
+
+        let server1 = HostServer(
+            authorizer: FakeScreenRecordingAuthorizer(granted: true),
+            topologyProvider: FakeDisplayTopologyProvider(),
+            captureEngine: controlledEngine1,
+            axEngine: DisabledAXInspector(),
+            inputEngine: DisabledInputInjector(),
+            observationTimeoutSec: 1.0,
+            budget: budget1,
+            sleeper: sleeper1,
+            clock: clock1,
+            resolutionObserver: { recorder1.record($0) }
+        )
+
+        let task1 = Task { await server1.handleRequest(IPCRequest(id: "r2-1", method: "observe")) }
+        let regRes1 = await controlledEngine1.waitUntilRegistered(count: 1)
+        assertEqual(regRes1, .satisfied, "R2-A5-7: Registration 1 must be satisfied")
+        assertEqual(await controlledEngine1.lifecycleSnapshot, TestCaptureLifecycle(created: 1, cancelled: 0, resolved: 0, exited: 0, pending: 1), "R2-A5-1: Snapshot immediately upon registered must show pending == 1")
+
+        let termRes1_0 = await sleeper1.waitUntilIssuedCount(1)
+        assertEqual(termRes1_0, .satisfied, "R2-A5-7: Sleeper issued 1 must be satisfied")
+        assertEqual(sleeper1.issuedDurations, [1_000_000_000], "R2-1: First duration request must be 1,000,000,000ns")
+
+        // Wait for bounded suspension 1 before advancing
+        let suspRes1_0 = await counter1.waitUntilSuspended(count: 1)
+        assertEqual(suspRes1_0, .satisfied)
+
+        // Advance 400ms without deadline breach -> re-arm timer with remaining 600ms
+        clock1.advance(by: .milliseconds(400))
+        manualSleeper1.advance()
+
+        let termRes1_1 = await sleeper1.waitUntilIssuedCount(2)
+        assertEqual(termRes1_1, .satisfied, "R2-A5-7: Sleeper issued 2 must be satisfied")
+        assertEqual(sleeper1.issuedDurations, [1_000_000_000, 600_000_000], "R2-1: Re-arm duration must be remaining 600,000,000ns")
+        assertEqual(recorder1.list.count, 0, "R2-1: Zero arbiter resolutions before deadline breach")
+
+        // Wait for bounded suspension 2 before advancing
+        let suspRes1_1 = await counter1.waitUntilSuspended(count: 2)
+        assertEqual(suspRes1_1, .satisfied)
+
+        // Advance remaining 600ms -> deadline breach -> TIMEOUT
+        clock1.advance(by: .milliseconds(600))
+        manualSleeper1.advance()
+
+        let resp1 = await task1.value
+        // 1. Winning outcome/response
+        assertTrue(!resp1.success, "R2-1: Request must fail on timeout")
+        assertEqual(resp1.error?.code, "TIMEOUT", "R2-1: Error code must be TIMEOUT")
+
+        // 2. Capture cancellation latch
+        let cancelRes1 = await controlledEngine1.waitUntilCancelled(count: 1)
+        assertEqual(cancelRes1, .satisfied, "R2-A5-7: Cancellation 1 must be satisfied")
+
+        // P1: Pre-settlement assertions
+        assertEqual(recorder1.list, [.timeout], "R2-1: Pre-settlement timeout resolution must be [.timeout]")
+        assertEqual(await controlledEngine1.lifecycleSnapshot, TestCaptureLifecycle(created: 1, cancelled: 1, resolved: 0, exited: 0, pending: 1), "R2-A5-3: Pre-settlement timeout snapshot must be 1/1/0/0/1")
+        assertEqual(budgetRec1.count, 1, "R2-A5-3: Pre-settlement budget count must be 1")
+        assertEqual(budgetRec1.list, [1], "R2-A5-3: Pre-settlement budget transitions must be [1]")
+
+        // 3. Late capture settlement
+        let frame1 = try FakeCaptureEngine().generateDTO(topology: FakeDisplayTopologyProvider().getTopology())
+        try await controlledEngine1.complete(index: 0, with: .success(frame1))
+
+        // 4. Physical capture exit
+        let exitRes1 = await controlledEngine1.waitUntilExited(count: 1)
+        assertEqual(exitRes1, .satisfied, "R2-A5-7: Exit 1 must be satisfied")
+
+        // 5. Exact budget [1, 0] latch
+        let bRes1 = await budgetRec1.waitUntilTransitions([1, 0])
+        assertEqual(bRes1, .satisfied, "R2-A5-7: Budget transitions [1, 0] must be satisfied")
+
+        // 6. Timer-sleeper terminal latch
+        let sRes1 = await sleeper1.waitUntilTerminalCount(2)
+        assertEqual(sRes1, .satisfied, "R2-A5-7: Sleeper terminal count 2 must be satisfied")
+
+        // 7. Outcome list & final lifecycle
+        assertEqual(recorder1.list, [.timeout], "R2-1: Exactly one TIMEOUT resolution recorded")
+        assertEqual(await controlledEngine1.lifecycleSnapshot, TestCaptureLifecycle(created: 1, cancelled: 1, resolved: 1, exited: 1, pending: 0), "R2-A5-4: Final snapshot must be 1/1/1/1/0")
+
+        // 8. Capture engine waiter closeout
+        controlledEngine1.assertNoWaiters()
+
+        // 9. Budget recorder closeout
+        budgetRec1.assertClosed(expectedTransitions: [1, 0], current: 0)
+
+        // 10. Observed sleeper closeout
+        sleeper1.assertCloseout(
+            expectedIssuedCount: 2,
+            expectedDurations: [1_000_000_000, 600_000_000],
+            expectedTerminals: [.succeeded, .succeeded]
+        )
+
+        // 11. Suspension counter closeout
+        counter1.assertClosed(expectedCount: 2)
+
+
+        // --- Scenario 2: Requester Cancellation ---
+        let controlledEngine2 = ControlledCaptureEngine()
+        let counter2 = R2SuspensionCounter()
+        let manualSleeper2 = ManualSleeper(hooks: ManualSleeper.Hooks(afterSuspendedPublication: { _, _ in counter2.signal() }))
+        let sleeper2 = ObservedSleeper(sleeper: manualSleeper2)
+        let recorder2 = OutcomeRecorder()
+        let budgetRec2 = BudgetRecorder()
+        let budget2 = CaptureBudget(maxConcurrent: 2, countObserver: { budgetRec2.record($0) })
+        let clock2 = TestManualClock()
+
+        let server2 = HostServer(
+            authorizer: FakeScreenRecordingAuthorizer(granted: true),
+            topologyProvider: FakeDisplayTopologyProvider(),
+            captureEngine: controlledEngine2,
+            axEngine: DisabledAXInspector(),
+            inputEngine: DisabledInputInjector(),
+            observationTimeoutSec: 1.0,
+            budget: budget2,
+            sleeper: sleeper2,
+            clock: clock2,
+            resolutionObserver: { recorder2.record($0) }
+        )
+
+        let task2 = Task { await server2.handleRequest(IPCRequest(id: "r2-2-cancel", method: "observe")) }
+        let regRes2 = await controlledEngine2.waitUntilRegistered(count: 1)
+        assertEqual(regRes2, .satisfied)
+
+        // Prove actual manual suspension before cancellation via bounded counter
+        let suspRes2 = await counter2.waitUntilSuspended(count: 1)
+        assertEqual(suspRes2, .satisfied)
+
+        task2.cancel()
+        let resp2 = await task2.value
+
+        // 1. Winning response
+        assertTrue(!resp2.success, "R2-A5-2: Entered cancellation must fail request")
+        assertEqual(resp2.error?.code, "CANCELLED", "R2-A5-2: Error code must be CANCELLED")
+
+        // 2. Capture cancellation latch
+        let cancelRes2 = await controlledEngine2.waitUntilCancelled(count: 1)
+        assertEqual(cancelRes2, .satisfied)
+
+        // P1: Pre-settlement assertions
+        assertEqual(recorder2.list, [.cancelled], "R2-A5-2: Pre-settlement cancellation resolution must be [.cancelled]")
+        assertEqual(await controlledEngine2.lifecycleSnapshot, TestCaptureLifecycle(created: 1, cancelled: 1, resolved: 0, exited: 0, pending: 1), "R2-A5-3: Pre-settlement cancellation snapshot must be 1/1/0/0/1")
+        assertEqual(budgetRec2.count, 1, "R2-A5-3: Pre-settlement budget count must be 1")
+        assertEqual(budgetRec2.list, [1], "R2-A5-3: Pre-settlement budget transitions must be [1]")
+
+        // 3. Late capture settlement
+        let frame2 = try FakeCaptureEngine().generateDTO(topology: FakeDisplayTopologyProvider().getTopology())
+        try await controlledEngine2.complete(index: 0, with: .success(frame2))
+
+        // 4. Physical capture exit
+        let exitRes2 = await controlledEngine2.waitUntilExited(count: 1)
+        assertEqual(exitRes2, .satisfied)
+
+        // 5. Exact budget [1, 0] latch
+        let bRes2 = await budgetRec2.waitUntilTransitions([1, 0])
+        assertEqual(bRes2, .satisfied)
+
+        // 6. Timer-sleeper terminal latch
+        let sRes2 = await sleeper2.waitUntilTerminalCount(1)
+        assertEqual(sRes2, .satisfied)
+
+        // 7. Outcome list & lifecycle
+        assertEqual(recorder2.list, [.cancelled], "R2-A5-2: Exactly one CANCELLED resolution recorded")
+        assertEqual(await controlledEngine2.lifecycleSnapshot, TestCaptureLifecycle(created: 1, cancelled: 1, resolved: 1, exited: 1, pending: 0))
+
+        // 8. Capture engine waiter closeout
+        controlledEngine2.assertNoWaiters()
+
+        // 9. Budget recorder closeout
+        budgetRec2.assertClosed(expectedTransitions: [1, 0], current: 0)
+
+        // 10. Observed sleeper closeout
+        sleeper2.assertCloseout(
+            expectedIssuedCount: 1,
+            expectedDurations: [1_000_000_000],
+            expectedTerminals: [.cancelled]
+        )
+
+        // 11. Suspension counter closeout
+        counter2.assertClosed(expectedCount: 1)
+
+
+        // --- Scenario 3: Pre-Entry Cancellation ---
+        let auth3 = CountingAuthorizer(granted: true)
+        let topo3 = CountingTopologyProvider()
+        let controlledEngine3 = ControlledCaptureEngine()
+        let counter3 = R2SuspensionCounter()
+        let manualSleeper3 = ManualSleeper(hooks: ManualSleeper.Hooks(afterSuspendedPublication: { _, _ in counter3.signal() }))
+        let sleeper3 = ObservedSleeper(sleeper: manualSleeper3)
+        let recorder3 = OutcomeRecorder()
+        let budgetRec3 = BudgetRecorder()
+        let budget3 = CaptureBudget(maxConcurrent: 2, countObserver: { budgetRec3.record($0) })
+        let clock3 = TestManualClock()
+
+        let server3 = HostServer(
+            authorizer: auth3,
+            topologyProvider: topo3,
+            captureEngine: controlledEngine3,
+            axEngine: DisabledAXInspector(),
+            inputEngine: DisabledInputInjector(),
+            observationTimeoutSec: 1.0,
+            budget: budget3,
+            sleeper: sleeper3,
+            clock: clock3,
+            resolutionObserver: { recorder3.record($0) }
+        )
+
+        let preEntryGate = TestGate()
+        let task3 = Task {
+            preEntryGate.signalArrived()
+            return await server3.handleRequest(IPCRequest(id: "r2-3", method: "observe"))
+        }
+
+        preEntryGate.waitUntilArrived()
+        task3.cancel()
+        preEntryGate.release()
+
+        let resp3 = await task3.value
+        // 1. Winning response
+        assertTrue(!resp3.success, "R2-A5-5: Pre-entry cancellation on observe must fail request")
+        assertEqual(resp3.error?.code, "CANCELLED", "R2-A5-5: Error code must be CANCELLED")
+        assertEqual(auth3.callCount, 0)
+        assertEqual(topo3.callCount, 0)
+
+        // P1: Pre-entry generation authority after cancelled observe
+        assertEqual(await server3.latestIssuedGenerationSnapshot, 0, "R2-A5-5: Generation must be 0 after cancelled observe")
+        assertEqual(budgetRec3.count, 0)
+        assertEqual(budgetRec3.list, [])
+        assertEqual(sleeper3.issuedCount, 0)
+        assertEqual(recorder3.list, [])
+        assertEqual(await controlledEngine3.lifecycleSnapshot, TestCaptureLifecycle(created: 0, cancelled: 0, resolved: 0, exited: 0, pending: 0))
+
+        // Cancelled status control
+        let statusGate = TestGate()
+        let task3Status = Task {
+            statusGate.signalArrived()
+            return await server3.handleRequest(IPCRequest(id: "r2-3-status", method: "status"))
+        }
+
+        statusGate.waitUntilArrived()
+        task3Status.cancel()
+        statusGate.release()
+
+        let resp3Status = await task3Status.value
+        assertEqual(resp3Status.id, "r2-3-status")
+        assertTrue(resp3Status.success)
+        assertTrue(resp3Status.error == nil)
+        assertTrue(resp3Status.data != nil)
+        assertEqual(resp3Status.data?["connected"], .bool(true))
+        assertEqual(resp3Status.data?["tcc_permission_state"], .string("granted"))
+        assertEqual(resp3Status.data?["accessibility_available"], .bool(false))
+        assertEqual(resp3Status.data?["accessibility_trusted"], .bool(false))
+        assertEqual(resp3Status.data?["input_mutation_state"], .string("disabled"))
+        assertEqual(resp3Status.data?["display_count"], .int(1))
+
+        // P1: Pre-entry generation authority after cancelled status
+        assertEqual(await server3.latestIssuedGenerationSnapshot, 0, "R2-A5-5: Generation must remain 0 after cancelled status")
+        assertEqual(auth3.callCount, 1)
+        assertEqual(topo3.callCount, 1)
+
+        // 7. Outcome list & lifecycle
+        assertEqual(recorder3.list, [])
+        assertEqual(await controlledEngine3.lifecycleSnapshot, TestCaptureLifecycle(created: 0, cancelled: 0, resolved: 0, exited: 0, pending: 0))
+
+        // 8. Capture engine waiter closeout
+        controlledEngine3.assertNoWaiters()
+
+        // 9. Budget recorder closeout
+        budgetRec3.assertClosed(expectedTransitions: [], current: 0)
+
+        // 10. Observed sleeper closeout
+        sleeper3.assertCloseout(
+            expectedIssuedCount: 0,
+            expectedDurations: [],
+            expectedTerminals: []
+        )
+
+        // 11. Suspension counter closeout
+        counter3.assertClosed(expectedCount: 0)
+
+        // 12. Gate closeouts
+        preEntryGate.assertClosed()
+        statusGate.assertClosed()
+
+
+        // --- Scenario 4: Success Control ---
+        let controlledEngine4 = ControlledCaptureEngine()
+        let counter4 = R2SuspensionCounter()
+        let manualSleeper4 = ManualSleeper(hooks: ManualSleeper.Hooks(afterSuspendedPublication: { _, _ in counter4.signal() }))
+        let sleeper4 = ObservedSleeper(sleeper: manualSleeper4)
+        let recorder4 = OutcomeRecorder()
+        let budgetRec4 = BudgetRecorder()
+        let budget4 = CaptureBudget(maxConcurrent: 2, countObserver: { budgetRec4.record($0) })
+        let clock4 = TestManualClock()
+
+        let server4 = HostServer(
+            authorizer: FakeScreenRecordingAuthorizer(granted: true),
+            topologyProvider: FakeDisplayTopologyProvider(),
+            captureEngine: controlledEngine4,
+            axEngine: DisabledAXInspector(),
+            inputEngine: DisabledInputInjector(),
+            observationTimeoutSec: 1.0,
+            budget: budget4,
+            sleeper: sleeper4,
+            clock: clock4,
+            resolutionObserver: { recorder4.record($0) }
+        )
+
+        let task4 = Task { await server4.handleRequest(IPCRequest(id: "r2-4-success", method: "observe")) }
+        let regRes4 = await controlledEngine4.waitUntilRegistered(count: 1)
+        assertEqual(regRes4, .satisfied)
+
+        // Force timer suspension before completing capture via bounded counter
+        let suspRes4 = await counter4.waitUntilSuspended(count: 1)
+        assertEqual(suspRes4, .satisfied)
+
+        let frame4 = try FakeCaptureEngine().generateDTO(topology: FakeDisplayTopologyProvider().getTopology())
+        try await controlledEngine4.complete(index: 0, with: .success(frame4))
+
+        let resp4 = await task4.value
+        // 1. Winning response
+        assertTrue(resp4.success, "R2-A5-3: Success control must succeed")
+        assertEqual(await server4.latestCaptureSnapshot?.captureId, frame4.captureId)
+
+        // 4. Physical capture exit
+        let exitRes4 = await controlledEngine4.waitUntilExited(count: 1)
+        assertEqual(exitRes4, .satisfied)
+
+        // 5. Exact budget [1, 0] latch
+        let bRes4 = await budgetRec4.waitUntilTransitions([1, 0])
+        assertEqual(bRes4, .satisfied)
+
+        // 6. Timer-sleeper terminal latch
+        let sRes4 = await sleeper4.waitUntilTerminalCount(1)
+        assertEqual(sRes4, .satisfied)
+
+        // 7. Outcome list & lifecycle
+        assertEqual(recorder4.list, [.success])
+        assertEqual(await controlledEngine4.lifecycleSnapshot, TestCaptureLifecycle(created: 1, cancelled: 0, resolved: 1, exited: 1, pending: 0))
+
+        // 8. Capture engine waiter closeout
+        controlledEngine4.assertNoWaiters()
+
+        // 9. Budget recorder closeout
+        budgetRec4.assertClosed(expectedTransitions: [1, 0], current: 0)
+
+        // 10. Observed sleeper closeout
+        sleeper4.assertCloseout(
+            expectedIssuedCount: 1,
+            expectedDurations: [1_000_000_000],
+            expectedTerminals: [.cancelled]
+        )
+
+        // 11. Suspension counter closeout
+        counter4.assertClosed(expectedCount: 1)
+
+
+        // --- Scenario 5: Post-wake Sleeper Error ---
+        struct TestSleeperError: Error, Equatable {}
+        final class PostWakeErrorSleeper: Sleeper, @unchecked Sendable {
+            let sleeper: Sleeper
+            init(sleeper: Sleeper) { self.sleeper = sleeper }
+            func sleep(nanoseconds: UInt64) async throws {
+                try await sleeper.sleep(nanoseconds: nanoseconds)
+                throw TestSleeperError()
+            }
+        }
+
+        let controlledEngine5 = ControlledCaptureEngine()
+        let counter5 = R2SuspensionCounter()
+        let manualSleeper5 = ManualSleeper(hooks: ManualSleeper.Hooks(afterSuspendedPublication: { _, _ in counter5.signal() }))
+        let postWakeSleeper5 = PostWakeErrorSleeper(sleeper: manualSleeper5)
+        let sleeper5 = ObservedSleeper(delegate: postWakeSleeper5, manualSleeper: manualSleeper5)
+        let recorder5 = OutcomeRecorder()
+        let budgetRec5 = BudgetRecorder()
+        let budget5 = CaptureBudget(maxConcurrent: 2, countObserver: { budgetRec5.record($0) })
+        let clock5 = TestManualClock()
+
+        let server5 = HostServer(
+            authorizer: FakeScreenRecordingAuthorizer(granted: true),
+            topologyProvider: FakeDisplayTopologyProvider(),
+            captureEngine: controlledEngine5,
+            axEngine: DisabledAXInspector(),
+            inputEngine: DisabledInputInjector(),
+            observationTimeoutSec: 1.0,
+            budget: budget5,
+            sleeper: sleeper5,
+            clock: clock5,
+            resolutionObserver: { recorder5.record($0) }
+        )
+
+        let task5 = Task { await server5.handleRequest(IPCRequest(id: "r2-5", method: "observe")) }
+        let regRes5 = await controlledEngine5.waitUntilRegistered(count: 1)
+        assertEqual(regRes5, .satisfied)
+
+        let termRes5_0 = await sleeper5.waitUntilIssuedCount(1)
+        assertEqual(termRes5_0, .satisfied)
+
+        let suspRes5 = await counter5.waitUntilSuspended(count: 1)
+        assertEqual(suspRes5, .satisfied)
+
+        // F2: Pre-wake sleeper-error authority
+        assertEqual(await controlledEngine5.lifecycleSnapshot, TestCaptureLifecycle(created: 1, cancelled: 0, resolved: 0, exited: 0, pending: 1), "R2-5: Pre-wake lifecycle snapshot must be 1/0/0/0/1")
+        assertEqual(recorder5.list, [], "R2-5: Zero arbiter resolutions before manual sleeper advance")
+
+        // Wake manual sleeper -> PostWakeErrorSleeper throws TestSleeperError
+        manualSleeper5.advance()
+
+        let resp5 = await task5.value
+        // 1. Winning response
+        assertTrue(!resp5.success, "R2-A5-2: Sleeper error request must fail")
+        assertEqual(resp5.error?.code, "HOST_ERROR", "R2-A5-2: Error code must be HOST_ERROR")
+
+        // 2. Capture cancellation latch
+        let cancelRes5 = await controlledEngine5.waitUntilCancelled(count: 1)
+        assertEqual(cancelRes5, .satisfied)
+
+        // P1: Pre-settlement assertions
+        assertEqual(recorder5.list, [.failure], "R2-A5-2: Pre-settlement error resolution must be [.failure]")
+        assertEqual(await controlledEngine5.lifecycleSnapshot, TestCaptureLifecycle(created: 1, cancelled: 1, resolved: 0, exited: 0, pending: 1), "R2-A5-3: Pre-settlement error snapshot must be 1/1/0/0/1")
+        assertEqual(budgetRec5.count, 1, "R2-A5-3: Pre-settlement budget count must be 1")
+        assertEqual(budgetRec5.list, [1], "R2-A5-3: Pre-settlement budget transitions must be [1]")
+
+        // 3. Late capture settlement
+        let frame5 = try FakeCaptureEngine().generateDTO(topology: FakeDisplayTopologyProvider().getTopology())
+        try await controlledEngine5.complete(index: 0, with: .success(frame5))
+
+        // 4. Physical capture exit
+        let exitRes5 = await controlledEngine5.waitUntilExited(count: 1)
+        assertEqual(exitRes5, .satisfied)
+
+        // 5. Exact budget [1, 0] latch
+        let bRes5 = await budgetRec5.waitUntilTransitions([1, 0])
+        assertEqual(bRes5, .satisfied)
+
+        // 6. Timer-sleeper terminal latch
+        let sRes5 = await sleeper5.waitUntilTerminalCount(1)
+        assertEqual(sRes5, .satisfied)
+
+        // 7. Outcome list & lifecycle
+        assertEqual(recorder5.list, [.failure])
+        assertEqual(await controlledEngine5.lifecycleSnapshot, TestCaptureLifecycle(created: 1, cancelled: 1, resolved: 1, exited: 1, pending: 0))
+
+        // 8. Capture engine waiter closeout
+        controlledEngine5.assertNoWaiters()
+
+        // 9. Budget recorder closeout
+        budgetRec5.assertClosed(expectedTransitions: [1, 0], current: 0)
+
+        // 10. Observed sleeper closeout — P2: expectedTerminals is [.failed]
+        sleeper5.assertCloseout(
+            expectedIssuedCount: 1,
+            expectedDurations: [1_000_000_000],
+            expectedTerminals: [.failed]
+        )
+
+        // 11. Suspension counter closeout
+        counter5.assertClosed(expectedCount: 1)
+
+
+        // --- Scenario 6: Capture-produced CancellationError ---
+        let controlledEngine6 = ControlledCaptureEngine()
+        let counter6 = R2SuspensionCounter()
+        let manualSleeper6 = ManualSleeper(hooks: ManualSleeper.Hooks(afterSuspendedPublication: { _, _ in counter6.signal() }))
+        let sleeper6 = ObservedSleeper(sleeper: manualSleeper6)
+        let recorder6 = OutcomeRecorder()
+        let budgetRec6 = BudgetRecorder()
+        let budget6 = CaptureBudget(maxConcurrent: 2, countObserver: { budgetRec6.record($0) })
+        let clock6 = TestManualClock()
+
+        let server6 = HostServer(
+            authorizer: FakeScreenRecordingAuthorizer(granted: true),
+            topologyProvider: FakeDisplayTopologyProvider(),
+            captureEngine: controlledEngine6,
+            axEngine: DisabledAXInspector(),
+            inputEngine: DisabledInputInjector(),
+            observationTimeoutSec: 1.0,
+            budget: budget6,
+            sleeper: sleeper6,
+            clock: clock6,
+            resolutionObserver: { recorder6.record($0) }
+        )
+
+        let task6 = Task { await server6.handleRequest(IPCRequest(id: "r2-6-cancellerr", method: "observe")) }
+        let regRes6 = await controlledEngine6.waitUntilRegistered(count: 1)
+        assertEqual(regRes6, .satisfied)
+
+        // Force timer suspension before completing capture via bounded counter
+        let suspRes6 = await counter6.waitUntilSuspended(count: 1)
+        assertEqual(suspRes6, .satisfied)
+
+        // Complete capture continuation with Swift CancellationError
+        try await controlledEngine6.complete(index: 0, with: .failure(CancellationError()))
+        let resp6 = await task6.value
+
+        // 1. Winning response
+        assertTrue(!resp6.success, "R2-A5-6: Capture CancellationError must fail request")
+        assertEqual(resp6.error?.code, "CANCELLED", "R2-A5-6: Error code must be CANCELLED")
+
+        // 4. Physical capture exit
+        let exitRes6 = await controlledEngine6.waitUntilExited(count: 1)
+        assertEqual(exitRes6, .satisfied)
+
+        // 5. Exact budget [1, 0] latch
+        let bRes6 = await budgetRec6.waitUntilTransitions([1, 0])
+        assertEqual(bRes6, .satisfied)
+
+        // 6. Timer-sleeper terminal latch
+        let sRes6 = await sleeper6.waitUntilTerminalCount(1)
+        assertEqual(sRes6, .satisfied)
+
+        // 7. Outcome list & lifecycle
+        assertEqual(recorder6.list, [.cancelled], "R2-A5-6: OneShotArbiter must map CancellationError to .cancelled outcome")
+        assertEqual(await controlledEngine6.lifecycleSnapshot, TestCaptureLifecycle(created: 1, cancelled: 0, resolved: 1, exited: 1, pending: 0))
+
+        // 8. Capture engine waiter closeout
+        controlledEngine6.assertNoWaiters()
+
+        // 9. Budget recorder closeout
+        budgetRec6.assertClosed(expectedTransitions: [1, 0], current: 0)
+
+        // 10. Observed sleeper closeout
+        sleeper6.assertCloseout(
+            expectedIssuedCount: 1,
+            expectedDurations: [1_000_000_000],
+            expectedTerminals: [.cancelled]
+        )
+
+        // 11. Suspension counter closeout
+        counter6.assertClosed(expectedCount: 1)
+
+
+        // --- R2-A5-7 Bounded Authority & Negative Discriminators ---
+        // 1. ControlledCaptureEngine unreachable predicate timeout discriminator
+        let dispEngine = ControlledCaptureEngine()
+        let dispReg = await dispEngine.waitUntilRegistered(count: 1, timeoutSec: 0.05)
+        assertEqual(dispReg, .timedOut, "ControlledCaptureEngine unreachable registration must return .timedOut")
+        let dispCancel = await dispEngine.waitUntilCancelled(count: 1, timeoutSec: 0.05)
+        assertEqual(dispCancel, .timedOut, "ControlledCaptureEngine unreachable cancellation must return .timedOut")
+        let dispExit = await dispEngine.waitUntilExited(count: 1, timeoutSec: 0.05)
+        assertEqual(dispExit, .timedOut, "ControlledCaptureEngine unreachable exit must return .timedOut")
+        dispEngine.assertNoWaiters()
+
+        // 2. BudgetRecorder negative discriminators:
+        // 2a. Unreachable prefix timeout
+        let dispBudgetRec1 = BudgetRecorder()
+        dispBudgetRec1.record(1)
+        let dispB1 = await dispBudgetRec1.waitUntilTransitions([1, 0], timeoutSec: 0.05)
+        assertEqual(dispB1, .timedOut, "BudgetRecorder unreachable prefix must return .timedOut")
+        dispBudgetRec1.assertClosed(expectedTransitions: [1], current: 1)
+
+        // 2b. Wrong order mutation [0, 1] vs expected [1, 0]
+        let dispBudgetRec2 = BudgetRecorder()
+        dispBudgetRec2.record(0)
+        dispBudgetRec2.record(1)
+        let dispB2 = await dispBudgetRec2.waitUntilTransitions([1, 0], timeoutSec: 0.05)
+        assertEqual(dispB2, .mismatched, "BudgetRecorder wrong order [0, 1] must return .mismatched")
+        dispBudgetRec2.assertClosed(expectedTransitions: [0, 1], current: 1)
+
+        // 2c. Accepted-prefix overshoot mutation [1, 0, 1] vs expected [1, 0]
+        let dispBudgetRec3 = BudgetRecorder()
+        dispBudgetRec3.record(1)
+        dispBudgetRec3.record(0)
+        dispBudgetRec3.record(1)
+        let dispB3 = await dispBudgetRec3.waitUntilTransitions([1, 0], timeoutSec: 0.05)
+        assertEqual(dispB3, .mismatched, "BudgetRecorder accepted-prefix overshoot [1, 0, 1] must return .mismatched")
+        dispBudgetRec3.assertClosed(expectedTransitions: [1, 0, 1], current: 1)
+
+        // 3. ObservedSleeper negative discriminators:
+        // 3a. Unreachable terminal count timeout
+        let dispManual = ManualSleeper()
+        let dispSleeper = ObservedSleeper(sleeper: dispManual)
+        let dispS1 = await dispSleeper.waitUntilTerminalCount(1, timeoutSec: 0.05)
+        assertEqual(dispS1, .timedOut, "ObservedSleeper unreachable terminal count must return .timedOut")
+        dispSleeper.assertCloseout(expectedIssuedCount: 0, expectedDurations: [], expectedTerminals: [])
+
+        // 3b. Invalid/duplicate terminal call ID invariant counter discriminator (P3)
+        let dispSleeperInv = ObservedSleeper(sleeper: ManualSleeper())
+        dispSleeperInv.recordInvalidTerminalForTest(callId: 9999)
+        assertEqual(dispSleeperInv.invariants, 1, "ObservedSleeper must increment invariant count on invalid terminal ID")
+        dispSleeperInv.assertCloseout(expectedIssuedCount: 0, expectedDurations: [], expectedTerminals: [], expectedInvariants: 1)
+
+        // 4. R2SuspensionCounter unreachable timeout discriminator (P4)
+        let dispCounter = R2SuspensionCounter()
+        let dispC1 = await dispCounter.waitUntilSuspended(count: 1, timeoutSec: 0.05)
+        assertEqual(dispC1, .timedOut, "R2SuspensionCounter unreachable target must return .timedOut")
+        dispCounter.assertClosed(expectedCount: 0)
     }
 }

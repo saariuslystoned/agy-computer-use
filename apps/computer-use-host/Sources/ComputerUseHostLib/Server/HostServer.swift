@@ -1,12 +1,16 @@
 import Foundation
 
+public typealias BudgetCountObserver = @Sendable (Int) -> Void
+
 public final class CaptureBudget: @unchecked Sendable {
     public let maxConcurrent: Int
     private var activeCount: Int = 0
     private let lock = NSLock()
+    private let countObserver: BudgetCountObserver?
 
-    public init(maxConcurrent: Int = 2) {
+    public init(maxConcurrent: Int = 2, countObserver: BudgetCountObserver? = nil) {
         self.maxConcurrent = maxConcurrent
+        self.countObserver = countObserver
     }
 
     public var count: Int {
@@ -16,23 +20,44 @@ public final class CaptureBudget: @unchecked Sendable {
     }
 
     public func acquire() -> Bool {
+        var newCount: Int? = nil
         lock.lock()
-        defer { lock.unlock() }
         if activeCount < maxConcurrent {
             activeCount += 1
+            newCount = activeCount
+        }
+        lock.unlock()
+
+        if let count = newCount {
+            countObserver?(count)
             return true
         }
         return false
     }
 
     public func release() {
+        var newCount: Int? = nil
         lock.lock()
-        defer { lock.unlock() }
         if activeCount > 0 {
             activeCount -= 1
+            newCount = activeCount
+        }
+        lock.unlock()
+
+        if let count = newCount {
+            countObserver?(count)
         }
     }
 }
+
+public enum ArbiterResolutionOutcome: String, Equatable, Sendable {
+    case success
+    case timeout
+    case cancelled
+    case failure
+}
+
+public typealias ArbiterResolutionObserver = @Sendable (ArbiterResolutionOutcome) -> Void
 
 private final class OneShotArbiter<T: Sendable>: @unchecked Sendable {
     private enum State {
@@ -42,6 +67,11 @@ private final class OneShotArbiter<T: Sendable>: @unchecked Sendable {
 
     private let lock = NSLock()
     private var state: State = .pending(nil, captureTask: nil, timerTask: nil)
+    private let resolutionObserver: ArbiterResolutionObserver?
+
+    init(resolutionObserver: ArbiterResolutionObserver? = nil) {
+        self.resolutionObserver = resolutionObserver
+    }
 
     func installContinuation(_ continuation: CheckedContinuation<T, Error>) {
         lock.lock()
@@ -83,6 +113,7 @@ private final class OneShotArbiter<T: Sendable>: @unchecked Sendable {
         var contToResume: CheckedContinuation<T, Error>? = nil
         var captureToCancel: Task<Void, Never>? = nil
         var timerToCancel: Task<Void, Never>? = nil
+        var winningOutcome: ArbiterResolutionOutcome? = nil
 
         lock.lock()
         switch state {
@@ -93,18 +124,27 @@ private final class OneShotArbiter<T: Sendable>: @unchecked Sendable {
             switch result {
             case .success:
                 timerToCancel = tTask
+                winningOutcome = .success
             case .failure(let err as ComputerUseError):
                 if case .timeout = err {
                     captureToCancel = cTask
+                    winningOutcome = .timeout
                 } else if case .cancelled = err {
                     captureToCancel = cTask
                     timerToCancel = tTask
+                    winningOutcome = .cancelled
                 } else {
                     timerToCancel = tTask
+                    winningOutcome = .failure
                 }
+            case .failure(is CancellationError):
+                captureToCancel = cTask
+                timerToCancel = tTask
+                winningOutcome = .cancelled
             case .failure:
                 timerToCancel = tTask
                 captureToCancel = cTask
+                winningOutcome = .failure
             }
             lock.unlock()
         case .resolved:
@@ -112,11 +152,16 @@ private final class OneShotArbiter<T: Sendable>: @unchecked Sendable {
             return
         }
 
+        if let outcome = winningOutcome {
+            resolutionObserver?(outcome)
+        }
+
+        captureToCancel?.cancel()
+        timerToCancel?.cancel()
+
         if let cont = contToResume {
             cont.resume(with: result)
         }
-        captureToCancel?.cancel()
-        timerToCancel?.cancel()
     }
 }
 
@@ -153,6 +198,7 @@ public actor HostServer {
     private let budget: CaptureBudget
     private let sleeper: Sleeper
     private let clock: HostClock
+    private let resolutionObserver: ArbiterResolutionObserver?
 
     private var latestCapture: CaptureFrameDTO?
     private var activeTopology: DisplayTopology?
@@ -175,7 +221,8 @@ public actor HostServer {
         observationTimeoutSec: Double = 5.0,
         budget: CaptureBudget = CaptureBudget(maxConcurrent: 2),
         sleeper: Sleeper = DefaultSleeper(),
-        clock: HostClock = DefaultHostClock()
+        clock: HostClock = DefaultHostClock(),
+        resolutionObserver: ArbiterResolutionObserver? = nil
     ) {
         self.authorizer = authorizer
         self.topologyProvider = topologyProvider
@@ -186,6 +233,7 @@ public actor HostServer {
         self.budget = budget
         self.sleeper = sleeper
         self.clock = clock
+        self.resolutionObserver = resolutionObserver
     }
 
     public func handleRequest(_ request: IPCRequest) async -> IPCResponse {
@@ -232,6 +280,14 @@ public actor HostServer {
                 )
 
             case "observe":
+                if Task.isCancelled {
+                    return IPCResponse(
+                        id: request.id,
+                        success: false,
+                        error: IPCErrorPayload(code: "CANCELLED", message: "Task was cancelled before processing")
+                    )
+                }
+
                 guard authorizer.isScreenCaptureAccessGranted else {
                     throw ComputerUseError.permissionDenied(permission: "screen_recording")
                 }
@@ -274,7 +330,8 @@ public actor HostServer {
                         timeoutSec: self.observationTimeoutSec,
                         budget: budget,
                         sleeper: self.sleeper,
-                        clock: self.clock
+                        clock: self.clock,
+                        resolutionObserver: self.resolutionObserver
                     )
                 } catch {
                     throw error
@@ -366,7 +423,8 @@ public actor HostServer {
         timeoutSec: Double,
         budget: CaptureBudget,
         sleeper: Sleeper = DefaultSleeper(),
-        clock: HostClock = DefaultHostClock()
+        clock: HostClock = DefaultHostClock(),
+        resolutionObserver: ArbiterResolutionObserver? = nil
     ) async throws -> CaptureFrameDTO {
         guard timeoutSec.isFinite && timeoutSec > 0 && timeoutSec < 100_000_000 else {
             budget.release()
@@ -375,7 +433,7 @@ public actor HostServer {
 
         let startInstant = clock.now
         let absoluteDeadline = startInstant + .seconds(timeoutSec)
-        let arbiter = OneShotArbiter<CaptureFrameDTO>()
+        let arbiter = OneShotArbiter<CaptureFrameDTO>(resolutionObserver: resolutionObserver)
 
         return try await withTaskCancellationHandler(
             operation: {
