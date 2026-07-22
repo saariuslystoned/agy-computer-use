@@ -12,6 +12,29 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const REPO_ROOT = path.resolve(__dirname, '..');
 
+export class TestStagingHarness {
+    constructor(options = {}) {
+        this._isHarness = true;
+        if (options.productionMode) {
+            this.rootDir = path.join(REPO_ROOT, 'apps/computer-use-host/.build/staged');
+            if (!fs.existsSync(this.rootDir)) {
+                fs.mkdirSync(this.rootDir, { recursive: true, mode: 0o700 });
+            }
+        } else {
+            this.rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-harness-root-'));
+            fs.chmodSync(this.rootDir, 0o700);
+        }
+        this.beforeRemovalHook = null;
+        this.removalSpyCount = 0;
+    }
+
+    cleanup() {
+        if (this.rootDir && this.rootDir.includes('agy-harness-root-') && fs.existsSync(this.rootDir)) {
+            fs.rmSync(this.rootDir, { recursive: true, force: true });
+        }
+    }
+}
+
 export function validateStageTargetDir(targetDir, allowedRoot) {
     const resolvedRoot = path.resolve(allowedRoot);
 
@@ -82,22 +105,48 @@ export function validateStageTargetDir(targetDir, allowedRoot) {
 }
 
 export async function stageHostApp(options = {}) {
-    if (options.projectRoot) {
-        throw new Error('Obsolete projectRoot option is not allowed for production staging');
+    const forbiddenKeys = ['projectRoot', 'targetDir', 'allowedTestRoot', 'testRoot', 'beforeRemovalHook'];
+    for (const key of forbiddenKeys) {
+        if (key in options) {
+            throw new Error(`Option '${key}' is forbidden in stageHostApp`);
+        }
     }
 
-    const root = REPO_ROOT;
-    const hostPackageDir = path.join(root, 'apps/computer-use-host');
-
-    let stagedAppDir;
-    let stagingRoot;
-
-    if (options.targetDir) {
-        stagingRoot = options.allowedTestRoot || options.testRoot;
-        if (!stagingRoot) {
-            throw new Error(`Test-injected targetDir ${options.targetDir} requires explicit allowedTestRoot option`);
+    let harness = null;
+    if ('harness' in options) {
+        if (!options.harness || !options.harness._isHarness) {
+            throw new Error('Option harness must be an instance of TestStagingHarness');
         }
-        stagedAppDir = validateStageTargetDir(options.targetDir, stagingRoot);
+        harness = options.harness;
+    } else {
+        if ('relativeTarget' in options) {
+            throw new Error('Option relativeTarget is forbidden without a test harness');
+        }
+    }
+
+    const hostPackageDir = path.join(REPO_ROOT, 'apps/computer-use-host');
+    let stagingRoot;
+    let stagedAppDir;
+
+    if (harness) {
+        stagingRoot = harness.rootDir;
+        const rootLstat = fs.lstatSync(stagingRoot);
+        if (rootLstat.isSymbolicLink()) {
+            throw new Error(`Allowed root ${stagingRoot} cannot be a symbolic link`);
+        }
+        if (!rootLstat.isDirectory()) {
+            throw new Error(`Allowed root ${stagingRoot} must be a directory, not a regular file or non-directory`);
+        }
+        if ((rootLstat.mode & 0o077) !== 0) {
+            throw new Error(`Allowed root ${stagingRoot} must have private 0700 permissions`);
+        }
+
+        const relTarget = options.relativeTarget || 'ComputerUseHost.app';
+        if (path.isAbsolute(relTarget)) {
+            throw new Error(`relativeTarget ${relTarget} must be a relative path beneath harness root`);
+        }
+        stagedAppDir = path.join(stagingRoot, relTarget);
+        validateStageTargetDir(stagedAppDir, stagingRoot);
     } else {
         stagingRoot = path.join(hostPackageDir, '.build/staged');
         if (!fs.existsSync(stagingRoot)) {
@@ -134,19 +183,23 @@ export async function stageHostApp(options = {}) {
             '--product', 'ComputerUseHost',
             '-Xswiftc', '-strict-concurrency=complete',
             '-Xswiftc', '-warnings-as-errors'
-        ], { cwd: root });
+        ], { cwd: REPO_ROOT });
     } else {
         if (!fs.existsSync(releaseBinarySource)) {
             throw new Error(`Release binary does not exist at ${releaseBinarySource}; cannot stage without build.`);
         }
     }
 
-    if (typeof options.beforeRemovalHook === 'function') {
-        await options.beforeRemovalHook();
+    if (harness && typeof harness.beforeRemovalHook === 'function') {
+        await harness.beforeRemovalHook();
     }
 
     // Revalidate target immediately before removal
     validateStageTargetDir(stagedAppDir, stagingRoot);
+
+    if (harness) {
+        harness.removalSpyCount++;
+    }
 
     if (fs.existsSync(stagedAppDir)) {
         fs.rmSync(stagedAppDir, { recursive: true, force: true });
@@ -163,7 +216,7 @@ export async function stageHostApp(options = {}) {
         '--sign', '-',
         '--timestamp=none',
         stagedAppDir
-    ], { cwd: root });
+    ], { cwd: REPO_ROOT });
 
     return {
         appPath: stagedAppDir,

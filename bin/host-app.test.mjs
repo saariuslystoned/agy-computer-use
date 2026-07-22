@@ -7,7 +7,7 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawn, execFileSync, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { stageHostApp, classifyPrincipal, parseAndClassifyPrincipal, validateStageTargetDir } from './host-app.mjs';
+import { stageHostApp, classifyPrincipal, parseAndClassifyPrincipal, validateStageTargetDir, TestStagingHarness } from './host-app.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -184,25 +184,29 @@ async function runBoundedSubprocessTest(stagedAppBinary, signalToTest) {
 }
 
 test('RP-1: Discriminator: host-principal argument handling prevents shell injection', async () => {
-    const injectionPath = '/tmp/test app; touch /tmp/pwned.txt; echo/App.app';
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-shell-inj-'));
+    fs.chmodSync(tmpDir, 0o700);
+
+    const sentinelPath = path.join(tmpDir, 'pwned_sentinel.txt');
+    const injectionPath = path.join(tmpDir, `test app; touch "${sentinelPath}"; echo/App.app`);
     const binPath = path.resolve('bin/agy-computer-use');
 
-    if (fs.existsSync('/tmp/pwned.txt')) {
-        fs.rmSync('/tmp/pwned.txt');
-    }
-
-    let stdout = '';
     try {
-        stdout = execFileSync(process.execPath, [binPath, 'host-principal', '--app', injectionPath], {
-            encoding: 'utf-8',
-            stdio: ['ignore', 'pipe', 'pipe']
-        });
-    } catch (err) {
-        stdout = (err.stdout || '') + (err.stderr || '');
-    }
+        let stdout = '';
+        try {
+            stdout = execFileSync(process.execPath, [binPath, 'host-principal', '--app', injectionPath], {
+                encoding: 'utf-8',
+                stdio: ['ignore', 'pipe', 'pipe']
+            });
+        } catch (err) {
+            stdout = (err.stdout || '') + (err.stderr || '');
+        }
 
-    assert.equal(fs.existsSync('/tmp/pwned.txt'), false, 'Shell injection target file must NOT be created');
-    assert.ok(stdout.includes('unsigned_or_invalid'), 'Must report unsigned_or_invalid for non-existent path');
+        assert.equal(fs.existsSync(sentinelPath), false, 'Shell injection target sentinel must NOT be created');
+        assert.ok(stdout.includes('unsigned_or_invalid'), 'Must report unsigned_or_invalid for non-existent path');
+    } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
 });
 
 test('RP-2: Complete production-bound principal classification authority table', async (t) => {
@@ -452,172 +456,438 @@ test('AR-P1: Recording runner test for classifyPrincipal', async () => {
     assert.equal(mutantRes.classification, 'stable_team_signed_candidate', 'Mutant ignoring verification would return stable_team_signed_candidate');
 });
 
-test('E2-P2: Component-aware stage target directory validation discriminators', async () => {
-    const parentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-ar-p2-test-'));
-    fs.chmodSync(parentDir, 0o700);
+test('E2-P2: Rejection table for stage target directory validation', async () => {
+    // 1. Missing allowed root rejection
+    {
+        const parentTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-rej-missing-'));
+        fs.chmodSync(parentTmp, 0o700);
+        const outsideDir = path.join(parentTmp, 'outside');
+        fs.mkdirSync(outsideDir, { mode: 0o700 });
+        const sentinel = path.join(outsideDir, 'sentinel.txt');
+        fs.writeFileSync(sentinel, 'MISSING_ROOT_SENTINEL');
 
-    const outsideRealDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-ar-p2-outside-'));
-    fs.chmodSync(outsideRealDir, 0o700);
-    const outsideSentinel = path.join(outsideRealDir, 'sentinel.txt');
-    fs.writeFileSync(outsideSentinel, 'SAFE_SENTINEL_DATA');
-
-    try {
-        const testRoot = path.join(parentDir, 'allowed_root');
-        fs.mkdirSync(testRoot, { mode: 0o700 });
-
-        // 1. Equal root rejection
+        const missingRoot = path.join(parentTmp, 'missing_root');
         assert.throws(
-            () => validateStageTargetDir(testRoot, testRoot),
-            /cannot be equal to allowed root/
+            () => validateStageTargetDir(path.join(missingRoot, 'target.app'), missingRoot),
+            /does not exist/
         );
+        assert.equal(fs.readFileSync(sentinel, 'utf-8'), 'MISSING_ROOT_SENTINEL');
+        fs.rmSync(parentTmp, { recursive: true, force: true });
+    }
 
-        // 2. Sibling-prefix rejection (/tmp/.../allowed_root_sibling vs /tmp/.../allowed_root)
-        const siblingDir = testRoot + '_sibling';
-        assert.throws(
-            () => validateStageTargetDir(path.join(siblingDir, 'target.app'), testRoot),
-            /not strictly contained within allowed root/
-        );
+    // 2. Regular file allowed root rejection
+    {
+        const parentTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-rej-regfile-'));
+        fs.chmodSync(parentTmp, 0o700);
+        const outsideDir = path.join(parentTmp, 'outside');
+        fs.mkdirSync(outsideDir, { mode: 0o700 });
+        const sentinel = path.join(outsideDir, 'sentinel.txt');
+        fs.writeFileSync(sentinel, 'REGFILE_ROOT_SENTINEL');
 
-        // 3. Parent traversal escape rejection
-        const traversalDir = path.join(testRoot, '../outside');
-        assert.throws(
-            () => validateStageTargetDir(traversalDir, testRoot),
-            /not strictly contained within allowed root/
-        );
-
-        // 4. Valid nested target passes
-        const validSubdir = path.join(testRoot, 'sub/target.app');
-        assert.equal(validateStageTargetDir(validSubdir, testRoot), validSubdir);
-
-        // 5. Regular file allowed root rejection
-        const regFileRoot = path.join(parentDir, 'reg_file_root');
+        const regFileRoot = path.join(parentTmp, 'reg_file_root');
         fs.writeFileSync(regFileRoot, 'NOT_A_DIR');
         assert.throws(
             () => validateStageTargetDir(path.join(regFileRoot, 'target.app'), regFileRoot),
             /must be a directory/
         );
+        assert.equal(fs.readFileSync(sentinel, 'utf-8'), 'REGFILE_ROOT_SENTINEL');
+        fs.rmSync(parentTmp, { recursive: true, force: true });
+    }
 
-        // 6. Missing allowed root rejection
-        const missingRoot = path.join(parentDir, 'missing_root');
-        assert.throws(
-            () => validateStageTargetDir(path.join(missingRoot, 'target.app'), missingRoot),
-            /does not exist/
-        );
+    // 3. Symlink allowed root rejection
+    {
+        const parentTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-rej-symroot-'));
+        fs.chmodSync(parentTmp, 0o700);
+        const outsideDir = path.join(parentTmp, 'outside');
+        fs.mkdirSync(outsideDir, { mode: 0o700 });
+        const sentinel = path.join(outsideDir, 'sentinel.txt');
+        fs.writeFileSync(sentinel, 'SYM_ROOT_SENTINEL');
 
-        // 7. Symlink allowed root rejection
-        const symlinkRoot = path.join(parentDir, 'symlink_root');
-        fs.symlinkSync(outsideRealDir, symlinkRoot);
+        const symlinkRoot = path.join(parentTmp, 'symlink_root');
+        fs.symlinkSync(outsideDir, symlinkRoot);
         assert.throws(
             () => validateStageTargetDir(path.join(symlinkRoot, 'target.app'), symlinkRoot),
             /cannot be a symbolic link/
         );
+        assert.equal(fs.readFileSync(sentinel, 'utf-8'), 'SYM_ROOT_SENTINEL');
+        fs.rmSync(parentTmp, { recursive: true, force: true });
+    }
 
-        // 8. In-root target symlink rejection
-        const inRootTargetSymlink = path.join(testRoot, 'symlink_target.app');
-        fs.symlinkSync(outsideRealDir, inRootTargetSymlink);
-        assert.throws(
-            () => validateStageTargetDir(inRootTargetSymlink, testRoot),
-            /cannot be a symbolic link/
-        );
+    // 4. Non-private mode allowed root rejection
+    {
+        const parentTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-rej-nonpriv-'));
+        fs.chmodSync(parentTmp, 0o700);
+        const outsideDir = path.join(parentTmp, 'outside');
+        fs.mkdirSync(outsideDir, { mode: 0o700 });
+        const sentinel = path.join(outsideDir, 'sentinel.txt');
+        fs.writeFileSync(sentinel, 'NONPRIV_ROOT_SENTINEL');
 
-        // 9. Intermediate component symlink rejection
-        const intermediateDir = path.join(testRoot, 'inter');
-        fs.symlinkSync(outsideRealDir, intermediateDir);
-        assert.throws(
-            () => validateStageTargetDir(path.join(intermediateDir, 'target.app'), testRoot),
-            /cannot be a symbolic link/
-        );
-
-        // 10. Dangling target symlink rejection (lstat catches dangling symlink where existsSync is false)
-        const danglingTargetSymlink = path.join(testRoot, 'dangling_target.app');
-        fs.symlinkSync(path.join(outsideRealDir, 'nonexistent_file'), danglingTargetSymlink);
-        assert.equal(fs.existsSync(danglingTargetSymlink), false, 'dangling symlink must return false for existsSync');
-        assert.throws(
-            () => validateStageTargetDir(danglingTargetSymlink, testRoot),
-            /cannot be a symbolic link/
-        );
-
-        // 11. Dangling intermediate component symlink rejection
-        const danglingInterSymlink = path.join(testRoot, 'dangling_inter');
-        fs.symlinkSync(path.join(outsideRealDir, 'nonexistent_dir'), danglingInterSymlink);
-        assert.equal(fs.existsSync(danglingInterSymlink), false, 'dangling intermediate symlink must return false for existsSync');
-        assert.throws(
-            () => validateStageTargetDir(path.join(danglingInterSymlink, 'target.app'), testRoot),
-            /cannot be a symbolic link/
-        );
-
-        // 12. Non-private mode allowed root rejection
-        const nonPrivateRoot = path.join(parentDir, 'non_private_root');
+        const nonPrivateRoot = path.join(parentTmp, 'non_private_root');
         fs.mkdirSync(nonPrivateRoot, { mode: 0o755 });
         assert.throws(
             () => validateStageTargetDir(path.join(nonPrivateRoot, 'target.app'), nonPrivateRoot),
             /must have private 0700 permissions/
         );
+        assert.equal(fs.readFileSync(sentinel, 'utf-8'), 'NONPRIV_ROOT_SENTINEL');
+        fs.rmSync(parentTmp, { recursive: true, force: true });
+    }
 
-        // 13. Re-validation race test: target swapped to symlink before rmSync
-        const raceRoot = path.join(parentDir, 'race_root');
-        fs.mkdirSync(raceRoot, { mode: 0o700 });
-        const raceTarget = path.join(raceRoot, 'race_target.app');
+    // 5. Equal root rejection
+    {
+        const parentTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-rej-equal-'));
+        fs.chmodSync(parentTmp, 0o700);
+        const outsideDir = path.join(parentTmp, 'outside');
+        fs.mkdirSync(outsideDir, { mode: 0o700 });
+        const sentinel = path.join(outsideDir, 'sentinel.txt');
+        fs.writeFileSync(sentinel, 'EQUAL_ROOT_SENTINEL');
+
+        const rootDir = path.join(parentTmp, 'root');
+        fs.mkdirSync(rootDir, { mode: 0o700 });
+        assert.throws(
+            () => validateStageTargetDir(rootDir, rootDir),
+            /cannot be equal to allowed root/
+        );
+        assert.equal(fs.readFileSync(sentinel, 'utf-8'), 'EQUAL_ROOT_SENTINEL');
+        fs.rmSync(parentTmp, { recursive: true, force: true });
+    }
+
+    // 6. Sibling prefix rejection
+    {
+        const parentTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-rej-sibling-'));
+        fs.chmodSync(parentTmp, 0o700);
+        const outsideDir = path.join(parentTmp, 'outside');
+        fs.mkdirSync(outsideDir, { mode: 0o700 });
+        const sentinel = path.join(outsideDir, 'sentinel.txt');
+        fs.writeFileSync(sentinel, 'SIBLING_ROOT_SENTINEL');
+
+        const rootDir = path.join(parentTmp, 'root');
+        fs.mkdirSync(rootDir, { mode: 0o700 });
+        const siblingDir = rootDir + '_sibling';
+        assert.throws(
+            () => validateStageTargetDir(path.join(siblingDir, 'target.app'), rootDir),
+            /not strictly contained within allowed root/
+        );
+        assert.equal(fs.readFileSync(sentinel, 'utf-8'), 'SIBLING_ROOT_SENTINEL');
+        fs.rmSync(parentTmp, { recursive: true, force: true });
+    }
+
+    // 7. Parent traversal escape rejection
+    {
+        const parentTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-rej-escape-'));
+        fs.chmodSync(parentTmp, 0o700);
+        const outsideDir = path.join(parentTmp, 'outside');
+        fs.mkdirSync(outsideDir, { mode: 0o700 });
+        const sentinel = path.join(outsideDir, 'sentinel.txt');
+        fs.writeFileSync(sentinel, 'ESCAPE_ROOT_SENTINEL');
+
+        const rootDir = path.join(parentTmp, 'root');
+        fs.mkdirSync(rootDir, { mode: 0o700 });
+        const traversalDir = path.join(rootDir, '../outside');
+        assert.throws(
+            () => validateStageTargetDir(traversalDir, rootDir),
+            /not strictly contained within allowed root/
+        );
+        assert.equal(fs.readFileSync(sentinel, 'utf-8'), 'ESCAPE_ROOT_SENTINEL');
+        fs.rmSync(parentTmp, { recursive: true, force: true });
+    }
+
+    // 8. Target symlink rejection (with TestStagingHarness and removalSpyCount assertion)
+    {
+        const parentTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-rej-targetsym-'));
+        fs.chmodSync(parentTmp, 0o700);
+        const outsideDir = path.join(parentTmp, 'outside');
+        fs.mkdirSync(outsideDir, { mode: 0o700 });
+        const sentinel = path.join(outsideDir, 'sentinel.txt');
+        fs.writeFileSync(sentinel, 'TARGET_SYM_SENTINEL');
+
+        const harness = new TestStagingHarness();
+        const targetSymlink = path.join(harness.rootDir, 'symlink_target.app');
+        fs.symlinkSync(outsideDir, targetSymlink);
 
         await assert.rejects(
-            async () => {
-                await stageHostApp({
-                    targetDir: raceTarget,
-                    allowedTestRoot: raceRoot,
-                    build: false,
-                    beforeRemovalHook: async () => {
-                        fs.symlinkSync(outsideRealDir, raceTarget);
-                    }
-                });
-            },
+            async () => await stageHostApp({ harness, relativeTarget: 'symlink_target.app', build: false }),
             /cannot be a symbolic link/
         );
+        assert.equal(harness.removalSpyCount, 0, 'Removal spy count must be 0 on target symlink rejection');
+        assert.equal(fs.readFileSync(sentinel, 'utf-8'), 'TARGET_SYM_SENTINEL');
+        harness.cleanup();
+        fs.rmSync(parentTmp, { recursive: true, force: true });
+    }
 
-        assert.equal(fs.existsSync(outsideSentinel), true, 'Outside sentinel must survive race revalidation rejection');
-        assert.equal(fs.readFileSync(outsideSentinel, 'utf8'), 'SAFE_SENTINEL_DATA', 'Outside sentinel content must remain untouched');
-    } finally {
-        fs.rmSync(parentDir, { recursive: true, force: true });
-        fs.rmSync(outsideRealDir, { recursive: true, force: true });
+    // 9. Intermediate component symlink rejection
+    {
+        const parentTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-rej-intersym-'));
+        fs.chmodSync(parentTmp, 0o700);
+        const outsideDir = path.join(parentTmp, 'outside');
+        fs.mkdirSync(outsideDir, { mode: 0o700 });
+        const sentinel = path.join(outsideDir, 'sentinel.txt');
+        fs.writeFileSync(sentinel, 'INTER_SYM_SENTINEL');
+
+        const harness = new TestStagingHarness();
+        const interSymlink = path.join(harness.rootDir, 'inter_sym');
+        fs.symlinkSync(outsideDir, interSymlink);
+
+        await assert.rejects(
+            async () => await stageHostApp({ harness, relativeTarget: 'inter_sym/target.app', build: false }),
+            /cannot be a symbolic link/
+        );
+        assert.equal(harness.removalSpyCount, 0, 'Removal spy count must be 0 on intermediate symlink rejection');
+        assert.equal(fs.readFileSync(sentinel, 'utf-8'), 'INTER_SYM_SENTINEL');
+        harness.cleanup();
+        fs.rmSync(parentTmp, { recursive: true, force: true });
+    }
+
+    // 10. Dangling target symlink rejection
+    {
+        const parentTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-rej-dangtarget-'));
+        fs.chmodSync(parentTmp, 0o700);
+        const outsideDir = path.join(parentTmp, 'outside');
+        fs.mkdirSync(outsideDir, { mode: 0o700 });
+        const sentinel = path.join(outsideDir, 'sentinel.txt');
+        fs.writeFileSync(sentinel, 'DANGLING_TARGET_SENTINEL');
+
+        const harness = new TestStagingHarness();
+        const danglingTarget = path.join(harness.rootDir, 'ComputerUseHost.app');
+        fs.symlinkSync(path.join(outsideDir, 'nonexistent_target'), danglingTarget);
+        assert.equal(fs.existsSync(danglingTarget), false, 'Dangling target must return false for existsSync');
+
+        await assert.rejects(
+            async () => await stageHostApp({ harness, build: false }),
+            /cannot be a symbolic link/
+        );
+        assert.equal(harness.removalSpyCount, 0, 'Removal spy count must be 0 on dangling target rejection');
+        assert.equal(fs.readFileSync(sentinel, 'utf-8'), 'DANGLING_TARGET_SENTINEL');
+        harness.cleanup();
+        fs.rmSync(parentTmp, { recursive: true, force: true });
+    }
+
+    // 11. Dangling intermediate component symlink rejection
+    {
+        const parentTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-rej-danginter-'));
+        fs.chmodSync(parentTmp, 0o700);
+        const outsideDir = path.join(parentTmp, 'outside');
+        fs.mkdirSync(outsideDir, { mode: 0o700 });
+        const sentinel = path.join(outsideDir, 'sentinel.txt');
+        fs.writeFileSync(sentinel, 'DANGLING_INTER_SENTINEL');
+
+        const harness = new TestStagingHarness();
+        const danglingInter = path.join(harness.rootDir, 'dangling_inter');
+        fs.symlinkSync(path.join(outsideDir, 'nonexistent_dir'), danglingInter);
+        assert.equal(fs.existsSync(danglingInter), false, 'Dangling intermediate must return false for existsSync');
+
+        await assert.rejects(
+            async () => await stageHostApp({ harness, relativeTarget: 'dangling_inter/target.app', build: false }),
+            /cannot be a symbolic link/
+        );
+        assert.equal(harness.removalSpyCount, 0, 'Removal spy count must be 0 on dangling intermediate rejection');
+        assert.equal(fs.readFileSync(sentinel, 'utf-8'), 'DANGLING_INTER_SENTINEL');
+        harness.cleanup();
+        fs.rmSync(parentTmp, { recursive: true, force: true });
     }
 });
 
+test('AR-P2: Final revalidation race authority - fixed production target', async () => {
+    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-race-prod-outside-'));
+    fs.chmodSync(outsideDir, 0o700);
+    const outsideSentinel = path.join(outsideDir, 'sentinel.txt');
+    fs.writeFileSync(outsideSentinel, 'PROD_RACE_SENTINEL');
+
+    const harness = new TestStagingHarness({ productionMode: true });
+    const fixedTargetApp = path.join(harness.rootDir, 'ComputerUseHost.app');
+
+    try {
+        harness.beforeRemovalHook = () => {
+            if (fs.existsSync(fixedTargetApp)) {
+                fs.rmSync(fixedTargetApp, { recursive: true, force: true });
+            }
+            fs.symlinkSync(outsideDir, fixedTargetApp);
+        };
+
+        await assert.rejects(
+            async () => await stageHostApp({ harness, build: false }),
+            /cannot be a symbolic link/
+        );
+
+        assert.equal(harness.removalSpyCount, 0, 'Removal spy count must be zero on fixed target race rejection');
+        assert.equal(fs.existsSync(outsideSentinel), true, 'Fixed target race sentinel must survive');
+        assert.equal(fs.readFileSync(outsideSentinel, 'utf-8'), 'PROD_RACE_SENTINEL');
+    } finally {
+        if (fs.existsSync(fixedTargetApp) && fs.lstatSync(fixedTargetApp).isSymbolicLink()) {
+            fs.unlinkSync(fixedTargetApp);
+        }
+        harness.cleanup();
+        fs.rmSync(outsideDir, { recursive: true, force: true });
+    }
+});
+
+test('AR-P2: Final revalidation race authority - injected target', async () => {
+    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-race-inj-target-outside-'));
+    fs.chmodSync(outsideDir, 0o700);
+    const outsideSentinel = path.join(outsideDir, 'sentinel.txt');
+    fs.writeFileSync(outsideSentinel, 'INJ_TARGET_RACE_SENTINEL');
+
+    const harness = new TestStagingHarness();
+    const injectedTargetApp = path.join(harness.rootDir, 'ComputerUseHost.app');
+
+    try {
+        harness.beforeRemovalHook = () => {
+            if (fs.existsSync(injectedTargetApp)) {
+                fs.rmSync(injectedTargetApp, { recursive: true, force: true });
+            }
+            fs.symlinkSync(outsideDir, injectedTargetApp);
+        };
+
+        await assert.rejects(
+            async () => await stageHostApp({ harness, build: false }),
+            /cannot be a symbolic link/
+        );
+
+        assert.equal(harness.removalSpyCount, 0, 'Removal spy count must be zero on injected target race rejection');
+        assert.equal(fs.existsSync(outsideSentinel), true, 'Injected target race sentinel must survive');
+        assert.equal(fs.readFileSync(outsideSentinel, 'utf-8'), 'INJ_TARGET_RACE_SENTINEL');
+    } finally {
+        if (fs.existsSync(injectedTargetApp) && fs.lstatSync(injectedTargetApp).isSymbolicLink()) {
+            fs.unlinkSync(injectedTargetApp);
+        }
+        harness.cleanup();
+        fs.rmSync(outsideDir, { recursive: true, force: true });
+    }
+});
+
+test('AR-P2: Final revalidation race authority - injected intermediate directory', async () => {
+    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-race-inj-inter-outside-'));
+    fs.chmodSync(outsideDir, 0o700);
+    const outsideSentinel = path.join(outsideDir, 'sentinel.txt');
+    fs.writeFileSync(outsideSentinel, 'INJ_INTER_RACE_SENTINEL');
+
+    const harness = new TestStagingHarness();
+    const interDir = path.join(harness.rootDir, 'inter_dir');
+    const relTarget = 'inter_dir/ComputerUseHost.app';
+
+    try {
+        harness.beforeRemovalHook = () => {
+            if (fs.existsSync(interDir)) {
+                fs.rmSync(interDir, { recursive: true, force: true });
+            }
+            fs.symlinkSync(outsideDir, interDir);
+        };
+
+        await assert.rejects(
+            async () => await stageHostApp({ harness, relativeTarget: relTarget, build: false }),
+            /cannot be a symbolic link/
+        );
+
+        assert.equal(harness.removalSpyCount, 0, 'Removal spy count must be zero on injected intermediate race rejection');
+        assert.equal(fs.existsSync(outsideSentinel), true, 'Injected intermediate race sentinel must survive');
+        assert.equal(fs.readFileSync(outsideSentinel, 'utf-8'), 'INJ_INTER_RACE_SENTINEL');
+    } finally {
+        if (fs.existsSync(interDir) && fs.lstatSync(interDir).isSymbolicLink()) {
+            fs.unlinkSync(interDir);
+        }
+        harness.cleanup();
+        fs.rmSync(outsideDir, { recursive: true, force: true });
+    }
+});
+
+test('AR-P2: Rejection of ordinary stageHostApp raw and obsolete options', async () => {
+    const forbiddenOptions = [
+        { key: 'projectRoot', val: '/tmp' },
+        { key: 'targetDir', val: '/tmp/target.app' },
+        { key: 'allowedTestRoot', val: '/tmp' },
+        { key: 'testRoot', val: '/tmp' },
+        { key: 'beforeRemovalHook', val: () => {} }
+    ];
+
+    for (const item of forbiddenOptions) {
+        await assert.rejects(
+            async () => await stageHostApp({ [item.key]: item.val, build: false }),
+            new RegExp(`Option '${item.key}' is forbidden`)
+        );
+    }
+
+    await assert.rejects(
+        async () => await stageHostApp({ relativeTarget: 'sub.app', build: false }),
+        /Option relativeTarget is forbidden without a test harness/
+    );
+
+    await assert.rejects(
+        async () => await stageHostApp({ harness: {}, build: false }),
+        /Option harness must be an instance of TestStagingHarness/
+    );
+});
+
 test('AR-P2: Clean-export discriminator for fresh checkout staging', async () => {
-    const exportTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-ar-p2-export-'));
-    fs.chmodSync(exportTmpDir, 0o700);
+    const parentTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-export-authority-'));
+    fs.chmodSync(parentTmpDir, 0o700);
+
+    const outsideDir = path.join(parentTmpDir, 'outside');
+    fs.mkdirSync(outsideDir, { mode: 0o700 });
+    const outsideSentinel = path.join(outsideDir, 'export_sentinel.txt');
+    fs.writeFileSync(outsideSentinel, 'EXPORT_SENTINEL_DATA_MUST_NOT_BE_MUTATED');
+
+    const cloneDir = path.join(parentTmpDir, 'clone');
+    const exportDir = path.join(parentTmpDir, 'export');
+    fs.mkdirSync(exportDir, { mode: 0o700 });
 
     try {
         const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-        await execFileAsync('sh', ['-c', `git archive HEAD | tar -x -C "${exportTmpDir}"`], { cwd: repoRoot });
-        fs.copyFileSync(path.join(repoRoot, 'bin/host-app.mjs'), path.join(exportTmpDir, 'bin/host-app.mjs'));
 
-        assert.equal(fs.existsSync(path.join(exportTmpDir, 'apps/computer-use-host/.build')), false, 'Clean export must not contain pre-existing .build directory');
-        assert.equal(fs.existsSync(path.join(exportTmpDir, '.git')), false, 'Clean export must not contain .git directory');
-        assert.equal(fs.existsSync(path.join(exportTmpDir, 'node_modules')), false, 'Clean export must not contain node_modules directory');
+        // 1. Create a private local clone at exact candidate HEAD without shell interpolation
+        execFileSync('git', ['clone', repoRoot, cloneDir], { stdio: 'ignore' });
 
-        const { stdout: stageStdout } = await execFileAsync('./bin/agy-computer-use', ['stage-host-app'], { cwd: exportTmpDir });
+        // 2. Deliberately add a dirty marker to tracked bin/host-app.mjs and an untracked file in the clone
+        const cloneHostAppMjs = path.join(cloneDir, 'bin/host-app.mjs');
+        fs.appendFileSync(cloneHostAppMjs, '\n// DIRTY_WORKTREE_MARKER_MUST_NOT_BE_EXPORTED\n');
+        const cloneUntrackedFile = path.join(cloneDir, 'UNTRACKED_FILE_MUST_NOT_BE_EXPORTED.txt');
+        fs.writeFileSync(cloneUntrackedFile, 'UNTRACKED');
+
+        // 3. Archive committed HEAD from clone into exportDir without shell interpolation
+        const archiveTarPath = path.join(parentTmpDir, 'export.tar');
+        execFileSync('git', ['archive', '--output', archiveTarPath, 'HEAD'], { cwd: cloneDir, stdio: 'ignore' });
+        execFileSync('tar', ['-xf', archiveTarPath, '-C', exportDir], { stdio: 'ignore' });
+
+        // 4. Assert dirty marker and untracked marker are absent
+        const exportedHostAppPath = path.join(exportDir, 'bin/host-app.mjs');
+        const exportedHostAppBytes = fs.readFileSync(exportedHostAppPath);
+        assert.equal(exportedHostAppBytes.includes('DIRTY_WORKTREE_MARKER'), false, 'Dirty worktree marker must NOT be in clean export');
+        assert.equal(fs.existsSync(path.join(exportDir, 'UNTRACKED_FILE_MUST_NOT_BE_EXPORTED.txt')), false, 'Untracked file must NOT be in clean export');
+
+        // 5. Assert exported bin/host-app.mjs bytes match git show HEAD:bin/host-app.mjs
+        const gitShowBytes = execFileSync('git', ['show', 'HEAD:bin/host-app.mjs'], { cwd: repoRoot });
+        assert.equal(Buffer.compare(exportedHostAppBytes, gitShowBytes), 0, 'Exported bin/host-app.mjs bytes must equal git show HEAD:bin/host-app.mjs');
+
+        // 6. Assert clean export structure (.build, .git, node_modules absent)
+        assert.equal(fs.existsSync(path.join(exportDir, 'apps/computer-use-host/.build')), false, 'Clean export must not contain pre-existing .build directory');
+        assert.equal(fs.existsSync(path.join(exportDir, '.git')), false, 'Clean export must not contain .git directory');
+        assert.equal(fs.existsSync(path.join(exportDir, 'node_modules')), false, 'Clean export must not contain node_modules directory');
+
+        // 7. Execute real exported ./bin/agy-computer-use wrapper for stage-host-app
+        const stageStdout = execFileSync('./bin/agy-computer-use', ['stage-host-app'], { cwd: exportDir, encoding: 'utf-8' });
         const stageRes = JSON.parse(stageStdout.slice(stageStdout.indexOf('{')));
 
         assert.equal(stageRes.success, true);
         assert.equal(stageRes.appPath, 'apps/computer-use-host/.build/staged/ComputerUseHost.app');
-        assert.equal(fs.existsSync(path.join(exportTmpDir, stageRes.appPath)), true, 'Staged app must exist in clean export');
+        assert.equal(fs.existsSync(path.join(exportDir, stageRes.appPath)), true, 'Staged app must exist in clean export');
 
-        const stagingRootPath = path.join(exportTmpDir, 'apps/computer-use-host/.build/staged');
+        const stagingRootPath = path.join(exportDir, 'apps/computer-use-host/.build/staged');
         const stagingRootStat = fs.statSync(stagingRootPath);
         assert.equal(stagingRootStat.mode & 0o777, 0o700, 'Staging root in clean export must have 0700 mode');
 
-        const { stdout: principalStdout } = await execFileAsync('./bin/agy-computer-use', ['host-principal'], { cwd: exportTmpDir });
+        // 8. Execute real exported ./bin/agy-computer-use host-principal
+        const principalStdout = execFileSync('./bin/agy-computer-use', ['host-principal'], { cwd: exportDir, encoding: 'utf-8' });
         const principalRes = JSON.parse(principalStdout.slice(principalStdout.indexOf('{')));
         assert.equal(principalRes.classification, 'ad_hoc_ephemeral');
         assert.equal(principalRes.identifier, 'com.saariuslystoned.agy-computer-use.host');
         assert.equal(principalRes.teamId, null);
 
+        // 9. Execute real exported ./bin/agy-computer-use host-principal --require-stable
         let stableExit = 0;
         let stableStdout = '';
         try {
-            await execFileAsync('./bin/agy-computer-use', ['host-principal', '--require-stable'], { cwd: exportTmpDir });
+            execFileSync('./bin/agy-computer-use', ['host-principal', '--require-stable'], { cwd: exportDir, encoding: 'utf-8' });
         } catch (e) {
-            stableExit = e.code;
-            stableStdout = e.stdout || '';
+            stableExit = e.status || 1;
+            stableStdout = (e.stdout || '') + (e.stderr || '');
         }
 
         assert.equal(stableExit, 1, 'host-principal --require-stable must exit 1 on ad-hoc app');
@@ -625,13 +895,11 @@ test('AR-P2: Clean-export discriminator for fresh checkout staging', async () =>
         assert.equal(stableRes.classification, 'ad_hoc_ephemeral');
         assert.equal(stableRes.error, 'Staged app is ad_hoc_ephemeral; --require-stable specified');
 
-        const { stageHostApp: exportStageHostApp } = await import(`file://${path.join(exportTmpDir, 'bin/host-app.mjs')}`);
-        await assert.rejects(
-            async () => await exportStageHostApp({ projectRoot: exportTmpDir, build: false }),
-            /Obsolete projectRoot option is not allowed/
-        );
+        // 10. Assert outside sentinel survived untouched
+        assert.equal(fs.existsSync(outsideSentinel), true, 'Export test outside sentinel must survive');
+        assert.equal(fs.readFileSync(outsideSentinel, 'utf-8'), 'EXPORT_SENTINEL_DATA_MUST_NOT_BE_MUTATED', 'Export test outside sentinel must remain byte-identical');
     } finally {
-        fs.rmSync(exportTmpDir, { recursive: true, force: true });
+        fs.rmSync(parentTmpDir, { recursive: true, force: true });
     }
 });
 
