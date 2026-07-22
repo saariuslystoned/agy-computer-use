@@ -1,3 +1,4 @@
+import * as crypto from "crypto";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -161,6 +162,8 @@ export function validateAndDecodeBase64JPEG(
   base64Data: string,
   expectedPixelWidth?: number,
   expectedPixelHeight?: number,
+  expectedByteLength?: number,
+  expectedSha256?: string,
   decoder: BufferDecoder = (str, enc) => Buffer.from(str, enc)
 ): Buffer {
   if (!base64Data || typeof base64Data !== "string") {
@@ -205,6 +208,15 @@ export function validateAndDecodeBase64JPEG(
 
   if (imageBuffer.length > 10 * 1024 * 1024) {
     throw new Error(`Decoded image buffer size ${imageBuffer.length} bytes exceeds 10 MiB limit`);
+  }
+
+  if (expectedByteLength !== undefined && imageBuffer.length !== expectedByteLength) {
+    throw new Error(`Decoded byte length (${imageBuffer.length}) does not match native byte length (${expectedByteLength})`);
+  }
+
+  const computedSha256 = crypto.createHash("sha256").update(imageBuffer).digest("hex");
+  if (expectedSha256 !== undefined && computedSha256.toLowerCase() !== expectedSha256.toLowerCase()) {
+    throw new Error(`Recomputed SHA-256 digest (${computedSha256}) does not match native image_sha256 (${expectedSha256})`);
   }
 
   if (imageBuffer.length < 4 || imageBuffer[0] !== 0xff || imageBuffer[1] !== 0xd8 || imageBuffer[2] !== 0xff) {
@@ -288,7 +300,13 @@ function formatToolResponse(ipcResp: any, toolName: string) {
     }
 
     try {
-      validateAndDecodeBase64JPEG(parsedData.data.image_data_base64, parsedData.data.pixel_width, parsedData.data.pixel_height);
+      validateAndDecodeBase64JPEG(
+        parsedData.data.image_data_base64,
+        parsedData.data.pixel_width,
+        parsedData.data.pixel_height,
+        parsedData.data.image_byte_length,
+        parsedData.data.image_sha256
+      );
     } catch (valErr: any) {
       return {
         isError: true,

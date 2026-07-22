@@ -163,6 +163,15 @@ jobs:
           echo "$TEST_OUT" | grep -F "test35_InjectedListenFailurePostBindRollback"
           echo "$TEST_OUT" | grep -F "test36_FourSurfaceAuthorityBijection"
           echo "$TEST_OUT" | grep -F "test37_ManualSleeperSevenDeterministicScenarios"
+          echo "$TEST_OUT" | grep -F "test38_HostServerDeadlineCaptureAuthority"
+          echo "$TEST_OUT" | grep -F "test39_HostLifecycleAndSubprocessShutdown"
+
+      - name: Stage Background App Bundle & Verify Principal Classification
+        run: |
+          set -euo pipefail
+          ./bin/agy-computer-use stage-host-app
+          ./bin/agy-computer-use host-principal
+          node --test bin/host-app.test.mjs
 
       - name: Build Release Executable & Guard Binary Symbols
         run: |
@@ -211,7 +220,8 @@ jobs:
           pnpm check
           pnpm test
 
-      - name: Validate Offline D2 Canary Readiness
+      - name: Validate Offline Production MCP Readiness
         run: |
           set -euo pipefail
+          ./bin/agy-computer-use production-ready
           ./bin/agy-computer-use canary-ready

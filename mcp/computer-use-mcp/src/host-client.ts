@@ -1,5 +1,6 @@
 import * as net from "net";
 import * as fs from "fs";
+import * as crypto from "crypto";
 import { z } from "zod";
 
 export const IPCErrorPayloadSchema = z.object({
@@ -78,6 +79,8 @@ export class MockHostClient implements HostClient {
       const targetId = (params?.display_id as number) ?? this.mockDisplayId;
       const topVer = "top-sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
       const dummyJpegBase64 = "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAARCABkAGQDAREAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/9oADAMBAAIRAxEAPwD+2AD/2Q==";
+      const dummyBuf = Buffer.from(dummyJpegBase64, "base64");
+      const dummySha256 = crypto.createHash("sha256").update(dummyBuf).digest("hex");
 
       return {
         id: "mock-obs",
@@ -94,6 +97,8 @@ export class MockHostClient implements HostClient {
           pixel_height: 100,
           image_format: "jpeg",
           image_data_base64: dummyJpegBase64,
+          image_byte_length: dummyBuf.length,
+          image_sha256: dummySha256,
           normalized_bounds: {
             min_x: 0,
             min_y: 0,

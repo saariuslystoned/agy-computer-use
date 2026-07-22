@@ -20,57 +20,11 @@ function fail(msg) {
 }
 
 const subcommand = process.argv[2] || "doctor";
-const validSubcommands = ["build", "doctor", "canary-ready", "test-native", "stage-host-app", "host-principal"];
+const validSubcommands = ["build", "doctor", "production-ready", "canary-ready", "test-native", "stage-host-app", "host-principal"];
 
 if (!validSubcommands.includes(subcommand)) {
   console.error(`[FAIL] Unknown subcommand '${subcommand}'. Valid subcommands are: ${validSubcommands.join(", ")}`);
   process.exit(1);
-}
-
-async function verifyD2McpToolInventory() {
-  const indexModulePath = path.join(mcpPkgDir, "dist/src/index.js");
-  const hostClientModulePath = path.join(mcpPkgDir, "dist/src/host-client.js");
-
-  const clientSdkPath = path.join(mcpPkgDir, "node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js");
-  const memorySdkPath = path.join(mcpPkgDir, "node_modules/@modelcontextprotocol/sdk/dist/esm/inMemory.js");
-
-  if (!fs.existsSync(indexModulePath)) {
-    throw new Error(`D2 Server dist module missing at ${indexModulePath}`);
-  }
-
-  const { Client } = await import(`file://${clientSdkPath}`);
-  const { InMemoryTransport } = await import(`file://${memorySdkPath}`);
-  const { createComputerUseServer } = await import(`file://${indexModulePath}`);
-  const { MockHostClient } = await import(`file://${hostClientModulePath}`);
-
-  const mockClient = new MockHostClient();
-  const server = createComputerUseServer(mockClient);
-
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const client = new Client(
-    { name: "doctor-inventory-client", version: "1.0.0" },
-    { capabilities: {} }
-  );
-
-  await Promise.all([
-    server.connect(serverTransport),
-    client.connect(clientTransport)
-  ]);
-
-  const toolsResult = await client.listTools();
-  await client.close();
-  await server.close();
-
-  if (!toolsResult || !toolsResult.tools || toolsResult.tools.length !== 2) {
-    throw new Error(`D2 MCP server tool inventory count must be EXACTLY 2, got ${toolsResult?.tools?.length ?? 0}`);
-  }
-
-  const toolNames = toolsResult.tools.map(t => t.name).sort();
-  if (toolNames[0] !== "computer_use_observe" || toolNames[1] !== "computer_use_status") {
-    throw new Error(`D2 tool names must be ['computer_use_observe', 'computer_use_status'], got ${JSON.stringify(toolNames)}`);
-  }
-
-  return toolNames;
 }
 
 function validateMcpConfigStruct() {
@@ -80,28 +34,65 @@ function validateMcpConfigStruct() {
   }
 
   const mcpConfig = JSON.parse(fs.readFileSync(mcpConfigPath, "utf-8"));
-
-  const prodServer = mcpConfig?.mcpServers?.["computer-use"];
-  if (!prodServer) {
-    throw new Error(`.agents/mcp_config.json must register 'computer-use'`);
+  const keys = Object.keys(mcpConfig?.mcpServers || {});
+  if (keys.length !== 1 || keys[0] !== "computer-use") {
+    throw new Error(`.agents/mcp_config.json must contain EXACTLY ONE active MCP server key: 'computer-use', got ${JSON.stringify(keys)}`);
   }
-  if (prodServer.command !== "node" || prodServer.args[0] !== "./mcp/computer-use-mcp/dist/src/index.js") {
-    throw new Error(`computer-use server config must point to './mcp/computer-use-mcp/dist/src/index.js'`);
+
+  const prodServer = mcpConfig.mcpServers["computer-use"];
+  if (prodServer.command !== "node") {
+    throw new Error(`computer-use server command must be 'node'`);
+  }
+  if (!Array.isArray(prodServer.args) || prodServer.args.length !== 1 || prodServer.args[0] !== "./mcp/computer-use-mcp/dist/src/index.js") {
+    throw new Error(`computer-use server args must be strictly ['./mcp/computer-use-mcp/dist/src/index.js']`);
+  }
+  if (prodServer.cwd !== ".") {
+    throw new Error(`computer-use server cwd must be '.'`);
   }
   if (!fs.existsSync(path.join(rootDir, prodServer.args[0]))) {
     throw new Error(`Target dist file for computer-use does not exist at ${prodServer.args[0]}`);
   }
+}
 
-  const canaryServer = mcpConfig?.mcpServers?.["computer-use-canary"];
-  if (!canaryServer) {
-    throw new Error(`.agents/mcp_config.json must register 'computer-use-canary'`);
+async function verifyProductionMcpConfiguredStdio() {
+  validateMcpConfigStruct();
+
+  const clientSdkPath = path.join(mcpPkgDir, "node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js");
+  const stdioSdkPath = path.join(mcpPkgDir, "node_modules/@modelcontextprotocol/sdk/dist/esm/client/stdio.js");
+
+  const { Client } = await import(pathToFileURL(clientSdkPath).href);
+  const { StdioClientTransport } = await import(pathToFileURL(stdioSdkPath).href);
+
+  const mcpConfigPath = path.join(rootDir, ".agents/mcp_config.json");
+  const mcpConfig = JSON.parse(fs.readFileSync(mcpConfigPath, "utf-8"));
+  const prodServer = mcpConfig.mcpServers["computer-use"];
+
+  const transport = new StdioClientTransport({
+    command: prodServer.command,
+    args: prodServer.args,
+    cwd: rootDir
+  });
+
+  const client = new Client(
+    { name: "production-ready-client", version: "1.0.0" },
+    { capabilities: {} }
+  );
+
+  await client.connect(transport);
+  const toolsResult = await client.listTools();
+  await client.close();
+  await transport.close();
+
+  if (!toolsResult || !toolsResult.tools || toolsResult.tools.length !== 2) {
+    throw new Error(`Public production MCP tool inventory count must be EXACTLY 2, got ${toolsResult?.tools?.length ?? 0}`);
   }
-  if (canaryServer.command !== "node" || canaryServer.args[0] !== "./mcp/computer-use-mcp/dist/src/canary.js") {
-    throw new Error(`computer-use-canary server config must point to './mcp/computer-use-mcp/dist/src/canary.js'`);
+
+  const toolNames = toolsResult.tools.map(t => t.name).sort();
+  if (toolNames[0] !== "computer_use_observe" || toolNames[1] !== "computer_use_status") {
+    throw new Error(`Production tool names must be ['computer_use_observe', 'computer_use_status'], got ${JSON.stringify(toolNames)}`);
   }
-  if (!fs.existsSync(path.join(rootDir, canaryServer.args[0]))) {
-    throw new Error(`Target dist file for computer-use-canary does not exist at ${canaryServer.args[0]}`);
-  }
+
+  return toolNames;
 }
 
 async function main() {
@@ -182,8 +173,8 @@ async function main() {
     fail(`Unrecognized selection authority: ${selection.authority}`);
   }
 
-  if (subcommand === "doctor" || subcommand === "canary-ready") {
-    log("Validating offline readiness for Milestone D2 (building TypeScript sources)...");
+  if (subcommand === "doctor" || subcommand === "production-ready" || subcommand === "canary-ready") {
+    log(`Validating production-only configured stdio readiness (subcommand: ${subcommand})...`);
 
     // ALWAYS build current TypeScript sources before verification
     execSync("pnpm build", { cwd: mcpPkgDir, stdio: "ignore" });
@@ -197,19 +188,19 @@ async function main() {
 
     try {
       validateMcpConfigStruct();
-      log("Verified .agents/mcp_config.json computer-use & computer-use-canary server registrations.");
+      log("Verified .agents/mcp_config.json strict single-server 'computer-use' registration.");
     } catch (err) {
       fail(`MCP Config validation failed: ${err.message}`);
     }
 
     try {
-      const toolNames = await verifyD2McpToolInventory();
-      log(`Verified D2 public MCP tool inventory: Exactly 2 tools (${toolNames.join(", ")})`);
+      const toolNames = await verifyProductionMcpConfiguredStdio();
+      log(`Verified production configured stdio MCP tool inventory: Exactly 2 tools (${toolNames.join(", ")})`);
     } catch (err) {
-      fail(`Public MCP Client tool inventory check failed: ${err.message}`);
+      fail(`Configured stdio MCP tool inventory check failed: ${err.message}`);
     }
 
-    log("ALL OFFLINE D2 READINESS CHECKS PASSED!");
+    log("ALL PRODUCTION CONFIGURED STDIO READINESS CHECKS PASSED!");
     process.exit(0);
   }
 }

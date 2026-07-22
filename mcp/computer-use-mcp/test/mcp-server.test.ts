@@ -110,17 +110,17 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
     // N = 10,485,760 bytes limit
     // N+1 = 10,485,761 bytes -> 13,981,016 chars with one '='
     const b64_N_plus_1 = "A".repeat(13_981_015) + "=";
-    assert.throws(() => validateAndDecodeBase64JPEG(b64_N_plus_1, undefined, undefined, mockDecoder), /exceeds 10 MiB limit/);
+    assert.throws(() => validateAndDecodeBase64JPEG(b64_N_plus_1, undefined, undefined, undefined, undefined, mockDecoder), /exceeds 10 MiB limit/);
     assert.equal(decodeCount, 0, "Decoder must NOT be invoked when N+1 exceeds 10 MiB limit");
 
     // N+2 = 10,485,762 bytes -> 13,981,016 chars with no '='
     const b64_N_plus_2 = "A".repeat(13_981_016);
-    assert.throws(() => validateAndDecodeBase64JPEG(b64_N_plus_2, undefined, undefined, mockDecoder), /exceeds 10 MiB limit/);
+    assert.throws(() => validateAndDecodeBase64JPEG(b64_N_plus_2, undefined, undefined, undefined, undefined, mockDecoder), /exceeds 10 MiB limit/);
     assert.equal(decodeCount, 0, "Decoder must NOT be invoked when N+2 exceeds 10 MiB limit");
 
     // N+3 = 13,981,020 chars
     const b64_N_plus_3 = "A".repeat(13_981_020);
-    assert.throws(() => validateAndDecodeBase64JPEG(b64_N_plus_3, undefined, undefined, mockDecoder), /exceeds 10 MiB limit/);
+    assert.throws(() => validateAndDecodeBase64JPEG(b64_N_plus_3, undefined, undefined, undefined, undefined, mockDecoder), /exceeds 10 MiB limit/);
     assert.equal(decodeCount, 0, "Decoder must NOT be invoked when N+3 exceeds 10 MiB limit");
   });
 
@@ -315,7 +315,7 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
     };
     // 10,485,760 bytes in Base64 (13,981,016 chars with '==' padding)
     const b64_N = "A".repeat(13_981_014) + "==";
-    assert.doesNotThrow(() => validateAndDecodeBase64JPEG(b64_N, 10, 10, mockDecoder));
+    assert.doesNotThrow(() => validateAndDecodeBase64JPEG(b64_N, 10, 10, undefined, undefined, mockDecoder));
     assert.equal(decodeCount, 1);
   });
 

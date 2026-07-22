@@ -115,6 +115,10 @@ export const ObserveDataSchema = z.object({
   pixel_height: z.number().int().positive().finite(),
   image_format: z.literal("jpeg"),
   image_data_base64: Base64ImageSchema,
+  image_byte_length: z.number().int().positive().finite().max(10 * 1024 * 1024),
+  image_sha256: z.string().regex(/^[0-9a-f]{64}$/, {
+    message: "image_sha256 must be a lowercase 64-hex SHA-256 digest"
+  }),
   normalized_bounds: z.object({
     min_x: z.literal(0),
     min_y: z.literal(0),

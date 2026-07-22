@@ -70,7 +70,7 @@ The MCP server exposes the following active tools to Gemini 3.6 Flash / Antigrav
   - pnpm `10.33.0`.
   - Swift 5.9+ / Xcode Command Line Tools.
 
-### Running Tests
+### Running Tests & Readiness Checks
 
 - **Authoritative Native Swift Test Authority**:
   ```bash
@@ -80,7 +80,13 @@ The MCP server exposes the following active tools to Gemini 3.6 Flash / Antigrav
   ```bash
   cd mcp/computer-use-mcp && pnpm check && pnpm test
   ```
-- **Offline D2 Canary Readiness Check**:
+- **Stage Background App & Verify Principal Classification**:
   ```bash
-  ./bin/agy-computer-use canary-ready
+  ./bin/agy-computer-use stage-host-app
+  ./bin/agy-computer-use host-principal
+  node --test bin/host-app.test.mjs
+  ```
+- **Offline Production MCP Readiness Check**:
+  ```bash
+  ./bin/agy-computer-use production-ready
   ```
