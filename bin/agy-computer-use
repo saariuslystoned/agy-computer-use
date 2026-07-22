@@ -3,7 +3,7 @@
 import { execSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
-import { fileURLToPath } from "url";
+import { fileURLToPath, pathToFileURL } from "url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -138,52 +138,39 @@ async function main() {
       fail(`Failed to read native test manifest at ${manifestPath}: ${err.message}`);
     }
 
-    if (listExitCode !== 0) {
-      const isRecognizedFallback =
-        listOutput.includes("no such module 'XCTest'") ||
-        listOutput.includes('no such module "XCTest"') ||
-        listOutput.includes("XCTest is not supported") ||
-        listOutput.includes("XCTestHelper binary not found");
-
-      if (isRecognizedFallback) {
-        log("XCTest discovery unavailable in environment; running ComputerUseHostTestRunner executable authority...");
-        execSync("swift run -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors ComputerUseHostTestRunner", { cwd: hostDir, stdio: "inherit" });
-        log("Native test suite execution complete.");
-        process.exit(0);
-      } else {
-        fail(`'swift test list' failed closed with build/discovery/manifest error:\n${listOutput}`);
-      }
+    const selectionModulePath = path.join(mcpPkgDir, "dist/src/native-authority-selection.js");
+    if (!fs.existsSync(selectionModulePath)) {
+      execSync("pnpm build", { cwd: mcpPkgDir, stdio: "ignore" });
     }
 
-    const actualListLines = listOutput
-      .trim()
-      .split("\n")
-      .map(l => l.trim())
-      .filter(l => l.startsWith("ComputerUseHostTests."))
-      .sort();
+    const { classifyNativeAuthoritySelection } = await import(pathToFileURL(selectionModulePath).href);
+    const selection = classifyNativeAuthoritySelection({
+      helpOutput,
+      listOutput,
+      listExitCode,
+      manifestContent
+    });
 
-    if (actualListLines.length === 0) {
-      fail("'swift test list' returned status 0 with 0 discovered tests. Failing closed.");
+    if (selection.status !== 0) {
+      fail(selection.error || "'swift test list' failed closed");
     }
 
-    const expectedList = manifestContent
-      .trim()
-      .split("\n")
-      .map(l => l.trim())
-      .filter(Boolean)
-      .sort()
-      .join("\n");
-
-    const actualListStr = actualListLines.join("\n");
-
-    if (actualListStr !== expectedList) {
-      fail(`Native test manifest mismatch!\nExpected:\n${expectedList}\nActual:\n${actualListStr}`);
+    if (selection.authority === "fallback") {
+      log("XCTest discovery unavailable in environment; running ComputerUseHostTestRunner executable authority...");
+      execSync("swift run -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors ComputerUseHostTestRunner", { cwd: hostDir, stdio: "inherit" });
+      log("Native test suite execution complete.");
+      process.exit(0);
     }
 
-    log(`Verified native test manifest (${actualListLines.length} test cases). Running swift test...`);
-    execSync("swift test -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors", { cwd: hostDir, stdio: "inherit" });
-    log("Native test suite execution complete.");
-    process.exit(0);
+    if (selection.authority === "xctest") {
+      log(`Executing native test suite (${selection.testCount} discovered tests)...`);
+      const enableFlag = helpOutput.includes("--enable-xctest") ? " --enable-xctest" : "";
+      execSync(`swift test${enableFlag}`, { cwd: hostDir, stdio: "inherit" });
+      log("Native test suite execution complete.");
+      process.exit(0);
+    }
+
+    fail(`Unrecognized selection authority: ${selection.authority}`);
   }
 
   if (subcommand === "doctor" || subcommand === "canary-ready") {

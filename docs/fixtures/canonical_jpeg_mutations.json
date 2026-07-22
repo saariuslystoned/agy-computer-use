@@ -1,0 +1,104 @@
+[
+  {
+    "id": 1,
+    "name": "Identity",
+    "expectedResult": "accept",
+    "expectedWidth": 10,
+    "expectedHeight": 10,
+    "sha256": "afc2917f7357e4f883aa4105aa90aa4e5cb0b4df83365eb00a4142cd1980f24d"
+  },
+  {
+    "id": 2,
+    "name": "Malformed APP/COM length",
+    "expectedResult": "reject",
+    "sha256": "6644002e9be4aaec1ac0e650bb48e823bd717f252cb57f024465178d3806118b"
+  },
+  {
+    "id": 3,
+    "name": "Duplicate SOF IDs",
+    "expectedResult": "reject",
+    "sha256": "9f119c1a7f1ce27af1cdf62b918ac66f73e2d79b2fb92e981a38a3777f7e8c09"
+  },
+  {
+    "id": 4,
+    "name": "Duplicate same-SOS selectors",
+    "expectedResult": "reject",
+    "sha256": "e5e23c4216687d8418b214d3682ca8ce2abf080613dc420a13cc7d54576a08ea"
+  },
+  {
+    "id": 5,
+    "name": "Unknown selector in SOS",
+    "expectedResult": "reject",
+    "sha256": "6ac0e20dbb863bd62dd50001ce45cb6497114c602459b49ffc738b40c24ffa78"
+  },
+  {
+    "id": 6,
+    "name": "Zero counts in SOS",
+    "expectedResult": "reject",
+    "sha256": "978e02aad1c05062463edcddfae3bdfcf3f41dbbb282771a2a09489aa1763091"
+  },
+  {
+    "id": 7,
+    "name": "Excess counts in SOS",
+    "expectedResult": "reject",
+    "sha256": "1f140fa6d4a0235142a14c70e5c8cd47a92666ed79b43f4d13507f1d56754352"
+  },
+  {
+    "id": 8,
+    "name": "Repeated SOI",
+    "expectedResult": "reject",
+    "sha256": "ca03bb11f6bc2fe8aa7309543c4c0c702c69a5db2fc6e07b97db917be7efdb49"
+  },
+  {
+    "id": 9,
+    "name": "Duplicate SOF segment",
+    "expectedResult": "reject",
+    "sha256": "a689f0126e33e6aecabcbf9d8bc11d22f68c50b60000d727b3808e21dddb5d8c"
+  },
+  {
+    "id": 10,
+    "name": "Bad inter-scan marker/length",
+    "expectedResult": "reject",
+    "sha256": "236a9cb9ae549ad15fe1f4035207f80023998e061a137fb7c20633a34d48e0cb"
+  },
+  {
+    "id": 11,
+    "name": "Truncated entropy",
+    "expectedResult": "reject",
+    "sha256": "320659999a93645c438c7babab1013b2051de1da5aa91fcfd2ebd5ab0407df90"
+  },
+  {
+    "id": 12,
+    "name": "Missing EOI",
+    "expectedResult": "reject",
+    "sha256": "141132c081a64f8cebd21e8207c613edf74b95a14258018a483f30c6d95b7e71"
+  },
+  {
+    "id": 13,
+    "name": "Exact 64M (8000x8000)",
+    "expectedResult": "accept",
+    "expectedWidth": 8000,
+    "expectedHeight": 8000,
+    "sha256": "83f217c647a59ae58df6f92f09c0b3719a89d63d58786c99d559f49e362a691d"
+  },
+  {
+    "id": 14,
+    "name": "Exact 64M+1 (5213x12277 = 64,000,001)",
+    "expectedResult": "reject",
+    "sha256": "e803ccf7c83142a11112777c39d7f77754a582ae9d6caed68f8a7b4a83c8fc99"
+  },
+  {
+    "id": 15,
+    "name": "Canonical trailing zero bytes",
+    "expectedResult": "accept",
+    "expectedWidth": 10,
+    "expectedHeight": 10,
+    "sha256": "98299be45d9a96eed25cb37e5d59a79567ef4e4ba50534cb8b159d5f1fbed5d5"
+  },
+  {
+    "id": 16,
+    "name": "Non-zero trailing garbage",
+    "expectedResult": "reject",
+    "sha256": "86136dac7ae9ecf3c6d07ae061bf09071aafc97c0e7d225c79907185c2ca647d"
+  }
+]

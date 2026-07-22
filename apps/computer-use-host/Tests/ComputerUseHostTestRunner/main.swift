@@ -1,6 +1,7 @@
 import Foundation
 import CoreGraphics
 import ImageIO
+import CryptoKit
 import ComputerUseHostLib
 
 private final class AtomicCounter: @unchecked Sendable {
@@ -1359,114 +1360,124 @@ public struct ComputerUseHostTestRunner {
         assertEqual(cgImage?.width, 10, "golden_progressive.jpg width must be 10")
         assertEqual(cgImage?.height, 10, "golden_progressive.jpg height must be 10")
 
-        // 14-Mutation Parity Table in Swift
-        // 1. Identity
-        let dims1 = SCScreenshotCaptureEngine.parseJPEGDimensions(data: goldenData)
-        assertTrue(dims1 != nil, "Golden JPEG identity parse must succeed")
-        assertEqual(dims1?.width, 10)
-        assertEqual(dims1?.height, 10)
+        // 16-Row Canonical Mutation Table Validation with SHA-256 Parity
+        let tableURL = repoRoot.appendingPathComponent("docs/fixtures/canonical_jpeg_mutations.json")
+        assertTrue(FileManager.default.fileExists(atPath: tableURL.path), "docs/fixtures/canonical_jpeg_mutations.json must exist")
+        let tableData = try Data(contentsOf: tableURL)
 
-        // 2. Malformed APP/COM length
-        var mut2 = goldenData
-        mut2[4] = 0x00; mut2[5] = 0x01
-        assertTrue(SCScreenshotCaptureEngine.parseJPEGDimensions(data: mut2) == nil, "Must reject malformed APP/COM length")
-
-        // 3. Duplicate SOF IDs
-        var mut3 = goldenData
-        if let sofIdx3 = mut3.range(of: Data([0xFF, 0xC2]))?.lowerBound {
-            mut3[sofIdx3 + 13] = mut3[sofIdx3 + 10]
-        }
-        assertTrue(SCScreenshotCaptureEngine.parseJPEGDimensions(data: mut3) == nil, "Must reject duplicate SOF IDs")
-
-        // 4. Duplicate same-SOS selectors
-        var mut4 = goldenData
-        if let sosIdx4 = mut4.range(of: Data([0xFF, 0xDA]))?.lowerBound {
-            mut4[sosIdx4 + 7] = mut4[sosIdx4 + 5]
-        }
-        assertTrue(SCScreenshotCaptureEngine.parseJPEGDimensions(data: mut4) == nil, "Must reject duplicate same-SOS selectors")
-
-        // 5. Unknown selector in SOS
-        var mut5 = goldenData
-        if let sosIdx5 = mut5.range(of: Data([0xFF, 0xDA]))?.lowerBound {
-            mut5[sosIdx5 + 5] = 0x99
-        }
-        assertTrue(SCScreenshotCaptureEngine.parseJPEGDimensions(data: mut5) == nil, "Must reject unknown selector in SOS")
-
-        // 6. Zero/excess counts in SOS
-        var mut6a = goldenData
-        if let sosIdx6a = mut6a.range(of: Data([0xFF, 0xDA]))?.lowerBound {
-            mut6a[sosIdx6a + 4] = 0
-        }
-        assertTrue(SCScreenshotCaptureEngine.parseJPEGDimensions(data: mut6a) == nil, "Must reject zero count in SOS")
-
-        var mut6b = goldenData
-        if let sosIdx6b = mut6b.range(of: Data([0xFF, 0xDA]))?.lowerBound {
-            mut6b[sosIdx6b + 4] = 5
-        }
-        assertTrue(SCScreenshotCaptureEngine.parseJPEGDimensions(data: mut6b) == nil, "Must reject excess count in SOS")
-
-        // 7. Repeated SOI
-        let mut7 = Data([0xFF, 0xD8, 0xFF, 0xD8]) + goldenData.dropFirst(2)
-        assertTrue(SCScreenshotCaptureEngine.parseJPEGDimensions(data: mut7) == nil, "Must reject repeated SOI")
-
-        // 8. Duplicate SOF
-        if let sofIdx8 = goldenData.range(of: Data([0xFF, 0xC2]))?.lowerBound {
-            let segLen8 = Int(goldenData[sofIdx8 + 2]) << 8 | Int(goldenData[sofIdx8 + 3])
-            let sofChunk = goldenData[sofIdx8..<(sofIdx8 + 2 + segLen8)]
-            var mut8 = Data()
-            mut8.append(goldenData[0..<(sofIdx8 + 2 + segLen8)])
-            mut8.append(sofChunk)
-            mut8.append(goldenData[(sofIdx8 + 2 + segLen8)...])
-            assertTrue(SCScreenshotCaptureEngine.parseJPEGDimensions(data: mut8) == nil, "Must reject duplicate SOF segment")
+        struct MutationRow: Decodable {
+            let id: Int
+            let name: String
+            let expectedResult: String
+            let expectedWidth: Int?
+            let expectedHeight: Int?
+            let sha256: String
         }
 
-        // 9. Bad inter-scan marker/length
-        var mut9 = goldenData
-        if let sosIdx9 = mut9.range(of: Data([0xFF, 0xDA]))?.lowerBound {
-            for i in (sosIdx9 + 10)..<(mut9.count - 1) {
-                if mut9[i] == 0xFF && mut9[i + 1] != 0x00 && !(mut9[i + 1] >= 0xD0 && mut9[i + 1] <= 0xD7) && mut9[i + 1] != 0xD9 {
-                    mut9[i + 1] = 0x02
-                    break
+        let table = try JSONDecoder().decode([MutationRow].self, from: tableData)
+        assertEqual(table.count, 16, "Canonical JPEG mutation table must contain exactly 16 rows")
+
+        for row in table {
+            var mutData = Data()
+            switch row.id {
+            case 1:
+                mutData = goldenData
+            case 2:
+                mutData = goldenData
+                mutData[4] = 0x00; mutData[5] = 0x01
+            case 3:
+                mutData = goldenData
+                guard let sofIdx = mutData.range(of: Data([0xFF, 0xC2]))?.lowerBound else {
+                    fatalError("SOF marker not found for row \(row.id)")
                 }
+                mutData[sofIdx + 13] = mutData[sofIdx + 10]
+            case 4:
+                mutData = goldenData
+                guard let sosIdx = mutData.range(of: Data([0xFF, 0xDA]))?.lowerBound else {
+                    fatalError("SOS marker not found for row \(row.id)")
+                }
+                mutData[sosIdx + 7] = mutData[sosIdx + 5]
+            case 5:
+                mutData = goldenData
+                guard let sosIdx = mutData.range(of: Data([0xFF, 0xDA]))?.lowerBound else {
+                    fatalError("SOS marker not found for row \(row.id)")
+                }
+                mutData[sosIdx + 5] = 0x99
+            case 6:
+                mutData = goldenData
+                guard let sosIdx = mutData.range(of: Data([0xFF, 0xDA]))?.lowerBound else {
+                    fatalError("SOS marker not found for row \(row.id)")
+                }
+                mutData[sosIdx + 4] = 0
+            case 7:
+                mutData = goldenData
+                guard let sosIdx = mutData.range(of: Data([0xFF, 0xDA]))?.lowerBound else {
+                    fatalError("SOS marker not found for row \(row.id)")
+                }
+                mutData[sosIdx + 4] = 5
+            case 8:
+                mutData = Data([0xFF, 0xD8, 0xFF, 0xD8]) + goldenData.dropFirst(2)
+            case 9:
+                guard let sofIdx = goldenData.range(of: Data([0xFF, 0xC2]))?.lowerBound else {
+                    fatalError("SOF marker not found for row \(row.id)")
+                }
+                let segLen = Int(goldenData[sofIdx + 2]) << 8 | Int(goldenData[sofIdx + 3])
+                let sofChunk = goldenData[sofIdx..<(sofIdx + 2 + segLen)]
+                mutData.append(goldenData[0..<(sofIdx + 2 + segLen)])
+                mutData.append(sofChunk)
+                mutData.append(goldenData[(sofIdx + 2 + segLen)...])
+            case 10:
+                mutData = goldenData
+                guard let sosIdx = mutData.range(of: Data([0xFF, 0xDA]))?.lowerBound else {
+                    fatalError("SOS marker not found for row \(row.id)")
+                }
+                var found = false
+                for i in (sosIdx + 10)..<(mutData.count - 1) {
+                    if mutData[i] == 0xFF && mutData[i + 1] != 0x00 && !(mutData[i + 1] >= 0xD0 && mutData[i + 1] <= 0xD7) && mutData[i + 1] != 0xD9 {
+                        mutData[i + 1] = 0x02
+                        found = true
+                        break
+                    }
+                }
+                assertTrue(found, "Inter-scan marker must be found for row \(row.id)")
+            case 11:
+                mutData = Data(goldenData.prefix(goldenData.count - 10))
+            case 12:
+                mutData = Data(goldenData.prefix(goldenData.count - 2))
+            case 13:
+                mutData = goldenData
+                guard let sofIdx = mutData.range(of: Data([0xFF, 0xC2]))?.lowerBound else {
+                    fatalError("SOF marker not found for row \(row.id)")
+                }
+                mutData[sofIdx + 5] = 0x1F; mutData[sofIdx + 6] = 0x40
+                mutData[sofIdx + 7] = 0x1F; mutData[sofIdx + 8] = 0x40
+            case 14:
+                mutData = goldenData
+                guard let sofIdx = mutData.range(of: Data([0xFF, 0xC2]))?.lowerBound else {
+                    fatalError("SOF marker not found for row \(row.id)")
+                }
+                mutData[sofIdx + 5] = 0x14; mutData[sofIdx + 6] = 0x5D // height = 5213
+                mutData[sofIdx + 7] = 0x2F; mutData[sofIdx + 8] = 0xF5 // width = 12277
+            case 15:
+                mutData = goldenData + Data([0x00, 0x00])
+            case 16:
+                mutData = goldenData + Data([0xAA])
+            default:
+                fatalError("Unexpected row ID \(row.id)")
+            }
+
+            let computedHash = SHA256.hash(data: mutData).compactMap { String(format: "%02x", $0) }.joined()
+            assertEqual(computedHash, row.sha256, "SHA-256 mismatch for row \(row.id) (\(row.name))")
+
+            let dims = SCScreenshotCaptureEngine.parseJPEGDimensions(data: mutData)
+            if row.expectedResult == "accept" {
+                assertTrue(dims != nil, "Row \(row.id) (\(row.name)) must be accepted")
+                assertEqual(dims?.width, row.expectedWidth)
+                assertEqual(dims?.height, row.expectedHeight)
+            } else {
+                assertTrue(dims == nil, "Row \(row.id) (\(row.name)) must be rejected")
             }
         }
-        assertTrue(SCScreenshotCaptureEngine.parseJPEGDimensions(data: mut9) == nil, "Must reject bad inter-scan marker/length")
-
-        // 10. Truncated entropy
-        let mut10 = goldenData.prefix(goldenData.count - 10)
-        assertTrue(SCScreenshotCaptureEngine.parseJPEGDimensions(data: Data(mut10)) == nil, "Must reject truncated entropy")
-
-        // 11. Missing EOI
-        let mut11 = goldenData.prefix(goldenData.count - 2)
-        assertTrue(SCScreenshotCaptureEngine.parseJPEGDimensions(data: Data(mut11)) == nil, "Must reject missing EOI")
-
-        // 12. Exact 64M (8000x8000)
-        var mut12 = goldenData
-        if let sofIdx12 = mut12.range(of: Data([0xFF, 0xC2]))?.lowerBound {
-            mut12[sofIdx12 + 5] = 0x1F; mut12[sofIdx12 + 6] = 0x40
-            mut12[sofIdx12 + 7] = 0x1F; mut12[sofIdx12 + 8] = 0x40
-        }
-        let dims12 = SCScreenshotCaptureEngine.parseJPEGDimensions(data: mut12)
-        assertTrue(dims12 != nil, "Exact 64M JPEG parse must succeed")
-        assertEqual(dims12?.width, 8000)
-        assertEqual(dims12?.height, 8000)
-
-        // 13. 64M+1 (8000x8001 = 64,008,000)
-        var mut13 = goldenData
-        if let sofIdx13 = mut13.range(of: Data([0xFF, 0xC2]))?.lowerBound {
-            mut13[sofIdx13 + 5] = 0x1F; mut13[sofIdx13 + 6] = 0x41
-            mut13[sofIdx13 + 7] = 0x1F; mut13[sofIdx13 + 8] = 0x40
-        }
-        assertTrue(SCScreenshotCaptureEngine.parseJPEGDimensions(data: mut13) == nil, "Must reject 64M+1 JPEG")
-
-        // 14. Canonical trailing-byte policy
-        let mut14a = goldenData + Data([0x00, 0x00])
-        let dims14a = SCScreenshotCaptureEngine.parseJPEGDimensions(data: mut14a)
-        assertTrue(dims14a != nil, "Canonical trailing zero bytes must be accepted")
-        assertEqual(dims14a?.width, 10)
-
-        let mut14b = goldenData + Data([0xAA])
-        assertTrue(SCScreenshotCaptureEngine.parseJPEGDimensions(data: mut14b) == nil, "Non-zero trailing garbage must be rejected")
     }
 
     public static func run21_JPEGInvalidMagicTruncatedSegmentAndMismatchRejection() async throws {
