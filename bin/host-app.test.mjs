@@ -26,7 +26,7 @@ function snapshotTree(dirPath) {
         rootLstat = fs.lstatSync(dirPath);
     } catch (e) {
         if (e.code === 'ENOENT') {
-            return [{ rel: '.', type: 'missing', exists: false }];
+            return [{ rel: '.', type: 'missing', exists: false, dev: null, ino: null }];
         }
         throw e;
     }
@@ -37,6 +37,8 @@ function snapshotTree(dirPath) {
             type: 'symlink',
             target: fs.readlinkSync(dirPath),
             mode: rootLstat.mode & 0o7777,
+            dev: String(rootLstat.dev),
+            ino: String(rootLstat.ino),
             exists: true
         });
     } else if (rootLstat.isDirectory()) {
@@ -44,6 +46,8 @@ function snapshotTree(dirPath) {
             rel: '.',
             type: 'directory',
             mode: rootLstat.mode & 0o7777,
+            dev: String(rootLstat.dev),
+            ino: String(rootLstat.ino),
             exists: true
         });
     } else {
@@ -55,6 +59,8 @@ function snapshotTree(dirPath) {
             hash,
             size: content.length,
             mode: rootLstat.mode & 0o7777,
+            dev: String(rootLstat.dev),
+            ino: String(rootLstat.ino),
             exists: true
         });
     }
@@ -73,6 +79,8 @@ function snapshotTree(dirPath) {
                         type: 'symlink',
                         target: fs.readlinkSync(itemPath),
                         mode: lstat.mode & 0o7777,
+                        dev: String(lstat.dev),
+                        ino: String(lstat.ino),
                         exists: true
                     });
                 } else if (lstat.isDirectory()) {
@@ -80,6 +88,8 @@ function snapshotTree(dirPath) {
                         rel,
                         type: 'directory',
                         mode: lstat.mode & 0o7777,
+                        dev: String(lstat.dev),
+                        ino: String(lstat.ino),
                         exists: true
                     });
                     walk(rel);
@@ -92,6 +102,8 @@ function snapshotTree(dirPath) {
                         hash,
                         size: content.length,
                         mode: lstat.mode & 0o7777,
+                        dev: String(lstat.dev),
+                        ino: String(lstat.ino),
                         exists: true
                     });
                 }
@@ -548,6 +560,22 @@ test('AR-P1: Recording runner test for classifyPrincipal', async () => {
     assert.equal(mutantRes.classification, 'stable_team_signed_candidate', 'Mutant ignoring verification would return stable_team_signed_candidate');
 });
 
+function runAllDeferredCleanups(cleanups) {
+    let firstError = null;
+    for (const fn of cleanups) {
+        try {
+            fn();
+        } catch (e) {
+            if (!firstError) {
+                firstError = e;
+            }
+        }
+    }
+    if (firstError) {
+        throw firstError;
+    }
+}
+
 test('E2-P2: Rejection table for stage target directory validation', async () => {
     // Helper to test each rejection sub-case with complete outside tree snapshot validation
     async function testRejectionSubcase(name, fn) {
@@ -566,10 +594,11 @@ test('E2-P2: Rejection table for stage target directory validation', async () =>
             const afterSnap = snapshotTree(outsideDir);
             assert.deepStrictEqual(afterSnap, beforeSnap, `Outside tree must remain completely unchanged for subcase ${name}`);
         } finally {
-            for (const cFn of deferredCleanupFns) {
-                try { cFn(); } catch (e) {}
+            try {
+                runAllDeferredCleanups(deferredCleanupFns);
+            } finally {
+                fs.rmSync(parentTmp, { recursive: true, force: true });
             }
-            fs.rmSync(parentTmp, { recursive: true, force: true });
         }
     }
 
@@ -723,10 +752,10 @@ import crypto from 'node:crypto';
 function snapshotTree(dirPath) {
     const entries = [];
     let rootLstat;
-    try { rootLstat = fs.lstatSync(dirPath); } catch (e) { return [{ rel: '.', type: 'missing', exists: false }]; }
-    if (rootLstat.isSymbolicLink()) entries.push({ rel: '.', type: 'symlink', target: fs.readlinkSync(dirPath), mode: rootLstat.mode & 0o7777, exists: true });
-    else if (rootLstat.isDirectory()) entries.push({ rel: '.', type: 'directory', mode: rootLstat.mode & 0o7777, exists: true });
-    else { entries.push({ rel: '.', type: 'file', hash: crypto.createHash('sha256').update(fs.readFileSync(dirPath)).digest('hex'), size: fs.statSync(dirPath).size, mode: rootLstat.mode & 0o7777, exists: true }); }
+    try { rootLstat = fs.lstatSync(dirPath); } catch (e) { return [{ rel: '.', type: 'missing', exists: false, dev: null, ino: null }]; }
+    if (rootLstat.isSymbolicLink()) entries.push({ rel: '.', type: 'symlink', target: fs.readlinkSync(dirPath), mode: rootLstat.mode & 0o7777, dev: String(rootLstat.dev), ino: String(rootLstat.ino), exists: true });
+    else if (rootLstat.isDirectory()) entries.push({ rel: '.', type: 'directory', mode: rootLstat.mode & 0o7777, dev: String(rootLstat.dev), ino: String(rootLstat.ino), exists: true });
+    else { entries.push({ rel: '.', type: 'file', hash: crypto.createHash('sha256').update(fs.readFileSync(dirPath)).digest('hex'), size: fs.statSync(dirPath).size, mode: rootLstat.mode & 0o7777, dev: String(rootLstat.dev), ino: String(rootLstat.ino), exists: true }); }
     if (rootLstat.isDirectory()) {
         function walk(currentRel) {
             const fullPath = path.join(dirPath, currentRel);
@@ -735,9 +764,9 @@ function snapshotTree(dirPath) {
                 const rel = path.join(currentRel, item);
                 const itemPath = path.join(dirPath, rel);
                 const lstat = fs.lstatSync(itemPath);
-                if (lstat.isSymbolicLink()) entries.push({ rel, type: 'symlink', target: fs.readlinkSync(itemPath), mode: lstat.mode & 0o7777, exists: true });
-                else if (lstat.isDirectory()) { entries.push({ rel, type: 'directory', mode: lstat.mode & 0o7777, exists: true }); walk(rel); }
-                else { const content = fs.readFileSync(itemPath); entries.push({ rel, type: 'file', hash: crypto.createHash('sha256').update(content).digest('hex'), size: content.length, mode: lstat.mode & 0o7777, exists: true }); }
+                if (lstat.isSymbolicLink()) entries.push({ rel, type: 'symlink', target: fs.readlinkSync(itemPath), mode: lstat.mode & 0o7777, dev: String(lstat.dev), ino: String(lstat.ino), exists: true });
+                else if (lstat.isDirectory()) { entries.push({ rel, type: 'directory', mode: lstat.mode & 0o7777, dev: String(lstat.dev), ino: String(lstat.ino), exists: true }); walk(rel); }
+                else { const content = fs.readFileSync(itemPath); entries.push({ rel, type: 'file', hash: crypto.createHash('sha256').update(content).digest('hex'), size: content.length, mode: lstat.mode & 0o7777, dev: String(lstat.dev), ino: String(lstat.ino), exists: true }); }
             }
         }
         walk('');
@@ -937,6 +966,47 @@ test('ARP2-S3: Nonvacuous snapshotTree oracle direct test', async () => {
     } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
     }
+});
+
+test('ARP2-I1: Restoration snapshot inode discriminator test', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-ino-oracle-test-'));
+    fs.chmodSync(tmpDir, 0o700);
+
+    try {
+        const testFile = path.join(tmpDir, 'recreated.txt');
+        fs.writeFileSync(testFile, 'SAME_CONTENT_AND_MODE', { mode: 0o644 });
+
+        const snapBefore = snapshotTree(tmpDir);
+
+        // Recreate file at same path with identical content and mode but new inode
+        fs.unlinkSync(testFile);
+        fs.writeFileSync(testFile, 'SAME_CONTENT_AND_MODE', { mode: 0o644 });
+
+        const snapAfter = snapshotTree(tmpDir);
+
+        assert.notDeepStrictEqual(snapAfter, snapBefore, 'Recreated file with identical bytes and mode but different inode must alter snapshotTree');
+    } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+});
+
+test('ARP2-I2: Deferred cleanup error propagation discriminator test', async () => {
+    let cb1Run = false;
+    let cb2Run = false;
+    let cb3Run = false;
+
+    const cb1 = () => { cb1Run = true; };
+    const cb2 = () => { cb2Run = true; throw new Error('UNIQUE_CLEANUP_ERROR_12345'); };
+    const cb3 = () => { cb3Run = true; };
+
+    assert.throws(
+        () => runAllDeferredCleanups([cb1, cb2, cb3]),
+        /UNIQUE_CLEANUP_ERROR_12345/
+    );
+
+    assert.equal(cb1Run, true, 'First cleanup callback must run');
+    assert.equal(cb2Run, true, 'Second cleanup callback must run and throw');
+    assert.equal(cb3Run, true, 'Third cleanup callback must still run even after second throws');
 });
 
 test('ARP2-C2: Negative authority discriminators for TestStagingHarness private identity and state', async () => {
