@@ -20,7 +20,7 @@ Work is partitioned into dependency-ordered milestones (M0–M9 & Dogfood D1–D
 | **M7** | Antigravity Skill Definition & Safety Guardrails | `IMPLEMENTED & TESTED` | `.agents/skills/computer-use/SKILL.md` |
 | **M8** | Continuous Integration & End-to-End Verification Suite | `IMPLEMENTED & TESTED` | `./bin/agy-computer-use test-native`, `pnpm test`, `.github/workflows/ci.yml` |
 | **D1** | Dogfood Harness Canary & Read-Only Vision Verification | `IMPLEMENTED & TESTED` | `computer_use_canary_screenshot`, `proof/v0.1_verification.md` |
-| **D2** | Production-Bounded Native Observation Slice (Closure Slice) | `IMPLEMENTED & TESTED` | `ComputerUseHostTestRunner` (authoritative native tests), `SCScreenshotCaptureEngine`, `SystemDisplayTopologyProvider`, `HostServer` generation gate, `DisabledInputInjector`, `DisabledAXInspector`, `proof/d2_verification.md` |
+| **D2** | Production-Bounded Native Observation Slice (Source Hardening) | `IN_PROGRESS (Source Hardening / Awaiting Exact-Head Acceptance)` | `ComputerUseHostTestRunner` (authoritative native tests), `SCScreenshotCaptureEngine`, `SystemDisplayTopologyProvider`, `HostServer` generation gate, `proof/d2_verification.md` (REJECTED / NON-TERMINAL placeholder) |
 | **M9** | Production Input Synthesis (CGEvent) & Signed App Bundle | `GATED / FUTURE` | Requires signed `ComputerUseHost.app` bundle and active TCC authorization |
 
 ---
@@ -59,7 +59,7 @@ Work is partitioned into dependency-ordered milestones (M0–M9 & Dogfood D1–D
 - Read-only Calculator capture proof via Peekaboo bridge and `computer_use_canary_screenshot`.
 
 ### D2: Production-Bounded Native Observation Slice (Test Authority Closure)
-- **Status**: Implemented & Tested
+- **Status**: In Progress (Source Hardening / Awaiting Exact-Head Acceptance; proof placeholder `proof/d2_verification.md` is REJECTED / NON-TERMINAL)
 - **Key Deliverables & Repairs**:
   - Authoritative native test runner (`./bin/agy-computer-use test-native`) executing required named native test cases.
   - Strict-concurrency compilation with warnings as errors (`swift build -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors`).
