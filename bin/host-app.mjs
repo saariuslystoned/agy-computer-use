@@ -1,15 +1,25 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 
-export async function stageHostApp(projectRoot = process.cwd()) {
+export async function stageHostApp(options = {}) {
+    const projectRoot = options.projectRoot || process.cwd();
     const root = path.resolve(projectRoot);
     const hostPackageDir = path.join(root, 'apps/computer-use-host');
-    const stagedAppDir = path.join(hostPackageDir, '.build/staged/ComputerUseHost.app');
+    const stagedAppDir = options.targetDir ? path.resolve(options.targetDir) : path.join(hostPackageDir, '.build/staged/ComputerUseHost.app');
+
+    // Validate target destination path to prevent arbitrary recursive deletion
+    const allowedParent1 = path.resolve(hostPackageDir);
+    const allowedParent2 = path.resolve(os.tmpdir());
+    if (!stagedAppDir.startsWith(allowedParent1) && !stagedAppDir.startsWith(allowedParent2)) {
+        throw new Error(`Invalid stage target directory ${stagedAppDir}: must be inside ${allowedParent1} or ${allowedParent2}`);
+    }
+
     const contentsDir = path.join(stagedAppDir, 'Contents');
     const macOSDir = path.join(contentsDir, 'MacOS');
     const resourcesDir = path.join(contentsDir, 'Resources');
@@ -18,29 +28,32 @@ export async function stageHostApp(projectRoot = process.cwd()) {
     const binaryTarget = path.join(macOSDir, 'ComputerUseHost');
     const infoPlistTarget = path.join(contentsDir, 'Info.plist');
 
-    // 1. Build Swift release executable with strict concurrency flags
-    await execFileAsync('swift', [
-        'build',
-        '--package-path', hostPackageDir,
-        '--configuration', 'release',
-        '--product', 'ComputerUseHost',
-        '-Xswiftc', '-strict-concurrency=complete',
-        '-Xswiftc', '-warnings-as-errors'
-    ], { cwd: root });
+    const shouldBuild = options.build !== false;
+    if (shouldBuild) {
+        await execFileAsync('swift', [
+            'build',
+            '--package-path', hostPackageDir,
+            '--configuration', 'release',
+            '--product', 'ComputerUseHost',
+            '-Xswiftc', '-strict-concurrency=complete',
+            '-Xswiftc', '-warnings-as-errors'
+        ], { cwd: root });
+    } else {
+        if (!fs.existsSync(releaseBinarySource)) {
+            throw new Error(`Release binary does not exist at ${releaseBinarySource}; cannot stage without build.`);
+        }
+    }
 
-    // 2. Prepare bundle directory structure cleanly
     if (fs.existsSync(stagedAppDir)) {
         fs.rmSync(stagedAppDir, { recursive: true, force: true });
     }
     fs.mkdirSync(macOSDir, { recursive: true });
     fs.mkdirSync(resourcesDir, { recursive: true });
 
-    // 3. Copy binary and Info.plist
     fs.copyFileSync(releaseBinarySource, binaryTarget);
     fs.chmodSync(binaryTarget, 0o755);
     fs.copyFileSync(infoPlistSource, infoPlistTarget);
 
-    // 4. Ad-hoc sign bundle using argument arrays (no shell string concatenation)
     await execFileAsync('codesign', [
         '--force',
         '--sign', '-',
@@ -56,41 +69,15 @@ export async function stageHostApp(projectRoot = process.cwd()) {
     };
 }
 
-export async function classifyPrincipal(appPath, options = {}) {
-    const absPath = path.resolve(appPath);
-    const binaryPath = path.join(absPath, 'Contents/MacOS/ComputerUseHost');
-    const infoPlistPath = path.join(absPath, 'Contents/Info.plist');
-
-    if (!fs.existsSync(absPath) || !fs.existsSync(binaryPath) || !fs.existsSync(infoPlistPath)) {
-        return { classification: 'unsigned_or_invalid', details: 'Missing bundle files' };
-    }
-
-    try {
-        await execFileAsync('codesign', ['-v', absPath]);
-    } catch {
+export function parseAndClassifyPrincipal(codesignInfo, reqInfo, verificationPassed, options = {}) {
+    if (!verificationPassed) {
         return { classification: 'unsigned_or_invalid', details: 'Codesign verification failed' };
     }
 
-    let codesignInfo = '';
-    try {
-        const { stdout, stderr } = await execFileAsync('codesign', ['-dv', '--verbose=4', absPath]);
-        codesignInfo = stdout + stderr;
-    } catch (e) {
-        return { classification: 'unsigned_or_invalid', details: String(e) };
-    }
-
-    let reqInfo = '';
-    try {
-        const { stdout, stderr } = await execFileAsync('codesign', ['--display', '--requirements', '-', absPath]);
-        reqInfo = stdout + stderr;
-    } catch {
-        reqInfo = '';
-    }
-
-    const identifierMatch = codesignInfo.match(/^Identifier=(.+)$/m);
-    const signatureMatch = codesignInfo.match(/^Signature=(.+)$/m);
-    const teamIdMatch = codesignInfo.match(/^TeamIdentifier=(.+)$/m);
-    const authorityMatch = codesignInfo.match(/^Authority=(.+)$/m);
+    const identifierMatch = (codesignInfo || '').match(/^Identifier=(.+)$/m);
+    const signatureMatch = (codesignInfo || '').match(/^Signature=(.+)$/m);
+    const teamIdMatch = (codesignInfo || '').match(/^TeamIdentifier=(.+)$/m);
+    const authorityMatch = (codesignInfo || '').match(/^Authority=(.+)$/m);
 
     const identifier = identifierMatch ? identifierMatch[1].trim() : null;
     const signature = signatureMatch ? signatureMatch[1].trim() : null;
@@ -116,7 +103,7 @@ export async function classifyPrincipal(appPath, options = {}) {
             return {
                 classification: 'ad_hoc_ephemeral',
                 identifier,
-                teamId,
+                teamId: null,
                 error: 'Staged app is ad_hoc_ephemeral; --require-stable specified'
             };
         }
@@ -129,7 +116,10 @@ export async function classifyPrincipal(appPath, options = {}) {
     }
 
     const hasTeamId = Boolean(teamId && teamId !== 'not set');
-    const hasDesignatedReq = reqInfo.includes('designated') && reqInfo.includes(expectedIdentifier);
+    const reqStr = reqInfo || '';
+    const hasDesignatedReq = reqStr.includes('designated =>') &&
+        reqStr.includes(`identifier "${expectedIdentifier}"`) &&
+        reqStr.includes(`certificate leaf[subject.OU] = "${teamId}"`);
 
     if (hasTeamId && hasDesignatedReq) {
         return {
@@ -141,21 +131,73 @@ export async function classifyPrincipal(appPath, options = {}) {
     }
 
     return {
-        classification: 'ad_hoc_ephemeral',
+        classification: 'unsigned_or_invalid',
         identifier,
-        teamId: null,
-        details: 'Missing stable team requirements'
+        teamId,
+        details: 'Non-ad-hoc signature missing required team designated requirement'
     };
+}
+
+export async function classifyPrincipal(appPath, options = {}) {
+    const absPath = path.resolve(appPath);
+    const binaryPath = path.join(absPath, 'Contents/MacOS/ComputerUseHost');
+    const infoPlistPath = path.join(absPath, 'Contents/Info.plist');
+
+    if (!fs.existsSync(absPath) || !fs.existsSync(binaryPath) || !fs.existsSync(infoPlistPath)) {
+        return { classification: 'unsigned_or_invalid', details: 'Missing bundle files' };
+    }
+
+    let verificationPassed = true;
+    try {
+        await execFileAsync('codesign', ['--verify', '--strict', absPath]);
+    } catch {
+        verificationPassed = false;
+    }
+
+    let codesignInfo = '';
+    try {
+        const { stdout, stderr } = await execFileAsync('codesign', ['-dv', '--verbose=4', absPath]);
+        codesignInfo = stdout + stderr;
+    } catch (e) {
+        codesignInfo = String(e);
+    }
+
+    let reqInfo = '';
+    try {
+        const { stdout, stderr } = await execFileAsync('codesign', ['--display', '--requirements', '-', absPath]);
+        reqInfo = stdout + stderr;
+    } catch {
+        reqInfo = '';
+    }
+
+    return parseAndClassifyPrincipal(codesignInfo, reqInfo, verificationPassed, options);
+}
+
+function sanitizePaths(obj, rootDir) {
+    if (!obj || typeof obj !== 'object') return obj;
+    const clean = Array.isArray(obj) ? [] : {};
+    for (const [key, val] of Object.entries(obj)) {
+        if (typeof val === 'string') {
+            clean[key] = val.startsWith(rootDir) ? path.relative(rootDir, val) : val;
+        } else if (val && typeof val === 'object') {
+            clean[key] = sanitizePaths(val, rootDir);
+        } else {
+            clean[key] = val;
+        }
+    }
+    return clean;
 }
 
 async function main() {
     const args = process.argv.slice(2);
     const command = args[0];
+    const rootDir = process.cwd();
 
     if (command === 'stage') {
         const result = await stageHostApp();
         const classification = await classifyPrincipal(result.appPath);
-        console.log(JSON.stringify({ ...result, principal: classification }, null, 2));
+        const output = sanitizePaths({ ...result, principal: classification }, rootDir);
+        console.log(JSON.stringify(output, null, 2));
     } else if (command === 'classify' || command === 'host-principal') {
         let appPath = path.resolve('apps/computer-use-host/.build/staged/ComputerUseHost.app');
         let requireStable = false;
@@ -170,7 +212,8 @@ async function main() {
         }
 
         const result = await classifyPrincipal(appPath, { requireStable });
-        console.log(JSON.stringify(result, null, 2));
+        const output = sanitizePaths(result, rootDir);
+        console.log(JSON.stringify(output, null, 2));
 
         if (requireStable && result.classification !== 'stable_team_signed_candidate') {
             process.exit(1);

@@ -3,182 +3,232 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { spawn } from 'node:child_process';
-import { stageHostApp, classifyPrincipal } from './host-app.mjs';
+import { spawn, execFileSync } from 'node:child_process';
+import { stageHostApp, classifyPrincipal, parseAndClassifyPrincipal } from './host-app.mjs';
 
 function computeTreeDigest(dirPath) {
-    const entries = fs.readdirSync(dirPath, { recursive: true, withFileTypes: true });
-    entries.sort((a, b) => a.name.localeCompare(b.name));
-    const hash = crypto.createHash('sha256');
+    const entries = [];
+    function walk(current) {
+        const items = fs.readdirSync(current, { withFileTypes: true });
+        for (const item of items) {
+            const fullPath = path.join(current, item.name);
+            const relPath = path.relative(dirPath, fullPath);
+            if (item.isDirectory()) {
+                entries.push({ relPath, isFile: false });
+                walk(fullPath);
+            } else if (item.isFile()) {
+                entries.push({ relPath, isFile: true, fullPath });
+            }
+        }
+    }
+    walk(dirPath);
+    entries.sort((a, b) => a.relPath.localeCompare(b.relPath));
 
+    const hash = crypto.createHash('sha256');
     for (const entry of entries) {
-        const fullPath = path.join(entry.path, entry.name);
-        const relPath = path.relative(dirPath, fullPath);
-        hash.update(relPath);
-        if (entry.isFile()) {
-            hash.update(fs.readFileSync(fullPath));
+        hash.update(entry.relPath);
+        if (entry.isFile) {
+            hash.update(fs.readFileSync(entry.fullPath));
         }
     }
     return hash.digest('hex');
 }
 
-test('P-4: Classifier pure unit tests for principal states', async (t) => {
-    await t.test('Classifies missing or non-existent path as unsigned_or_invalid', async () => {
-        const res = await classifyPrincipal('/tmp/nonexistent-app-123456/App.app');
+function waitForFile(filePath, timeoutMs = 5000) {
+    return new Promise((resolve, reject) => {
+        const start = Date.now();
+        const interval = setInterval(() => {
+            if (fs.existsSync(filePath)) {
+                clearInterval(interval);
+                resolve();
+            } else if (Date.now() - start > timeoutMs) {
+                clearInterval(interval);
+                reject(new Error(`Timed out waiting for file creation at ${filePath}`));
+            }
+        }, 50);
+    });
+}
+
+function waitForExit(proc, timeoutMs = 5000) {
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+            proc.kill('SIGKILL');
+            reject(new Error(`Process ${proc.pid} timed out waiting for exit`));
+        }, timeoutMs);
+
+        proc.on('exit', (code) => {
+            clearTimeout(timer);
+            resolve(code);
+        });
+        proc.on('error', (err) => {
+            clearTimeout(timer);
+            reject(err);
+        });
+    });
+}
+
+async function runBoundedSubprocessTest(stagedAppBinary, signalToTest) {
+    const tmpDir = fs.mkdtempSync('/tmp/agy-host-smoke-');
+    fs.chmodSync(tmpDir, 0o700);
+
+    const dirMode = fs.statSync(tmpDir).mode & 0o777;
+    assert.equal(dirMode, 0o700, 'Temp socket directory must have mode 0700');
+
+    const sockPath = path.join(tmpDir, 'host.sock');
+    const lockPath = path.join(tmpDir, 'host.lock');
+
+    let proc1 = null;
+    let proc2 = null;
+
+    try {
+        proc1 = spawn(stagedAppBinary, [], {
+            env: { ...process.env, COMPUTER_USE_SOCKET_PATH: sockPath },
+            stdio: ['ignore', 'pipe', 'pipe']
+        });
+
+        await waitForFile(sockPath, 5000);
+        assert.equal(fs.existsSync(lockPath), true, 'host.lock file must exist after first launch');
+        const lockStat1 = fs.statSync(lockPath);
+        assert.equal(lockStat1.mode & 0o777, 0o600, 'host.lock file must have mode 0600');
+        const lockIno1 = lockStat1.ino;
+
+        proc1.kill(signalToTest);
+        const exitCode1 = await waitForExit(proc1, 5000);
+        assert.equal(exitCode1, 0, `Process 1 must exit 0 on ${signalToTest}`);
+        assert.equal(fs.existsSync(sockPath), false, 'Socket file must be unlinked after exit');
+        assert.equal(fs.existsSync(lockPath), true, 'host.lock file is intentionally persistent and survives exit');
+
+        proc2 = spawn(stagedAppBinary, [], {
+            env: { ...process.env, COMPUTER_USE_SOCKET_PATH: sockPath },
+            stdio: ['ignore', 'pipe', 'pipe']
+        });
+
+        await waitForFile(sockPath, 5000);
+        const lockStat2 = fs.statSync(lockPath);
+        assert.equal(lockStat2.mode & 0o777, 0o600, 'host.lock file must retain mode 0600 on second launch');
+        assert.equal(lockStat2.ino, lockIno1, 'host.lock file must retain exact inode across same-directory restart');
+
+        proc2.kill(signalToTest);
+        const exitCode2 = await waitForExit(proc2, 5000);
+        assert.equal(exitCode2, 0, `Process 2 must exit 0 on ${signalToTest}`);
+        assert.equal(fs.existsSync(sockPath), false, 'Socket file must be unlinked after second exit');
+        assert.equal(fs.existsSync(lockPath), true, 'host.lock file survives second exit');
+    } finally {
+        if (proc1 && proc1.exitCode === null) {
+            proc1.kill('SIGKILL');
+        }
+        if (proc2 && proc2.exitCode === null) {
+            proc2.kill('SIGKILL');
+        }
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+}
+
+test('RP-1: Discriminator: host-principal argument handling prevents shell injection', async () => {
+    const injectionPath = '/tmp/test app; touch /tmp/pwned.txt; echo/App.app';
+    const binPath = path.resolve('bin/agy-computer-use');
+
+    if (fs.existsSync('/tmp/pwned.txt')) {
+        fs.rmSync('/tmp/pwned.txt');
+    }
+
+    let stdout = '';
+    try {
+        stdout = execFileSync(process.execPath, [binPath, 'host-principal', '--app', injectionPath], {
+            encoding: 'utf-8',
+            stdio: ['ignore', 'pipe', 'pipe']
+        });
+    } catch (err) {
+        stdout = (err.stdout || '') + (err.stderr || '');
+    }
+
+    assert.equal(fs.existsSync('/tmp/pwned.txt'), false, 'Shell injection target file must NOT be created');
+    assert.ok(stdout.includes('unsigned_or_invalid'), 'Must report unsigned_or_invalid for non-existent path');
+});
+
+test('RP-2: Pure classifier authority for principal states', async (t) => {
+    await t.test('1. Verification failed -> unsigned_or_invalid', () => {
+        const res = parseAndClassifyPrincipal('Identifier=com.saariuslystoned.agy-computer-use.host\nSignature=adhoc', '', false);
         assert.equal(res.classification, 'unsigned_or_invalid');
     });
 
-    await t.test('Classifies ad-hoc signed app as ad_hoc_ephemeral', async () => {
-        const stageRes = await stageHostApp();
-        assert.equal(stageRes.success, true);
-        const res = await classifyPrincipal(stageRes.appPath);
+    await t.test('2. Valid ad-hoc -> ad_hoc_ephemeral', () => {
+        const codesignOutput = 'Identifier=com.saariuslystoned.agy-computer-use.host\nSignature=adhoc\nTeamIdentifier=not set\nAuthority=adhoc';
+        const res = parseAndClassifyPrincipal(codesignOutput, '', true);
         assert.equal(res.classification, 'ad_hoc_ephemeral');
         assert.equal(res.identifier, 'com.saariuslystoned.agy-computer-use.host');
+        assert.equal(res.teamId, null);
     });
 
-    await t.test('Fails closed under --require-stable for ad_hoc_ephemeral', async () => {
-        const stagedAppDir = path.resolve('apps/computer-use-host/.build/staged/ComputerUseHost.app');
-        const res = await classifyPrincipal(stagedAppDir, { requireStable: true });
+    await t.test('3. Valid non-ad-hoc team candidate -> stable_team_signed_candidate', () => {
+        const codesignOutput = 'Identifier=com.saariuslystoned.agy-computer-use.host\nSignature=signed\nTeamIdentifier=TEAM123456\nAuthority=Developer ID Application: Test (TEAM123456)';
+        const reqOutput = 'designated => identifier "com.saariuslystoned.agy-computer-use.host" and anchor apple generic and certificate leaf[subject.OU] = "TEAM123456"';
+        const res = parseAndClassifyPrincipal(codesignOutput, reqOutput, true);
+        assert.equal(res.classification, 'stable_team_signed_candidate');
+        assert.equal(res.identifier, 'com.saariuslystoned.agy-computer-use.host');
+        assert.equal(res.teamId, 'TEAM123456');
+    });
+
+    await t.test('4. Identifier mismatch -> unsigned_or_invalid', () => {
+        const codesignOutput = 'Identifier=com.wrong.bundle\nSignature=adhoc\nTeamIdentifier=not set';
+        const res = parseAndClassifyPrincipal(codesignOutput, '', true);
+        assert.equal(res.classification, 'unsigned_or_invalid');
+    });
+
+    await t.test('5. Non-ad-hoc missing designated requirement -> unsigned_or_invalid', () => {
+        const codesignOutput = 'Identifier=com.saariuslystoned.agy-computer-use.host\nSignature=signed\nTeamIdentifier=TEAM123456\nAuthority=Developer ID Application: Test (TEAM123456)';
+        const res = parseAndClassifyPrincipal(codesignOutput, '', true);
+        assert.equal(res.classification, 'unsigned_or_invalid');
+    });
+
+    await t.test('6. Non-ad-hoc designated requirement for wrong team -> unsigned_or_invalid', () => {
+        const codesignOutput = 'Identifier=com.saariuslystoned.agy-computer-use.host\nSignature=signed\nTeamIdentifier=TEAM123456\nAuthority=Developer ID Application: Test (TEAM123456)';
+        const reqOutput = 'designated => identifier "com.saariuslystoned.agy-computer-use.host" and anchor apple generic and certificate leaf[subject.OU] = "OTHERTEAM"';
+        const res = parseAndClassifyPrincipal(codesignOutput, reqOutput, true);
+        assert.equal(res.classification, 'unsigned_or_invalid');
+    });
+
+    await t.test('7. --require-stable on ad-hoc -> ad_hoc_ephemeral with error', () => {
+        const codesignOutput = 'Identifier=com.saariuslystoned.agy-computer-use.host\nSignature=adhoc\nTeamIdentifier=not set';
+        const res = parseAndClassifyPrincipal(codesignOutput, '', true, { requireStable: true });
         assert.equal(res.classification, 'ad_hoc_ephemeral');
         assert.ok(res.error);
     });
 });
 
-test('P-4: Deterministic staging tree digest comparison', async () => {
-    const stage1 = await stageHostApp();
-    const digest1 = computeTreeDigest(stage1.appPath);
+test('RP-3: Prove deterministic restaging of one built input', async () => {
+    // 1. Initial build and stage
+    const initialStage = await stageHostApp({ build: true });
+    assert.equal(initialStage.success, true);
+    const initialBinaryHash = crypto.createHash('sha256').update(fs.readFileSync(initialStage.binaryPath)).digest('hex');
+    const initialPlistHash = crypto.createHash('sha256').update(fs.readFileSync(initialStage.infoPlistPath)).digest('hex');
 
-    const stage2 = await stageHostApp();
+    // 2. Stage from existing built input without rebuilding
+    const stage1 = await stageHostApp({ build: false });
+    const digest1 = computeTreeDigest(stage1.appPath);
+    const binaryHash1 = crypto.createHash('sha256').update(fs.readFileSync(stage1.binaryPath)).digest('hex');
+    const plistHash1 = crypto.createHash('sha256').update(fs.readFileSync(stage1.infoPlistPath)).digest('hex');
+
+    assert.equal(binaryHash1, initialBinaryHash, 'Binary hash must match built input');
+    assert.equal(plistHash1, initialPlistHash, 'Plist hash must match built input');
+    assert.equal(fs.statSync(stage1.binaryPath).mode & 0o777, 0o755, 'Executable mode must be 0755');
+
+    // 3. Stage second time from existing built input
+    const stage2 = await stageHostApp({ build: false });
     const digest2 = computeTreeDigest(stage2.appPath);
 
-    assert.equal(digest1, digest2, 'Tree digests of two consecutive stages must be identical');
+    assert.equal(digest1, digest2, 'Tree digests of restaged built input must be identical');
 });
 
-test('L-4: Real subprocess lifecycle smoke tests for SIGTERM and SIGINT', async (t) => {
+test('RL-3: Bounded real subprocess smoke tests for SIGTERM and SIGINT', async (t) => {
     const stageRes = await stageHostApp();
     const stagedAppBinary = stageRes.binaryPath;
 
-    await t.test('Subprocess handles SIGTERM cleanly, unlinks socket, and permits second bind', async () => {
-        const tmpDir = fs.mkdtempSync('/tmp/agy-host-smoke-term-');
-        const sockPath = path.join(tmpDir, 'host.sock');
-
-        // First launch
-        const proc1 = spawn(stagedAppBinary, [], {
-            env: { ...process.env, COMPUTER_USE_SOCKET_PATH: sockPath },
-            stdio: ['ignore', 'pipe', 'pipe']
-        });
-
-        await new Promise((resolve, reject) => {
-            const start = Date.now();
-            const interval = setInterval(() => {
-                if (fs.existsSync(sockPath)) {
-                    clearInterval(interval);
-                    resolve();
-                } else if (Date.now() - start > 5000) {
-                    clearInterval(interval);
-                    reject(new Error('Timed out waiting for socket creation'));
-                }
-            }, 50);
-        });
-
-        proc1.kill('SIGTERM');
-
-        const exitCode1 = await new Promise((resolve) => {
-            proc1.on('exit', (code) => resolve(code));
-        });
-
-        assert.equal(exitCode1, 0, 'Subprocess must exit 0 on SIGTERM');
-        assert.equal(fs.existsSync(sockPath), false, 'Socket file must be unlinked after exit');
-
-        // Second launch on same directory must succeed (proving lock was released and second bind works)
-        const proc2 = spawn(stagedAppBinary, [], {
-            env: { ...process.env, COMPUTER_USE_SOCKET_PATH: sockPath },
-            stdio: ['ignore', 'pipe', 'pipe']
-        });
-
-        await new Promise((resolve, reject) => {
-            const start = Date.now();
-            const interval = setInterval(() => {
-                if (fs.existsSync(sockPath)) {
-                    clearInterval(interval);
-                    resolve();
-                } else if (Date.now() - start > 5000) {
-                    clearInterval(interval);
-                    reject(new Error('Timed out waiting for second socket creation'));
-                }
-            }, 50);
-        });
-
-        proc2.kill('SIGTERM');
-        const exitCode2 = await new Promise((resolve) => {
-            proc2.on('exit', (code) => resolve(code));
-        });
-
-        assert.equal(exitCode2, 0, 'Second subprocess must exit 0 on SIGTERM');
-        assert.equal(fs.existsSync(sockPath), false, 'Socket file must be unlinked after second exit');
-
-        fs.rmSync(tmpDir, { recursive: true, force: true });
+    await t.test('Subprocess handles SIGTERM cleanly, unlinks socket, preserves lock file and inode, and permits second bind', async () => {
+        await runBoundedSubprocessTest(stagedAppBinary, 'SIGTERM');
     });
 
-    await t.test('Subprocess handles SIGINT cleanly, unlinks socket, and permits second bind', async () => {
-        const tmpDir = fs.mkdtempSync('/tmp/agy-host-smoke-int-');
-        const sockPath = path.join(tmpDir, 'host.sock');
-
-        // First launch
-        const proc1 = spawn(stagedAppBinary, [], {
-            env: { ...process.env, COMPUTER_USE_SOCKET_PATH: sockPath },
-            stdio: ['ignore', 'pipe', 'pipe']
-        });
-
-        await new Promise((resolve, reject) => {
-            const start = Date.now();
-            const interval = setInterval(() => {
-                if (fs.existsSync(sockPath)) {
-                    clearInterval(interval);
-                    resolve();
-                } else if (Date.now() - start > 5000) {
-                    clearInterval(interval);
-                    reject(new Error('Timed out waiting for socket creation'));
-                }
-            }, 50);
-        });
-
-        proc1.kill('SIGINT');
-
-        const exitCode1 = await new Promise((resolve) => {
-            proc1.on('exit', (code) => resolve(code));
-        });
-
-        assert.equal(exitCode1, 0, 'Subprocess must exit 0 on SIGINT');
-        assert.equal(fs.existsSync(sockPath), false, 'Socket file must be unlinked after exit');
-
-        // Second launch on same directory must succeed
-        const proc2 = spawn(stagedAppBinary, [], {
-            env: { ...process.env, COMPUTER_USE_SOCKET_PATH: sockPath },
-            stdio: ['ignore', 'pipe', 'pipe']
-        });
-
-        await new Promise((resolve, reject) => {
-            const start = Date.now();
-            const interval = setInterval(() => {
-                if (fs.existsSync(sockPath)) {
-                    clearInterval(interval);
-                    resolve();
-                } else if (Date.now() - start > 5000) {
-                    clearInterval(interval);
-                    reject(new Error('Timed out waiting for second socket creation'));
-                }
-            }, 50);
-        });
-
-        proc2.kill('SIGINT');
-        const exitCode2 = await new Promise((resolve) => {
-            proc2.on('exit', (code) => resolve(code));
-        });
-
-        assert.equal(exitCode2, 0, 'Second subprocess must exit 0 on SIGINT');
-        assert.equal(fs.existsSync(sockPath), false, 'Socket file must be unlinked after second exit');
-
-        fs.rmSync(tmpDir, { recursive: true, force: true });
+    await t.test('Subprocess handles SIGINT cleanly, unlinks socket, preserves lock file and inode, and permits second bind', async () => {
+        await runBoundedSubprocessTest(stagedAppBinary, 'SIGINT');
     });
 });

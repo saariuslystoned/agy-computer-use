@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { execSync } from "child_process";
+import { execFileSync, execSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 import { fileURLToPath, pathToFileURL } from "url";
@@ -104,9 +104,17 @@ async function main() {
 
   if (subcommand === "host-principal") {
     log("Classifying ComputerUseHost.app principal...");
-    const extraArgs = process.argv.slice(3).join(" ");
-    execSync(`node bin/host-app.mjs classify ${extraArgs}`, { cwd: rootDir, stdio: "inherit" });
-    process.exit(0);
+    const extraArgs = process.argv.slice(3);
+    const hostAppJs = path.join(rootDir, "bin/host-app.mjs");
+    try {
+      execFileSync(process.execPath, [hostAppJs, "classify", ...extraArgs], {
+        cwd: rootDir,
+        stdio: "inherit"
+      });
+      process.exit(0);
+    } catch (err) {
+      process.exit(err.status || 1);
+    }
   }
 
   if (subcommand === "build") {

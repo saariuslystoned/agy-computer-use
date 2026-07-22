@@ -170,7 +170,16 @@ jobs:
         run: |
           set -euo pipefail
           ./bin/agy-computer-use stage-host-app
-          ./bin/agy-computer-use host-principal
+          STAGE_OUT=$(./bin/agy-computer-use host-principal)
+          echo "$STAGE_OUT" | grep -F '"classification": "ad_hoc_ephemeral"'
+          echo "$STAGE_OUT" | grep -F '"identifier": "com.saariuslystoned.agy-computer-use.host"'
+
+          STABLE_STATUS=0
+          STABLE_OUT=$(./bin/agy-computer-use host-principal --require-stable 2>&1) || STABLE_STATUS=$?
+          test "$STABLE_STATUS" -eq 1
+          echo "$STABLE_OUT" | grep -F '"classification": "ad_hoc_ephemeral"'
+          echo "$STABLE_OUT" | grep -F '"error": "Staged app is ad_hoc_ephemeral; --require-stable specified"'
+
           node --test bin/host-app.test.mjs
 
       - name: Build Release Executable & Guard Binary Symbols
