@@ -36,35 +36,39 @@ public final class TestManualClock: HostClock, @unchecked Sendable {
 }
 
 public actor ManualSleeper: Sleeper {
-    private struct PendingSleep {
-        let continuation: CheckedContinuation<Void, Error>
-    }
-
-    private var pending: [PendingSleep] = []
+    private var nextWaiterID: UInt64 = 0
+    private var pending: [UInt64: CheckedContinuation<Void, Error>] = [:]
+    private var pendingOrder: [UInt64] = []
+    private var cancelledIDs: Set<UInt64> = []
     private var armedWaiters: [Int: [CheckedContinuation<Void, Never>]] = [:]
     private var totalArmedCount: Int = 0
     private var bufferedAdvances: Int = 0
 
     public init() {}
 
+    private func generateID() -> UInt64 {
+        nextWaiterID += 1
+        return nextWaiterID
+    }
+
     public func sleep(nanoseconds: UInt64) async throws {
         try Task.checkCancellation()
+        let waiterID = self.generateID()
 
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                Task {
-                    await self.registerOrResume(continuation: continuation)
-                }
+                self.registerOrResume(id: waiterID, continuation: continuation)
             }
         } onCancel: {
             Task {
-                await self.cancelAll()
+                await self.cancel(id: waiterID)
             }
         }
     }
 
-    private func registerOrResume(continuation: CheckedContinuation<Void, Error>) async {
-        if Task.isCancelled {
+    private func registerOrResume(id: UInt64, continuation: CheckedContinuation<Void, Error>) {
+        if cancelledIDs.contains(id) {
+            cancelledIDs.remove(id)
             continuation.resume(throwing: CancellationError())
             return
         }
@@ -75,9 +79,50 @@ public actor ManualSleeper: Sleeper {
             continuation.resume()
             return
         }
-        pending.append(PendingSleep(continuation: continuation))
+        pending[id] = continuation
+        pendingOrder.append(id)
         totalArmedCount += 1
         notifyArmedWaiters()
+    }
+
+    public func cancel(id: UInt64) {
+        if let continuation = pending.removeValue(forKey: id) {
+            pendingOrder.removeAll { $0 == id }
+            continuation.resume(throwing: CancellationError())
+        } else {
+            cancelledIDs.insert(id)
+        }
+    }
+
+    public func advance() {
+        if pendingOrder.isEmpty {
+            bufferedAdvances += 1
+            return
+        }
+        let id = pendingOrder.removeFirst()
+        if let continuation = pending.removeValue(forKey: id) {
+            continuation.resume()
+        }
+    }
+
+    public func advanceAll() {
+        let order = pendingOrder
+        pendingOrder.removeAll()
+        for id in order {
+            if let continuation = pending.removeValue(forKey: id) {
+                continuation.resume()
+            }
+        }
+    }
+
+    public func cancelAll() {
+        let order = pendingOrder
+        pendingOrder.removeAll()
+        for id in order {
+            if let continuation = pending.removeValue(forKey: id) {
+                continuation.resume(throwing: CancellationError())
+            }
+        }
     }
 
     public func waitUntilArmed(count: Int) async {
@@ -96,28 +141,6 @@ public actor ManualSleeper: Sleeper {
             for waiter in waiters {
                 waiter.resume()
             }
-        }
-    }
-
-    public func advance() {
-        if pending.isEmpty {
-            bufferedAdvances += 1
-            return
-        }
-        let toResume = pending
-        pending.removeAll()
-
-        for item in toResume {
-            item.continuation.resume()
-        }
-    }
-
-    public func cancelAll() {
-        let toCancel = pending
-        pending.removeAll()
-
-        for item in toCancel {
-            item.continuation.resume(throwing: CancellationError())
         }
     }
 }
@@ -199,8 +222,10 @@ public final class ScriptedPOSIXSyscalls: POSIXSyscallProviding, @unchecked Send
     public func getsockopt(_ socket: Int32, _ level: Int32, _ optionName: Int32, _ optionValue: UnsafeMutableRawPointer?, _ optionLen: UnsafeMutablePointer<socklen_t>?) -> Int32 { clearErrno(); return underlying.getsockopt(socket, level, optionName, optionValue, optionLen) }
     public func lstat(_ path: UnsafePointer<CChar>, _ buf: UnsafeMutablePointer<stat>?) -> Int32 { clearErrno(); return underlying.lstat(path, buf) }
     public func fstat(_ fd: Int32, _ buf: UnsafeMutablePointer<stat>?) -> Int32 { clearErrno(); return underlying.fstat(fd, buf) }
+    public func fstatat(_ dirFd: Int32, _ path: UnsafePointer<CChar>, _ buf: UnsafeMutablePointer<stat>?, _ flag: Int32) -> Int32 { clearErrno(); return underlying.fstatat(dirFd, path, buf, flag) }
     public func fileFlock(_ fd: Int32, _ operation: Int32) -> Int32 { clearErrno(); return underlying.fileFlock(fd, operation) }
     public func unlink(_ path: UnsafePointer<CChar>) -> Int32 { clearErrno(); return underlying.unlink(path) }
+    public func unlinkat(_ dirFd: Int32, _ path: UnsafePointer<CChar>, _ flag: Int32) -> Int32 { clearErrno(); return underlying.unlinkat(dirFd, path, flag) }
     public func rmdir(_ path: UnsafePointer<CChar>) -> Int32 { clearErrno(); return underlying.rmdir(path) }
     public func mkdir(_ path: UnsafePointer<CChar>, _ mode: mode_t) -> Int32 { clearErrno(); return underlying.mkdir(path, mode) }
     public func close(_ fd: Int32) -> Int32 { clearErrno(); return underlying.close(fd) }
@@ -1772,6 +1797,10 @@ public struct ComputerUseHostTestRunner {
 
         let handled = try await listener.acceptAndHandleOneConnection()
         assertTrue(handled)
+
+        let resp34 = try readIPCResponse(from: clientFd)
+        assertTrue(!resp34.success, "Response must indicate failure when deadline expires on body read")
+        assertEqual(resp34.error?.code, "TIMEOUT", "Error code must be TIMEOUT")
     }
 
     public static func run35_InjectedListenFailurePostBindRollback() async throws {
@@ -1799,9 +1828,10 @@ public struct ComputerUseHostTestRunner {
         }
         assertTrue(threw, "SocketListener.start must throw when listen returns error")
 
-        var lockStat = stat()
+        var origLockStat = stat()
         let lockPath = "\(parentDir)/host.lock"
-        assertEqual(scriptedSyscalls.lstat(lockPath, &lockStat), 0, "Persistent host.lock inode must remain after listen failure rollback")
+        assertEqual(scriptedSyscalls.lstat(lockPath, &origLockStat), 0, "Persistent host.lock inode must remain after listen failure rollback")
+        let origLockInode = origLockStat.st_ino
 
         var sockStat = stat()
         assertTrue(scriptedSyscalls.lstat(sockPath, &sockStat) != 0, "Failed socket file must be removed after listen failure rollback")
@@ -1814,7 +1844,13 @@ public struct ComputerUseHostTestRunner {
             secondStartThrew = true
         }
         assertTrue(!secondStartThrew, "Subsequent SocketListener.start must succeed after rollback")
+
+        var postRestartLockStat = stat()
+        assertEqual(scriptedSyscalls.lstat(lockPath, &postRestartLockStat), 0, "Persistent host.lock inode must exist after restart")
+        assertEqual(postRestartLockStat.st_ino, origLockInode, "Persistent host.lock inode must remain unchanged after listen failure rollback & restart")
+
         listener.stop()
+        assertTrue(scriptedSyscalls.lstat(sockPath, &sockStat) != 0, "Socket file must be unlinked on listener stop")
     }
 
     public static func run36_FourSurfaceAuthorityBijection() async throws {
@@ -1827,14 +1863,14 @@ public struct ComputerUseHostTestRunner {
             }
         }
         assertTrue(manifestContent != nil, "docs/native_test_manifest.txt must exist and be readable")
-
         let manifestLines = (manifestContent ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
-
-        let manifestTestNames = Set(manifestLines.compactMap { $0.components(separatedBy: "/").last })
+        let manifestList = manifestLines.compactMap { $0.components(separatedBy: "/").last }
+        assertEqual(manifestList.count, Set(manifestList).count, "Surface 1 (manifest) must contain no duplicate test names")
+        let surface1Set = Set(manifestList)
 
         let testsPaths = ["Tests/ComputerUseHostTests/ComputerUseHostTests.swift", "../../apps/computer-use-host/Tests/ComputerUseHostTests/ComputerUseHostTests.swift", "apps/computer-use-host/Tests/ComputerUseHostTests/ComputerUseHostTests.swift"]
         var testsContent: String? = nil
@@ -1845,6 +1881,14 @@ public struct ComputerUseHostTestRunner {
             }
         }
         assertTrue(testsContent != nil, "ComputerUseHostTests.swift must exist and be readable")
+        let xctestFuncLines = (testsContent ?? "").components(separatedBy: "\n")
+            .filter { $0.contains("func test") && $0.contains("() throws {") }
+            .compactMap { line -> String? in
+                guard let range = line.range(of: "test[0-9]{2}_[A-Za-z0-9_]+", options: .regularExpression) else { return nil }
+                return String(line[range])
+            }
+        assertEqual(xctestFuncLines.count, Set(xctestFuncLines).count, "Surface 2 (XCTest functions) must contain no duplicate test names")
+        let surface2Set = Set(xctestFuncLines)
 
         let allTestsMatches = (testsContent ?? "").components(separatedBy: "\n")
             .filter { $0.contains("(\"test") }
@@ -1853,10 +1897,34 @@ public struct ComputerUseHostTestRunner {
                       let secondQuote = line[line.index(after: firstQuote)...].range(of: "\"")?.lowerBound else { return nil }
                 return String(line[line.index(after: firstQuote)..<secondQuote])
             }
-        let allTestNames = Set(allTestsMatches)
+        assertEqual(allTestsMatches.count, Set(allTestsMatches).count, "Surface 3 (__allTests) must contain no duplicate test names")
+        let surface3Set = Set(allTestsMatches)
 
-        assertEqual(manifestTestNames, allTestNames, "native_test_manifest.txt and ComputerUseHostTests.__allTests must be bijective sets")
-        assertEqual(manifestTestNames.count, 36, "There must be exactly 36 bijective test cases across all authority surfaces")
+        let runnerPaths = ["Tests/ComputerUseHostTestRunner/main.swift", "../../apps/computer-use-host/Tests/ComputerUseHostTestRunner/main.swift", "apps/computer-use-host/Tests/ComputerUseHostTestRunner/main.swift"]
+        var runnerContent: String? = nil
+        for p in runnerPaths {
+            if let c = try? String(contentsOfFile: p, encoding: .utf8) {
+                runnerContent = c
+                break
+            }
+        }
+        assertTrue(runnerContent != nil, "main.swift must exist and be readable")
+        let runnerCalls = (runnerContent ?? "").components(separatedBy: "\n")
+            .filter { $0.contains("runWithWatchdog(name: \"test") }
+            .compactMap { line -> String? in
+                guard let range = line.range(of: "test[0-9]{2}_[A-Za-z0-9_]+", options: .regularExpression) else { return nil }
+                return String(line[range])
+            }
+        assertEqual(runnerCalls.count, Set(runnerCalls).count, "Surface 4 (runner calls in main) must contain no duplicate test names")
+        let surface4Set = Set(runnerCalls)
+
+        assertEqual(surface1Set, surface2Set, "Surface 1 (manifest) and Surface 2 (XCTest functions) must be bijective sets")
+        assertEqual(surface1Set, surface3Set, "Surface 1 (manifest) and Surface 3 (__allTests) must be bijective sets")
+        assertEqual(surface1Set, surface4Set, "Surface 1 (manifest) and Surface 4 (runner calls) must be bijective sets")
+
+        let expectedCount = surface1Set.count
+        assertTrue(expectedCount > 0, "Test suite authority count must be greater than zero")
+        assertEqual(surface1Set.count, expectedCount, "All 4 authority surfaces dynamically match count \(expectedCount)")
     }
 
     private static func runWithWatchdog(name: String, timeoutSec: Double = 10.0, _ block: @Sendable @escaping () async throws -> Void) async throws {
