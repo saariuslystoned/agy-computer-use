@@ -7,7 +7,7 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawn, execFileSync, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { stageHostApp, classifyPrincipal, parseAndClassifyPrincipal, validateStageTargetDir, TestStagingHarness, _setTestValidationHook } from './host-app.mjs';
+import { stageHostApp, classifyPrincipal, parseAndClassifyPrincipal, validateStageTargetDir, TestStagingHarness } from './host-app.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -20,42 +20,86 @@ function createOutsideSentinelTree(outsideDir) {
 
 function snapshotTree(dirPath) {
     const entries = [];
-    function walk(currentRel) {
-        const fullPath = currentRel ? path.join(dirPath, currentRel) : dirPath;
-        if (!fs.existsSync(fullPath)) return;
-        const items = fs.readdirSync(fullPath).sort();
-        for (const item of items) {
-            const rel = currentRel ? path.join(currentRel, item) : item;
-            const itemPath = path.join(dirPath, rel);
-            const lstat = fs.lstatSync(itemPath);
-            if (lstat.isSymbolicLink()) {
-                entries.push({
-                    rel,
-                    type: 'symlink',
-                    target: fs.readlinkSync(itemPath),
-                    mode: lstat.mode & 0o777
-                });
-            } else if (lstat.isDirectory()) {
-                entries.push({
-                    rel,
-                    type: 'directory',
-                    mode: lstat.mode & 0o777
-                });
-                walk(rel);
-            } else {
-                const content = fs.readFileSync(itemPath);
-                const hash = crypto.createHash('sha256').update(content).digest('hex');
-                entries.push({
-                    rel,
-                    type: 'file',
-                    hash,
-                    size: content.length,
-                    mode: lstat.mode & 0o777
-                });
+
+    let rootLstat;
+    try {
+        rootLstat = fs.lstatSync(dirPath);
+    } catch (e) {
+        if (e.code === 'ENOENT') {
+            return [{ rel: '.', type: 'missing', exists: false }];
+        }
+        throw e;
+    }
+
+    if (rootLstat.isSymbolicLink()) {
+        entries.push({
+            rel: '.',
+            type: 'symlink',
+            target: fs.readlinkSync(dirPath),
+            mode: rootLstat.mode & 0o7777,
+            exists: true
+        });
+    } else if (rootLstat.isDirectory()) {
+        entries.push({
+            rel: '.',
+            type: 'directory',
+            mode: rootLstat.mode & 0o7777,
+            exists: true
+        });
+    } else {
+        const content = fs.readFileSync(dirPath);
+        const hash = crypto.createHash('sha256').update(content).digest('hex');
+        entries.push({
+            rel: '.',
+            type: 'file',
+            hash,
+            size: content.length,
+            mode: rootLstat.mode & 0o7777,
+            exists: true
+        });
+    }
+
+    if (rootLstat.isDirectory()) {
+        function walk(currentRel) {
+            const fullPath = path.join(dirPath, currentRel);
+            const items = fs.readdirSync(fullPath).sort();
+            for (const item of items) {
+                const rel = path.join(currentRel, item);
+                const itemPath = path.join(dirPath, rel);
+                const lstat = fs.lstatSync(itemPath);
+                if (lstat.isSymbolicLink()) {
+                    entries.push({
+                        rel,
+                        type: 'symlink',
+                        target: fs.readlinkSync(itemPath),
+                        mode: lstat.mode & 0o7777,
+                        exists: true
+                    });
+                } else if (lstat.isDirectory()) {
+                    entries.push({
+                        rel,
+                        type: 'directory',
+                        mode: lstat.mode & 0o7777,
+                        exists: true
+                    });
+                    walk(rel);
+                } else {
+                    const content = fs.readFileSync(itemPath);
+                    const hash = crypto.createHash('sha256').update(content).digest('hex');
+                    entries.push({
+                        rel,
+                        type: 'file',
+                        hash,
+                        size: content.length,
+                        mode: lstat.mode & 0o7777,
+                        exists: true
+                    });
+                }
             }
         }
+        walk('');
     }
-    walk('');
+
     return entries;
 }
 
@@ -653,106 +697,203 @@ test('E2-P2: Rejection table for stage target directory validation', async () =>
     });
 });
 
-test('AR-P2: Final revalidation race authority - fixed production target', async () => {
-    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-race-prod-outside-'));
-    fs.chmodSync(outsideDir, 0o700);
+test('AR-P2: Final revalidation race authority - fixed production target in disposable child', async () => {
+    const parentTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-race-prod-child-'));
+    fs.chmodSync(parentTmp, 0o700);
+
+    const outsideDir = path.join(parentTmp, 'outside');
+    fs.mkdirSync(outsideDir, { mode: 0o700 });
     createOutsideSentinelTree(outsideDir);
-    const beforeSnap = snapshotTree(outsideDir);
 
-    const hostPackageDir = path.resolve('apps/computer-use-host');
-    const stagedDir = path.join(hostPackageDir, '.build/staged');
-    const fixedTargetApp = path.join(stagedDir, 'ComputerUseHost.app');
+    const childScript = path.join(parentTmp, 'child_race.mjs');
+    const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-    try {
-        _setTestValidationHook(() => {
-            if (fs.existsSync(fixedTargetApp)) {
-                fs.rmSync(fixedTargetApp, { recursive: true, force: true });
+    const scriptContent = `
+import fs from 'node:fs';
+import path from 'node:path';
+import crypto from 'node:crypto';
+
+function createOutsideSentinelTree(outsideDir) {
+    fs.mkdirSync(path.join(outsideDir, 'sub'), { mode: 0o700 });
+    fs.writeFileSync(path.join(outsideDir, 'sentinel.txt'), 'SENTINEL_DATA_MUST_NOT_MUTATE');
+    fs.writeFileSync(path.join(outsideDir, 'sub/nested.txt'), 'NESTED_DATA_MUST_NOT_MUTATE');
+    fs.symlinkSync('sentinel.txt', path.join(outsideDir, 'link.txt'));
+}
+
+function snapshotTree(dirPath) {
+    const entries = [];
+    let rootLstat;
+    try { rootLstat = fs.lstatSync(dirPath); } catch (e) { return [{ rel: '.', type: 'missing', exists: false }]; }
+    if (rootLstat.isSymbolicLink()) entries.push({ rel: '.', type: 'symlink', target: fs.readlinkSync(dirPath), mode: rootLstat.mode & 0o7777, exists: true });
+    else if (rootLstat.isDirectory()) entries.push({ rel: '.', type: 'directory', mode: rootLstat.mode & 0o7777, exists: true });
+    else { entries.push({ rel: '.', type: 'file', hash: crypto.createHash('sha256').update(fs.readFileSync(dirPath)).digest('hex'), size: fs.statSync(dirPath).size, mode: rootLstat.mode & 0o7777, exists: true }); }
+    if (rootLstat.isDirectory()) {
+        function walk(currentRel) {
+            const fullPath = path.join(dirPath, currentRel);
+            const items = fs.readdirSync(fullPath).sort();
+            for (const item of items) {
+                const rel = path.join(currentRel, item);
+                const itemPath = path.join(dirPath, rel);
+                const lstat = fs.lstatSync(itemPath);
+                if (lstat.isSymbolicLink()) entries.push({ rel, type: 'symlink', target: fs.readlinkSync(itemPath), mode: lstat.mode & 0o7777, exists: true });
+                else if (lstat.isDirectory()) { entries.push({ rel, type: 'directory', mode: lstat.mode & 0o7777, exists: true }); walk(rel); }
+                else { const content = fs.readFileSync(itemPath); entries.push({ rel, type: 'file', hash: crypto.createHash('sha256').update(content).digest('hex'), size: content.length, mode: lstat.mode & 0o7777, exists: true }); }
+            }
+        }
+        walk('');
+    }
+    return entries;
+}
+
+const outsideDir = process.argv[2];
+const repoRoot = process.argv[3];
+
+const hostPackageDir = path.join(repoRoot, 'apps/computer-use-host');
+const stagedDir = path.join(hostPackageDir, '.build/staged');
+const fixedTargetApp = path.join(stagedDir, 'ComputerUseHost.app');
+const backupTargetApp = path.join(stagedDir, 'ComputerUseHost.app.race_backup_' + Date.now());
+
+let preExisted = false;
+if (fs.existsSync(fixedTargetApp)) {
+    preExisted = true;
+    fs.renameSync(fixedTargetApp, backupTargetApp);
+}
+
+let rmCount = 0;
+const origRmSync = fs.rmSync;
+const origLstatSync = fs.lstatSync;
+
+let targetLstatCount = 0;
+
+fs.lstatSync = function(p, opts) {
+    const resolvedP = path.resolve(p);
+    const resolvedTarget = path.resolve(fixedTargetApp);
+    if (resolvedP === resolvedTarget) {
+        targetLstatCount++;
+        if (targetLstatCount === 2) {
+            if (fs.existsSync(fixedTargetApp) && !origLstatSync.call(fs, fixedTargetApp).isSymbolicLink()) {
+                origRmSync.call(fs, fixedTargetApp, { recursive: true, force: true });
             }
             fs.symlinkSync(outsideDir, fixedTargetApp);
-        });
-
-        await assert.rejects(
-            async () => await stageHostApp({ build: false }),
-            /cannot be a symbolic link/
-        );
-
-        const afterSnap = snapshotTree(outsideDir);
-        assert.deepStrictEqual(afterSnap, beforeSnap, 'Fixed production target race outside tree must remain untouched');
-    } finally {
-        _setTestValidationHook(null);
-        if (fs.existsSync(fixedTargetApp) && fs.lstatSync(fixedTargetApp).isSymbolicLink()) {
-            fs.unlinkSync(fixedTargetApp);
         }
-        fs.rmSync(outsideDir, { recursive: true, force: true });
+    }
+    return origLstatSync.call(fs, p, opts);
+};
+
+fs.rmSync = function(p, opts) {
+    const resolvedP = path.resolve(p);
+    const resolvedTarget = path.resolve(fixedTargetApp);
+    if (resolvedP === resolvedTarget) {
+        rmCount++;
+    }
+    return origRmSync.call(fs, p, opts);
+};
+
+let rejected = false;
+const beforeSnap = snapshotTree(outsideDir);
+
+try {
+    const { stageHostApp } = await import(path.join(repoRoot, 'bin/host-app.mjs'));
+    try {
+        await stageHostApp({ build: false });
+    } catch (e) {
+        if (/cannot be a symbolic link/.test(e.message)) {
+            rejected = true;
+        } else {
+            throw e;
+        }
+    }
+
+    const afterSnap = snapshotTree(outsideDir);
+    const outsideEqual = JSON.stringify(afterSnap) === JSON.stringify(beforeSnap);
+
+    if (!rejected) throw new Error('Child race expected rejection was not observed');
+    if (rmCount !== 0) throw new Error('Child race rmCount must be 0, got ' + rmCount);
+    if (!outsideEqual) throw new Error('Child race outside tree mutated');
+
+    console.log(JSON.stringify({ rejected, rmCount, outsideEqual: true, restored: true }));
+} finally {
+    fs.rmSync = origRmSync;
+    fs.lstatSync = origLstatSync;
+    if (fs.existsSync(fixedTargetApp)) {
+        fs.rmSync(fixedTargetApp, { recursive: true, force: true });
+    }
+    if (preExisted && fs.existsSync(backupTargetApp)) {
+        fs.renameSync(backupTargetApp, fixedTargetApp);
+    }
+}
+    `;
+
+    fs.writeFileSync(childScript, scriptContent);
+
+    try {
+        const stdout = execFileSync(process.execPath, [childScript, outsideDir, repoRoot], {
+            encoding: 'utf-8',
+            stdio: ['ignore', 'pipe', 'pipe']
+        });
+        const proof = JSON.parse(stdout.trim());
+        assert.equal(proof.rejected, true, 'Child proof rejected must be true');
+        assert.equal(proof.rmCount, 0, 'Child proof rmCount must be 0');
+        assert.equal(proof.outsideEqual, true, 'Child proof outsideEqual must be true');
+        assert.equal(proof.restored, true, 'Child proof restored must be true');
+    } finally {
+        fs.rmSync(parentTmp, { recursive: true, force: true });
     }
 });
 
-test('AR-P2: Final revalidation race authority - injected target', async () => {
-    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-race-inj-target-outside-'));
-    fs.chmodSync(outsideDir, 0o700);
-    createOutsideSentinelTree(outsideDir);
-    const beforeSnap = snapshotTree(outsideDir);
+test('ARP2-S1: Zero public fixed-production seam module-namespace assertion and ordinary importer probe', async () => {
+    const hostAppModule = await import('./host-app.mjs');
+    const exports = Object.keys(hostAppModule);
 
-    const harness = new TestStagingHarness();
-    const injectedTargetApp = path.join(harness.rootDir, 'ComputerUseHost.app');
+    assert.equal(exports.includes('_testValidationHook'), false, '_testValidationHook must NOT be exported');
+    assert.equal(exports.includes('_setTestValidationHook'), false, '_setTestValidationHook must NOT be exported');
+    assert.deepEqual(exports.sort(), ['TestStagingHarness', 'classifyPrincipal', 'parseAndClassifyPrincipal', 'stageHostApp', 'validateStageTargetDir'].sort());
 
-    try {
-        harness.setBeforeRemovalHook(() => {
-            if (fs.existsSync(injectedTargetApp)) {
-                fs.rmSync(injectedTargetApp, { recursive: true, force: true });
-            }
-            fs.symlinkSync(outsideDir, injectedTargetApp);
-        });
-
-        await assert.rejects(
-            async () => await stageHostApp({ harness, build: false }),
-            /cannot be a symbolic link/
-        );
-
-        assert.equal(harness.removalSpyCount, 0, 'Removal spy count must be zero on injected target race rejection');
-        const afterSnap = snapshotTree(outsideDir);
-        assert.deepStrictEqual(afterSnap, beforeSnap, 'Injected target race outside tree must remain untouched');
-    } finally {
-        if (fs.existsSync(injectedTargetApp) && fs.lstatSync(injectedTargetApp).isSymbolicLink()) {
-            fs.unlinkSync(injectedTargetApp);
+    const hostAppAbsPath = path.resolve('bin/host-app.mjs');
+    const probeCode = `
+        import * as mod from ${JSON.stringify(hostAppAbsPath)};
+        if ('_testValidationHook' in mod || '_setTestValidationHook' in mod) {
+            process.exit(2);
         }
-        harness.cleanup();
-        fs.rmSync(outsideDir, { recursive: true, force: true });
+        process.exit(0);
+    `;
+    const tmpScript = path.join(os.tmpdir(), `agy-seam-probe-${Date.now()}.mjs`);
+    fs.writeFileSync(tmpScript, probeCode);
+    try {
+        execFileSync(process.execPath, [tmpScript], { stdio: 'ignore' });
+    } finally {
+        fs.rmSync(tmpScript, { force: true });
     }
 });
 
-test('AR-P2: Final revalidation race authority - injected intermediate directory', async () => {
-    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-race-inj-inter-outside-'));
-    fs.chmodSync(outsideDir, 0o700);
-    createOutsideSentinelTree(outsideDir);
-    const beforeSnap = snapshotTree(outsideDir);
-
-    const harness = new TestStagingHarness();
-    const interDir = path.join(harness.rootDir, 'inter_dir');
-    const relTarget = 'inter_dir/ComputerUseHost.app';
+test('ARP2-S3: Nonvacuous snapshotTree oracle direct test', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-snap-oracle-test-'));
+    fs.chmodSync(tmpDir, 0o700);
 
     try {
-        harness.setBeforeRemovalHook(() => {
-            if (fs.existsSync(interDir)) {
-                fs.rmSync(interDir, { recursive: true, force: true });
-            }
-            fs.symlinkSync(outsideDir, interDir);
-        });
+        createOutsideSentinelTree(tmpDir);
+        const baseSnap = snapshotTree(tmpDir);
 
-        await assert.rejects(
-            async () => await stageHostApp({ harness, relativeTarget: relTarget, build: false }),
-            /cannot be a symbolic link/
-        );
+        // Mutant 1: chmod root 0700 -> 0755
+        fs.chmodSync(tmpDir, 0o755);
+        const chmodSnap = snapshotTree(tmpDir);
+        assert.notDeepStrictEqual(chmodSnap, baseSnap, 'Chmod of root must alter snapshotTree');
 
-        assert.equal(harness.removalSpyCount, 0, 'Removal spy count must be zero on injected intermediate race rejection');
-        const afterSnap = snapshotTree(outsideDir);
-        assert.deepStrictEqual(afterSnap, beforeSnap, 'Injected intermediate race outside tree must remain untouched');
+        // Restore chmod
+        fs.chmodSync(tmpDir, 0o700);
+        assert.deepStrictEqual(snapshotTree(tmpDir), baseSnap, 'Restoring chmod must restore exact snapshotTree equality');
+
+        // Mutant 2: add adjacent file
+        const addedFile = path.join(tmpDir, 'added.txt');
+        fs.writeFileSync(addedFile, 'ADDED');
+        const addSnap = snapshotTree(tmpDir);
+        assert.notDeepStrictEqual(addSnap, baseSnap, 'Adding adjacent file must alter snapshotTree');
+
+        // Restore added file
+        fs.unlinkSync(addedFile);
+        assert.deepStrictEqual(snapshotTree(tmpDir), baseSnap, 'Removing added file must restore exact snapshotTree equality');
     } finally {
-        if (fs.existsSync(interDir) && fs.lstatSync(interDir).isSymbolicLink()) {
-            fs.unlinkSync(interDir);
-        }
-        harness.cleanup();
-        fs.rmSync(outsideDir, { recursive: true, force: true });
+        fs.rmSync(tmpDir, { recursive: true, force: true });
     }
 });
 
@@ -763,7 +904,16 @@ test('ARP2-C2: Negative authority discriminators for TestStagingHarness private 
         /must be an instance of TestStagingHarness/
     );
 
-    // 2. Getter / proxy property traps
+    // 2. Proxy around genuine instance
+    const genuineInstance = new TestStagingHarness();
+    const proxyAroundGenuine = new Proxy(genuineInstance, {});
+    await assert.rejects(
+        async () => await stageHostApp({ harness: proxyAroundGenuine, build: false }),
+        /must be an instance of TestStagingHarness/
+    );
+    genuineInstance.cleanup();
+
+    // 3. Getter / proxy property traps
     const fakeProxy = new Proxy({}, {
         get() { throw new Error('Proxy trap hit'); }
     });
@@ -772,7 +922,7 @@ test('ARP2-C2: Negative authority discriminators for TestStagingHarness private 
         /must be an instance of TestStagingHarness/
     );
 
-    // 3. Constructor option rejection
+    // 4. Constructor option rejection
     assert.throws(
         () => new TestStagingHarness({ productionMode: true }),
         /accepts no arguments/
@@ -782,7 +932,7 @@ test('ARP2-C2: Negative authority discriminators for TestStagingHarness private 
         /accepts no arguments/
     );
 
-    // 4. Instance property shadowing & root assignment ignored by stageHostApp & cleanup
+    // 5. Instance property shadowing & root assignment ignored by stageHostApp & cleanup
     const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-shadow-outside-'));
     fs.chmodSync(outsideDir, 0o700);
     createOutsideSentinelTree(outsideDir);
@@ -791,7 +941,17 @@ test('ARP2-C2: Negative authority discriminators for TestStagingHarness private 
     const harness = new TestStagingHarness();
     const authRoot = harness.rootDir;
 
-    // Define own-properties (shadowing) on instance
+    // Subclass rootDir getter override cannot retarget private state
+    class SubHarness extends TestStagingHarness {
+        get rootDir() { return outsideDir; }
+    }
+    const subHarness = new SubHarness();
+    assert.equal(subHarness.rootDir, outsideDir, 'Subclass getter must return outsideDir');
+    await stageHostApp({ harness: subHarness, build: false });
+    assert.deepStrictEqual(snapshotTree(outsideDir), beforeSnap, 'Outside tree must be untouched by subHarness staging');
+    subHarness.cleanup();
+    assert.deepStrictEqual(snapshotTree(outsideDir), beforeSnap, 'Outside tree must be untouched by subHarness cleanup');
+
     Object.defineProperty(harness, 'rootDir', { value: outsideDir, configurable: true });
     Object.defineProperty(harness, 'beforeRemovalHook', { value: () => { throw new Error('Property hook must not be called'); }, configurable: true });
     Object.defineProperty(harness, 'removalSpyCount', { value: 999, writable: true, configurable: true });
@@ -802,23 +962,46 @@ test('ARP2-C2: Negative authority discriminators for TestStagingHarness private 
     await stageHostApp({ harness, build: false });
     assert.deepStrictEqual(snapshotTree(outsideDir), beforeSnap, 'Outside tree must be untouched by stageHostApp');
 
+    // Remove own-property counter shadow and verify private counter incremented to 1
+    delete harness.removalSpyCount;
+    assert.equal(harness.removalSpyCount, 1, 'Private removal counter must be exactly 1 after staging');
+
     // cleanup must clean authentic private root, not assigned outsideDir
     harness.cleanup();
     assert.equal(fs.existsSync(authRoot), false, 'Authentic root must be cleaned');
     assert.deepStrictEqual(snapshotTree(outsideDir), beforeSnap, 'Outside tree must be untouched by cleanup');
     fs.rmSync(outsideDir, { recursive: true, force: true });
 
-    // 5. Cleanup retarget to another prefix-matching private victim
+    // 6. Cleanup retarget to another prefix-matching private victim seeded with sentinel tree
     const victimHarness = new TestStagingHarness();
+    createOutsideSentinelTree(victimHarness.rootDir);
     const victimSnap = snapshotTree(victimHarness.rootDir);
+
     const attackerHarness = new TestStagingHarness();
+    const attackerAuthRoot = attackerHarness.rootDir;
+
     Object.defineProperty(attackerHarness, 'rootDir', { value: victimHarness.rootDir, configurable: true });
     attackerHarness.cleanup();
-    assert.deepStrictEqual(snapshotTree(victimHarness.rootDir), victimSnap, 'Victim directory must not be deleted');
+
+    assert.equal(fs.existsSync(victimHarness.rootDir), true, 'Victim directory must exist after attacker cleanup');
+    assert.deepStrictEqual(snapshotTree(victimHarness.rootDir), victimSnap, 'Victim tree must be snapshot-identical');
+    assert.equal(fs.existsSync(attackerAuthRoot), false, 'Authentic attacker root must be deleted by cleanup');
+
     victimHarness.cleanup();
     attackerHarness.cleanup();
 
-    // 6. Cleanup after authentic root replaced with symlink to outside target
+    // 7. Cleanup after authentic root replaced with new same-path real 0700 directory (inode change)
+    const inodeHarness = new TestStagingHarness();
+    const inodeAuthRoot = inodeHarness.rootDir;
+    fs.rmSync(inodeAuthRoot, { recursive: true, force: true });
+    fs.mkdirSync(inodeAuthRoot, { mode: 0o700 });
+    fs.writeFileSync(path.join(inodeAuthRoot, 'new_inode_file.txt'), 'NEW_INODE');
+
+    inodeHarness.cleanup();
+    assert.equal(fs.existsSync(path.join(inodeAuthRoot, 'new_inode_file.txt')), true, 'Same-path new inode directory must NOT be deleted by cleanup');
+    fs.rmSync(inodeAuthRoot, { recursive: true, force: true });
+
+    // 8. Cleanup after authentic root replaced with symlink to outside target
     const symOutside = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-sym-outside-'));
     fs.chmodSync(symOutside, 0o700);
     createOutsideSentinelTree(symOutside);

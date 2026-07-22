@@ -13,11 +13,6 @@ const __dirname = path.dirname(__filename);
 const REPO_ROOT = path.resolve(__dirname, '..');
 
 const harnessStateMap = new WeakMap();
-let _testValidationHook = null;
-
-export function _setTestValidationHook(fn) {
-    _testValidationHook = fn;
-}
 
 export class TestStagingHarness {
     constructor(...args) {
@@ -66,7 +61,7 @@ export class TestStagingHarness {
         const tmpParent = path.resolve(os.tmpdir());
         const resolved = path.resolve(rootDir);
 
-        if (!resolved.startsWith(tmpParent) || !path.basename(resolved).startsWith('agy-harness-root-')) {
+        if (path.dirname(resolved) !== tmpParent || !path.basename(resolved).startsWith('agy-harness-root-')) {
             return;
         }
 
@@ -250,10 +245,6 @@ export async function stageHostApp(options = {}) {
 
     if (harnessState && typeof harnessState.beforeRemovalHook === 'function') {
         await harnessState.beforeRemovalHook();
-    }
-
-    if (typeof _testValidationHook === 'function') {
-        await _testValidationHook();
     }
 
     // Revalidate target immediately before removal
