@@ -140,7 +140,7 @@ async function main() {
 
     const selectionModulePath = path.join(mcpPkgDir, "dist/src/native-authority-selection.js");
     if (!fs.existsSync(selectionModulePath)) {
-      execSync("pnpm build", { cwd: mcpPkgDir, stdio: "ignore" });
+      execSync(`pnpm --dir "${mcpPkgDir}" build`, { env: process.env, stdio: "ignore" });
     }
 
     const { classifyNativeAuthoritySelection } = await import(pathToFileURL(selectionModulePath).href);
