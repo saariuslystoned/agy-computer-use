@@ -152,7 +152,7 @@ export function parseAndClassifyPrincipal(codesignInfo, reqInfo, verificationPas
 
         if (line.startsWith('Identifier=')) {
             const val = line.slice(11);
-            if (val.trim() !== val) return { classification: 'unsigned_or_invalid', details: 'Identifier has whitespace' };
+            if (val === '' || val.trim() !== val) return { classification: 'unsigned_or_invalid', details: 'Identifier has whitespace or is empty' };
             identifiers.push(val);
         } else if (line.startsWith('Signature=')) {
             const val = line.slice(10);
@@ -236,13 +236,15 @@ export function parseAndClassifyPrincipal(codesignInfo, reqInfo, verificationPas
     }
 
     const rawReqLines = (reqInfo || '').split('\n').map(l => l.replace(/\r$/, ''));
-    const reqLines = rawReqLines.filter(l => l.length > 0);
+    if (rawReqLines.length > 0 && rawReqLines[rawReqLines.length - 1] === '') {
+        rawReqLines.pop();
+    }
 
-    if (reqLines.length !== 2) {
+    if (rawReqLines.length !== 2) {
         return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Requirement output must contain exactly two non-empty records' };
     }
 
-    const execLine = reqLines[0];
+    const execLine = rawReqLines[0];
     if (!execLine.startsWith('Executable=')) {
         return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'First requirement record must start with Executable=' };
     }
@@ -251,7 +253,7 @@ export function parseAndClassifyPrincipal(codesignInfo, reqInfo, verificationPas
         return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Executable= value cannot be empty or have whitespace' };
     }
 
-    const desLine = reqLines[1];
+    const desLine = rawReqLines[1];
     if (!desLine.startsWith('designated => ')) {
         return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Second requirement record must start with designated => ' };
     }
@@ -265,14 +267,15 @@ export function parseAndClassifyPrincipal(codesignInfo, reqInfo, verificationPas
     }
 
     const atoms = designatedBody.split(' and ');
-    if (atoms.join(' and ') !== designatedBody) {
-        return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Requirement body fails byte-for-byte round trip' };
-    }
-
     for (const atom of atoms) {
         if (atom === '' || atom.trim() !== atom) {
             return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Requirement atom cannot be empty or have surrounding whitespace' };
         }
+    }
+
+    const lexAndMatches = designatedBody.match(/\band\b/g) || [];
+    if (lexAndMatches.length !== atoms.length - 1) {
+        return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Conjunction count mismatch' };
     }
 
     const expectedPred0 = `identifier "${expectedIdentifier}"`;
@@ -349,9 +352,13 @@ export async function classifyPrincipal(appPath, options = {}) {
     let reqInfo = '';
     try {
         const { stdout, stderr } = await execRunner('codesign', ['-d', '-r-', absPath]);
-        reqInfo = (stdout || '') + (stderr || '');
+        const errStr = (stderr || '');
+        const outStr = (stdout || '');
+        reqInfo = (errStr ? errStr + (errStr.endsWith('\n') ? '' : '\n') : '') + outStr;
     } catch (e) {
-        reqInfo = (e && e.stdout || '') + (e && e.stderr || '') || String(e);
+        const errStr = (e && e.stderr || '');
+        const outStr = (e && e.stdout || '');
+        reqInfo = (errStr ? errStr + (errStr.endsWith('\n') ? '' : '\n') : '') + outStr;
     }
 
     return parseAndClassifyPrincipal(codesignInfo, reqInfo, verificationPassed, options);

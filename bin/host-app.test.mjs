@@ -244,6 +244,7 @@ test('RP-2: Complete production-bound principal classification authority table',
         // Signature negatives
         { name: 'Metadata negative: Missing signature record -> unsigned_or_invalid', codesign: replaceExactToken(validCanonicalTeamCodesign, 'Signature size=4520\n', ''), req: validCanonicalTeamReq, verified: true },
         { name: 'Metadata negative: Malformed signature -> unsigned_or_invalid', codesign: replaceExactToken(validCanonicalTeamCodesign, 'Signature size=4520', 'Signature=corrupt'), req: validCanonicalTeamReq, verified: true },
+        { name: 'Metadata negative: Signature=signed -> unsigned_or_invalid', codesign: replaceExactToken(validCanonicalTeamCodesign, 'Signature size=4520', 'Signature=signed'), req: validCanonicalTeamReq, verified: true },
         { name: 'Metadata negative: Zero signature size -> unsigned_or_invalid', codesign: replaceExactToken(validCanonicalTeamCodesign, 'Signature size=4520', 'Signature size=0'), req: validCanonicalTeamReq, verified: true },
         { name: 'Metadata negative: Leading-zero signature size -> unsigned_or_invalid', codesign: replaceExactToken(validCanonicalTeamCodesign, 'Signature size=4520', 'Signature size=04520'), req: validCanonicalTeamReq, verified: true },
         { name: 'Metadata negative: Invented Signature=size=4520 -> unsigned_or_invalid', codesign: replaceExactToken(validCanonicalTeamCodesign, 'Signature size=4520', 'Signature=size=4520'), req: validCanonicalTeamReq, verified: true },
@@ -254,6 +255,7 @@ test('RP-2: Complete production-bound principal classification authority table',
         { name: 'Metadata negative: Empty identifier -> unsigned_or_invalid', codesign: replaceExactToken(validCanonicalTeamCodesign, 'Identifier=com.saariuslystoned.agy-computer-use.host', 'Identifier='), req: validCanonicalTeamReq, verified: true },
         { name: 'Metadata negative: Duplicate identifier -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign + '\nIdentifier=com.saariuslystoned.agy-computer-use.host', req: validCanonicalTeamReq, verified: true },
         { name: 'Metadata negative: Wrong identifier -> unsigned_or_invalid', codesign: replaceExactToken(validCanonicalTeamCodesign, 'com.saariuslystoned.agy-computer-use.host', 'com.other.app'), req: validCanonicalTeamReq, verified: true },
+        { name: 'Metadata negative: Leading-whitespace identifier value -> unsigned_or_invalid', codesign: replaceExactToken(validCanonicalTeamCodesign, 'Identifier=com.saariuslystoned.agy-computer-use.host', 'Identifier= com.saariuslystoned.agy-computer-use.host'), req: validCanonicalTeamReq, verified: true },
         { name: 'Metadata negative: Identifier with trailing whitespace -> unsigned_or_invalid', codesign: replaceExactToken(validCanonicalTeamCodesign, 'Identifier=com.saariuslystoned.agy-computer-use.host', 'Identifier=com.saariuslystoned.agy-computer-use.host '), req: validCanonicalTeamReq, verified: true },
         { name: 'Metadata negative: Identifier prefix -> unsigned_or_invalid', codesign: replaceExactToken(validCanonicalTeamCodesign, '\nIdentifier=', '\nprefix Identifier='), req: validCanonicalTeamReq, verified: true },
         { name: 'Metadata negative: Identifier substring -> unsigned_or_invalid', codesign: replaceExactToken(validCanonicalTeamCodesign, 'com.saariuslystoned.agy-computer-use.host', 'com.saariuslystoned.agy-computer-use'), req: validCanonicalTeamReq, verified: true },
@@ -263,6 +265,7 @@ test('RP-2: Complete production-bound principal classification authority table',
         { name: 'Metadata negative: Empty TeamIdentifier -> unsigned_or_invalid', codesign: replaceExactToken(validCanonicalTeamCodesign, 'TeamIdentifier=ABCDE12345', 'TeamIdentifier='), req: validCanonicalTeamReq, verified: true },
         { name: 'Metadata negative: Duplicate TeamIdentifier -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign + '\nTeamIdentifier=ABCDE12345', req: validCanonicalTeamReq, verified: true },
         { name: 'Metadata negative: Wrong TeamIdentifier -> unsigned_or_invalid', codesign: replaceExactToken(validCanonicalTeamCodesign, 'TeamIdentifier=ABCDE12345', 'TeamIdentifier=OTHER12345'), req: validCanonicalTeamReq, verified: true },
+        { name: 'Metadata negative: Leading-whitespace TeamIdentifier value -> unsigned_or_invalid', codesign: replaceExactToken(validCanonicalTeamCodesign, 'TeamIdentifier=ABCDE12345', 'TeamIdentifier= ABCDE12345'), req: validCanonicalTeamReq, verified: true },
         { name: 'Metadata negative: TeamIdentifier trailing whitespace -> unsigned_or_invalid', codesign: replaceExactToken(validCanonicalTeamCodesign, 'TeamIdentifier=ABCDE12345', 'TeamIdentifier=ABCDE12345 '), req: validCanonicalTeamReq, verified: true },
         { name: 'Metadata negative: TeamIdentifier prefix -> unsigned_or_invalid', codesign: replaceExactToken(validCanonicalTeamCodesign, 'TeamIdentifier=', 'prefix TeamIdentifier='), req: validCanonicalTeamReq, verified: true },
         { name: 'Metadata negative: TeamIdentifier substring -> unsigned_or_invalid', codesign: replaceExactToken(validCanonicalTeamCodesign, 'TeamIdentifier=ABCDE12345', 'TeamIdentifier=ABCD'), req: validCanonicalTeamReq, verified: true },
@@ -271,26 +274,51 @@ test('RP-2: Complete production-bound principal classification authority table',
         { name: 'Metadata negative: No authority -> unsigned_or_invalid', codesign: replaceExactToken(validCanonicalTeamCodesign, 'Authority=Developer ID Application: Test (ABCDE12345)\nAuthority=Developer ID Certification Authority\nAuthority=Apple Root CA\n', ''), req: validCanonicalTeamReq, verified: true },
         { name: 'Metadata negative: Empty first authority -> unsigned_or_invalid', codesign: replaceExactToken(validCanonicalTeamCodesign, 'Authority=Developer ID Application: Test (ABCDE12345)', 'Authority='), req: validCanonicalTeamReq, verified: true },
         { name: 'Metadata negative: Empty middle authority -> unsigned_or_invalid', codesign: replaceExactToken(validCanonicalTeamCodesign, 'Authority=Developer ID Certification Authority', 'Authority='), req: validCanonicalTeamReq, verified: true },
+        { name: 'Metadata negative: Empty final authority -> unsigned_or_invalid', codesign: replaceExactToken(validCanonicalTeamCodesign, 'Authority=Apple Root CA', 'Authority='), req: validCanonicalTeamReq, verified: true },
         { name: 'Metadata negative: Authority=adhoc -> unsigned_or_invalid', codesign: replaceExactToken(validCanonicalTeamCodesign, 'Authority=Developer ID Application: Test (ABCDE12345)', 'Authority=adhoc'), req: validCanonicalTeamReq, verified: true },
         { name: 'Metadata negative: Authority=not set -> unsigned_or_invalid', codesign: replaceExactToken(validCanonicalTeamCodesign, 'Authority=Developer ID Application: Test (ABCDE12345)', 'Authority=not set'), req: validCanonicalTeamReq, verified: true },
+        { name: 'Metadata negative: Exact ad hoc plus Authority=adhoc -> unsigned_or_invalid', codesign: validAdHocCodesign + '\nAuthority=adhoc', req: validAdHocReq, verified: true },
+        { name: 'Metadata negative: Exact ad hoc plus Authority=not set -> unsigned_or_invalid', codesign: validAdHocCodesign + '\nAuthority=not set', req: validAdHocReq, verified: true },
+        { name: 'Metadata negative: Exact ad hoc plus non-not set TeamIdentifier -> unsigned_or_invalid', codesign: replaceExactToken(validAdHocCodesign, 'TeamIdentifier=not set', 'TeamIdentifier=ABCDE12345'), req: validAdHocReq, verified: true },
         { name: 'Metadata negative: Ad-hoc plus team authority -> unsigned_or_invalid', codesign: validAdHocCodesign + '\nAuthority=Developer ID Application: Test', req: validAdHocReq, verified: true },
 
         // Requirement record negatives
         { name: 'Requirement record negative: Missing Executable= -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: replaceExactToken(validCanonicalTeamReq, 'Executable=/path/to/app\n', ''), verified: true },
         { name: 'Requirement record negative: Empty Executable= value -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: replaceExactToken(validCanonicalTeamReq, 'Executable=/path/to/app', 'Executable='), verified: true },
         { name: 'Requirement record negative: Duplicate Executable= -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: 'Executable=/path/to/app\n' + validCanonicalTeamReq, verified: true },
-        { name: 'Requirement record negative: Reordered requirement records -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: 'designated => identifier "com.saariuslystoned.agy-computer-use.host"\nExecutable=/path/to/app', verified: true },
+        { name: 'Requirement record negative: Reordered requirement records -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: 'designated => identifier "com.saariuslystoned.agy-computer-use.host" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = ABCDE12345\nExecutable=/path/to/app', verified: true },
         { name: 'Requirement record negative: Prefixed Executable= -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: replaceExactToken(validCanonicalTeamReq, 'Executable=', 'prefix Executable='), verified: true },
         { name: 'Requirement record negative: Suffixed Executable= -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: replaceExactToken(validCanonicalTeamReq, 'Executable=/path/to/app', 'Executable=/path/to/app '), verified: true },
+        { name: 'Requirement record negative: Leading-whitespace Executable= record -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: replaceExactToken(validCanonicalTeamReq, 'Executable=', 'Executable= '), verified: true },
         { name: 'Requirement record negative: Missing designated record -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: 'Executable=/path/to/app', verified: true },
         { name: 'Requirement record negative: Empty designated record -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: 'Executable=/path/to/app\ndesignated => ', verified: true },
         { name: 'Requirement record negative: Duplicate designated record -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: validCanonicalTeamReq + '\ndesignated => identifier "com.saariuslystoned.agy-computer-use.host"', verified: true },
         { name: 'Requirement record negative: Prefixed designated record -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: replaceExactToken(validCanonicalTeamReq, 'designated => ', 'prefix designated => '), verified: true },
         { name: 'Requirement record negative: Suffixed designated record -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: validCanonicalTeamReq + ' ', verified: true },
+        { name: 'Requirement record negative: Leading-whitespace designated => record -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: replaceExactToken(validCanonicalTeamReq, 'designated => ', 'designated =>  '), verified: true },
         { name: 'Requirement record negative: Extra third record -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: validCanonicalTeamReq + '\nExtraField=123', verified: true },
+        { name: 'Requirement record negative: Leading blank record -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: '\n' + validCanonicalTeamReq, verified: true },
+        { name: 'Requirement record negative: Interior blank record -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: replaceExactToken(validCanonicalTeamReq, '\ndesignated =>', '\n\ndesignated =>'), verified: true },
+        { name: 'Requirement record negative: Multiple trailing blank records -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: validCanonicalTeamReq + '\n\n', verified: true },
         { name: 'Requirement record negative: and without exact surrounding spaces -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: replaceExactToken(validMinimalTeamReq, ' and anchor apple generic', 'and anchor apple generic'), verified: true },
-        { name: 'Requirement record negative: Doubled separator -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: replaceExactToken(validMinimalTeamReq, ' and anchor apple generic', ' and  and anchor apple generic'), verified: true },
-        { name: 'Requirement record negative: Empty atom in requirement -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: replaceExactToken(validMinimalTeamReq, ' and anchor apple generic', ' and  and anchor apple generic'), verified: true },
+
+        {
+            name: 'Requirement record negative: Doubled separator vs Empty atom -> unsigned_or_invalid',
+            codesign: validCanonicalTeamCodesign,
+            req: (() => {
+                const doubledSep = replaceExactToken(validMinimalTeamReq, ' and anchor apple generic', ' and  and anchor apple generic');
+                const emptyAtom = replaceExactToken(validMinimalTeamReq, ' and anchor apple generic', ' and   and anchor apple generic');
+                assert.notEqual(doubledSep, emptyAtom, 'Doubled separator and empty atom test fixtures must be distinct strings');
+                return doubledSep;
+            })(),
+            verified: true
+        },
+        {
+            name: 'Requirement record negative: Empty atom in requirement -> unsigned_or_invalid',
+            codesign: validCanonicalTeamCodesign,
+            req: replaceExactToken(validMinimalTeamReq, ' and anchor apple generic', ' and   and anchor apple generic'),
+            verified: true
+        },
         { name: 'Requirement record negative: Alternate whitespace around separator -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: replaceExactToken(validMinimalTeamReq, ' and anchor apple generic', '  and  anchor apple generic'), verified: true },
         { name: 'Requirement record negative: Disallowed OR -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: replaceExactToken(validMinimalTeamReq, ' and anchor apple generic', ' or anchor apple generic'), verified: true },
         { name: 'Requirement record negative: Disallowed || -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: replaceExactToken(validMinimalTeamReq, ' and anchor apple generic', ' || anchor apple generic'), verified: true },
@@ -301,7 +329,11 @@ test('RP-2: Complete production-bound principal classification authority table',
         { name: 'Requirement atom negative: Quoted OU -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: replaceExactToken(validCanonicalTeamReq, 'certificate leaf[subject.OU] = ABCDE12345', 'certificate leaf[subject.OU] = "ABCDE12345"'), verified: true },
         { name: 'Requirement atom negative: OU prefix -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: replaceExactToken(validCanonicalTeamReq, 'certificate leaf[subject.OU] = ABCDE12345', 'prefix certificate leaf[subject.OU] = ABCDE12345'), verified: true },
         { name: 'Requirement atom negative: OU substring -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: replaceExactToken(validCanonicalTeamReq, 'certificate leaf[subject.OU] = ABCDE12345', 'certificate leaf[subject.OU] = ABCD'), verified: true },
+        { name: 'Requirement atom negative: Unterminated OU quote -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: replaceExactToken(validCanonicalTeamReq, 'certificate leaf[subject.OU] = ABCDE12345', 'certificate leaf[subject.OU] = "ABCDE12345'), verified: true },
         { name: 'Requirement atom negative: Malformed quote in identifier -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: replaceExactToken(validCanonicalTeamReq, 'identifier "com.saariuslystoned.agy-computer-use.host"', 'identifier "com.saariuslystoned.agy-computer-use.host'), verified: true },
+        { name: 'Requirement atom negative: Requirement identifier prefix -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: replaceExactToken(validCanonicalTeamReq, 'identifier "com.saariuslystoned.agy-computer-use.host"', 'prefix identifier "com.saariuslystoned.agy-computer-use.host"'), verified: true },
+        { name: 'Requirement atom negative: Requirement identifier substring -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: replaceExactToken(validCanonicalTeamReq, 'identifier "com.saariuslystoned.agy-computer-use.host"', 'identifier "com.saariuslystoned.agy-computer-use"'), verified: true },
+        { name: 'Requirement atom negative: Unrelated leading atom -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: replaceExactToken(validCanonicalTeamReq, 'designated => ', 'designated => extraAtom and '), verified: true },
         { name: 'Requirement atom negative: Missing identifier atom -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: replaceExactToken(validMinimalTeamReq, 'identifier "com.saariuslystoned.agy-computer-use.host" and ', ''), verified: true },
         { name: 'Requirement atom negative: Missing anchor atom -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: replaceExactToken(validMinimalTeamReq, 'and anchor apple generic ', ''), verified: true },
         { name: 'Requirement atom negative: Missing OU atom -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: replaceExactToken(validMinimalTeamReq, ' and certificate leaf[subject.OU] = ABCDE12345', ''), verified: true },
@@ -322,7 +354,7 @@ test('RP-2: Complete production-bound principal classification authority table',
             const res = parseAndClassifyPrincipal(c.codesign, c.req, c.verified, { requireStable: c.requireStable });
             if (c.requireStable) {
                 assert.equal(res.classification, 'ad_hoc_ephemeral');
-                assert.ok(res.error, '--require-stable must yield error');
+                assert.equal(res.error, 'Staged app is ad_hoc_ephemeral; --require-stable specified');
             } else {
                 assert.equal(res.classification, 'unsigned_or_invalid', `Must return unsigned_or_invalid for case '${c.name}'`);
             }
@@ -337,7 +369,8 @@ test('AR-P1: Recording runner test for classifyPrincipal', async () => {
     const recordedCalls = [];
 
     const canonicalStderrDV = 'Executable=/path/to/ComputerUseHost\nIdentifier=com.saariuslystoned.agy-computer-use.host\nFormat=app bundle\nSignature size=4520\nAuthority=Developer ID Application: Test (ABCDE12345)\nTeamIdentifier=ABCDE12345\n';
-    const canonicalStdoutR = 'Executable=/path/to/ComputerUseHost\ndesignated => identifier "com.saariuslystoned.agy-computer-use.host" and anchor apple generic and certificate leaf[subject.OU] = ABCDE12345\n';
+    const canonicalStderrExec = 'Executable=/path/to/ComputerUseHost\n';
+    const canonicalStdoutR = 'designated => identifier "com.saariuslystoned.agy-computer-use.host" and anchor apple generic and certificate leaf[subject.OU] = ABCDE12345\n';
 
     const fakeSuccessRunner = async (cmd, args) => {
         recordedCalls.push({ cmd, args });
@@ -348,7 +381,7 @@ test('AR-P1: Recording runner test for classifyPrincipal', async () => {
             return { stdout: '', stderr: canonicalStderrDV };
         }
         if (args.includes('-r-')) {
-            return { stdout: canonicalStdoutR, stderr: '' };
+            return { stdout: canonicalStdoutR, stderr: canonicalStderrExec };
         }
         throw new Error(`Unexpected args: ${args.join(' ')}`);
     };
@@ -372,7 +405,7 @@ test('AR-P1: Recording runner test for classifyPrincipal', async () => {
             return { stdout: '', stderr: canonicalStderrDV };
         }
         if (args.includes('-r-')) {
-            return { stdout: canonicalStdoutR, stderr: '' };
+            return { stdout: canonicalStdoutR, stderr: canonicalStderrExec };
         }
         throw new Error(`Unexpected args: ${args.join(' ')}`);
     };
@@ -381,7 +414,7 @@ test('AR-P1: Recording runner test for classifyPrincipal', async () => {
     assert.equal(failRes.classification, 'unsigned_or_invalid', 'Must report unsigned_or_invalid on verification failure');
     assert.equal(failRecordedCalls.length, 3, 'Must execute all 3 commands even on verification failure');
 
-    const mutantRes = parseAndClassifyPrincipal(canonicalStderrDV, canonicalStdoutR, true);
+    const mutantRes = parseAndClassifyPrincipal(canonicalStderrDV, canonicalStderrExec + canonicalStdoutR, true);
     assert.equal(mutantRes.classification, 'stable_team_signed_candidate', 'Mutant ignoring verification would return stable_team_signed_candidate');
 });
 
