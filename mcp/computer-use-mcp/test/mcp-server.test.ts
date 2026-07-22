@@ -501,6 +501,29 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
   });
 
   test("Section 4: Canonical JPEG mutation table parity and byte identity", () => {
+    function decodeHexStrict(hexStr: string): Buffer {
+      // I4 — No trimming; validate original string directly
+      if (!/^[0-9a-f]+$/.test(hexStr)) {
+        throw new Error("Hex string must contain lowercase hex characters only");
+      }
+      if (hexStr.length === 0 || hexStr.length % 2 !== 0) {
+        throw new Error("Hex string must have even non-zero length");
+      }
+      const buf = Buffer.from(hexStr, "hex");
+      if (buf.toString("hex") !== hexStr) {
+        throw new Error("Hex encode-back roundtrip mismatch");
+      }
+      return buf;
+    }
+
+    // Direct negative decoder assertions
+    assert.throws(() => decodeHexStrict("0"), /even non-zero length/);
+    assert.throws(() => decodeHexStrict("gg"), /lowercase hex characters only/);
+    assert.throws(() => decodeHexStrict("AA"), /lowercase hex characters only/);
+    // I4 — Whitespace negative assertions
+    assert.throws(() => decodeHexStrict(" 00"), /lowercase hex characters only/);
+    assert.throws(() => decodeHexStrict("00\n"), /lowercase hex characters only/);
+
     const rootDir = path.resolve(process.cwd(), "../../");
     const mcpPkgDir = process.cwd();
     const docFixturePath = path.join(rootDir, "docs/fixtures/golden_progressive.jpg");
@@ -512,121 +535,46 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
     const docBuf = fs.readFileSync(docFixturePath);
     const mcpBuf = fs.readFileSync(mcpFixturePath);
 
+    // I5 — Explicit golden size anchors
+    assert.equal(docBuf.length, 534, "docs/fixtures/golden_progressive.jpg must be exactly 534 bytes");
+    assert.equal(mcpBuf.length, 534, "test/fixtures/golden_progressive.jpg must be exactly 534 bytes");
+
     const docHash = crypto.createHash("sha256").update(docBuf).digest("hex");
     const mcpHash = crypto.createHash("sha256").update(mcpBuf).digest("hex");
 
     assert.equal(docHash, mcpHash, "Both golden_progressive.jpg fixture files must be byte-identical SHA-256");
+    assert.equal(docHash, "afc2917f7357e4f883aa4105aa90aa4e5cb0b4df83365eb00a4142cd1980f24d");
 
     const canonicalTablePath = path.join(rootDir, "docs/fixtures/canonical_jpeg_mutations.json");
-    const table: Array<{ id: number; name: string; expectedResult: string; expectedWidth?: number; expectedHeight?: number; sha256: string }> =
+    const table: Array<{ id: number; name: string; expectedResult: string; expectedWidth?: number; expectedHeight?: number; sha256: string; hex: string }> =
       JSON.parse(fs.readFileSync(canonicalTablePath, "utf-8"));
 
     assert.equal(table.length, 16, "Canonical JPEG mutation table must contain exactly 16 rows");
 
-    const goldenBuf = docBuf;
-    for (const row of table) {
-      let mutBuf: Buffer;
+    const seenIds = new Set<number>();
+    for (let idx = 0; idx < table.length; idx++) {
+      const row = table[idx];
+      assert.equal(row.id, idx + 1, "Ordered IDs must equal 1..16");
+      seenIds.add(row.id);
+      assert.ok(row.expectedResult === "accept" || row.expectedResult === "reject", "expectedResult must be accept or reject");
 
-      switch (row.id) {
-        case 1:
-          mutBuf = Buffer.from(goldenBuf);
-          break;
-        case 2: {
-          mutBuf = Buffer.from(goldenBuf);
-          mutBuf[4] = 0x00; mutBuf[5] = 0x01;
-          break;
-        }
-        case 3: {
-          mutBuf = Buffer.from(goldenBuf);
-          const sofIdx = mutBuf.indexOf(Buffer.from([0xff, 0xc2]));
-          assert.notEqual(sofIdx, -1, `SOF marker must be present for row ${row.id}`);
-          mutBuf[sofIdx + 13] = mutBuf[sofIdx + 10];
-          break;
-        }
-        case 4: {
-          mutBuf = Buffer.from(goldenBuf);
-          const sosIdx = mutBuf.indexOf(Buffer.from([0xff, 0xda]));
-          assert.notEqual(sosIdx, -1, `SOS marker must be present for row ${row.id}`);
-          mutBuf[sosIdx + 7] = mutBuf[sosIdx + 5];
-          break;
-        }
-        case 5: {
-          mutBuf = Buffer.from(goldenBuf);
-          const sosIdx = mutBuf.indexOf(Buffer.from([0xff, 0xda]));
-          assert.notEqual(sosIdx, -1, `SOS marker must be present for row ${row.id}`);
-          mutBuf[sosIdx + 5] = 0x99;
-          break;
-        }
-        case 6: {
-          mutBuf = Buffer.from(goldenBuf);
-          const sosIdx = mutBuf.indexOf(Buffer.from([0xff, 0xda]));
-          assert.notEqual(sosIdx, -1, `SOS marker must be present for row ${row.id}`);
-          mutBuf[sosIdx + 4] = 0;
-          break;
-        }
-        case 7: {
-          mutBuf = Buffer.from(goldenBuf);
-          const sosIdx = mutBuf.indexOf(Buffer.from([0xff, 0xda]));
-          assert.notEqual(sosIdx, -1, `SOS marker must be present for row ${row.id}`);
-          mutBuf[sosIdx + 4] = 5;
-          break;
-        }
-        case 8:
-          mutBuf = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xd8]), goldenBuf.subarray(2)]);
-          break;
-        case 9: {
-          const sofIdx = goldenBuf.indexOf(Buffer.from([0xff, 0xc2]));
-          assert.notEqual(sofIdx, -1, `SOF marker must be present for row ${row.id}`);
-          const segLen = (goldenBuf[sofIdx + 2] << 8) | goldenBuf[sofIdx + 3];
-          const sofChunk = goldenBuf.subarray(sofIdx, sofIdx + 2 + segLen);
-          mutBuf = Buffer.concat([goldenBuf.subarray(0, sofIdx + 2 + segLen), sofChunk, goldenBuf.subarray(sofIdx + 2 + segLen)]);
-          break;
-        }
-        case 10: {
-          mutBuf = Buffer.from(goldenBuf);
-          const sosIdx = mutBuf.indexOf(Buffer.from([0xff, 0xda]));
-          assert.notEqual(sosIdx, -1, `SOS marker must be present for row ${row.id}`);
-          let found = false;
-          for (let i = sosIdx + 10; i < mutBuf.length - 1; i++) {
-            if (mutBuf[i] === 0xff && mutBuf[i + 1] !== 0x00 && !(mutBuf[i + 1] >= 0xd0 && mutBuf[i + 1] <= 0xd7) && mutBuf[i + 1] !== 0xd9) {
-              mutBuf[i + 1] = 0x02;
-              found = true;
-              break;
-            }
-          }
-          assert.ok(found, `Inter-scan marker must be found for row ${row.id}`);
-          break;
-        }
-        case 11:
-          mutBuf = goldenBuf.subarray(0, goldenBuf.length - 10);
-          break;
-        case 12:
-          mutBuf = goldenBuf.subarray(0, goldenBuf.length - 2);
-          break;
-        case 13: {
-          mutBuf = Buffer.from(goldenBuf);
-          const sofIdx = mutBuf.indexOf(Buffer.from([0xff, 0xc2]));
-          assert.notEqual(sofIdx, -1, `SOF marker must be present for row ${row.id}`);
-          mutBuf[sofIdx + 5] = 0x1f; mutBuf[sofIdx + 6] = 0x40;
-          mutBuf[sofIdx + 7] = 0x1f; mutBuf[sofIdx + 8] = 0x40;
-          break;
-        }
-        case 14: {
-          mutBuf = Buffer.from(goldenBuf);
-          const sofIdx = mutBuf.indexOf(Buffer.from([0xff, 0xc2]));
-          assert.notEqual(sofIdx, -1, `SOF marker must be present for row ${row.id}`);
-          mutBuf[sofIdx + 5] = 0x14; mutBuf[sofIdx + 6] = 0x5d; // 5213
-          mutBuf[sofIdx + 7] = 0x2f; mutBuf[sofIdx + 8] = 0xf5; // 12277
-          break;
-        }
-        case 15:
-          mutBuf = Buffer.concat([goldenBuf, Buffer.from([0x00, 0x00])]);
-          break;
-        case 16:
-          mutBuf = Buffer.concat([goldenBuf, Buffer.from([0xaa])]);
-          break;
-        default:
-          throw new Error(`Unexpected row ID ${row.id}`);
+      if (row.expectedResult === "accept") {
+        assert.ok(row.expectedWidth !== undefined, `Accepted row ${row.id} must have expectedWidth`);
+        assert.ok(row.expectedHeight !== undefined, `Accepted row ${row.id} must have expectedHeight`);
+      } else {
+        assert.equal(row.expectedWidth, undefined, `Rejected row ${row.id} must not have expectedWidth`);
+        assert.equal(row.expectedHeight, undefined, `Rejected row ${row.id} must not have expectedHeight`);
+      }
+
+      const mutBuf = decodeHexStrict(row.hex);
+
+      if (row.id === 1) {
+        assert.equal(row.name, "Identity");
+        assert.equal(row.expectedResult, "accept");
+        assert.equal(row.expectedWidth, 10);
+        assert.equal(row.expectedHeight, 10);
+        assert.equal(row.sha256, "afc2917f7357e4f883aa4105aa90aa4e5cb0b4df83365eb00a4142cd1980f24d");
+        assert.ok(mutBuf.equals(docBuf), "Row 1 decoded bytes must be byte-identical to golden fixture");
       }
 
       const mutHash = crypto.createHash("sha256").update(mutBuf).digest("hex");
@@ -641,6 +589,7 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
         assert.equal(res, null, `Row ${row.id} (${row.name}) must be rejected`);
       }
     }
+    assert.equal(seenIds.size, 16, "Unique ID set size must be 16");
   });
 
   test("Section 5: Dimension rejection bounds (0, negative, overflow, exact 64M, exact 64M+1)", () => {

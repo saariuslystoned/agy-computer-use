@@ -4,7 +4,7 @@ import ImageIO
 import CryptoKit
 import ComputerUseHostLib
 #if canImport(ScreenCaptureKit)
-import ScreenCaptureKit
+@preconcurrency import ScreenCaptureKit
 #endif
 
 private final class AtomicCounter: @unchecked Sendable {
@@ -19,6 +19,11 @@ private final class ErrorBox: @unchecked Sendable {
     private let lock = NSLock()
     func set(_ error: Error) { lock.lock(); err = error; lock.unlock() }
     var value: Error? { lock.lock(); defer { lock.unlock() }; return err }
+}
+
+private final class UncheckedSendableBox<T>: @unchecked Sendable {
+    let value: T
+    init(_ value: T) { self.value = value }
 }
 
 public final class TestManualClock: HostClock, @unchecked Sendable {
@@ -1915,8 +1920,27 @@ public struct ComputerUseHostTestRunner {
     }
 
     public static func run18_PermissionPreflightDeniedZeroLoaderCalls() async throws {
+        // C3-1 — Permission preflight denied with mandatory external counters
+        let extLoaderDen = AtomicCounter()
+        let extCapDen = AtomicCounter()
+        let extEncDen = AtomicCounter()
+
         let auth18 = FakeScreenRecordingAuthorizer(granted: false)
-        let engine18 = SCScreenshotCaptureEngine(authorizer: auth18)
+        let engine18 = SCScreenshotCaptureEngine(
+            authorizer: auth18,
+            contentLoader: {
+                extLoaderDen.increment()
+                throw ComputerUseError.ipcError(reason: "Should not be called")
+            },
+            imageCapturer: { filter, config in
+                extCapDen.increment()
+                throw ComputerUseError.ipcError(reason: "Should not be called")
+            },
+            jpegEncoder: { image, quality in
+                extEncDen.increment()
+                throw ComputerUseError.ipcError(reason: "Should not be called")
+            }
+        )
         let top18 = try FakeDisplayTopologyProvider().getTopology()
 
         var threwDenied = false
@@ -1928,21 +1952,43 @@ public struct ComputerUseHostTestRunner {
                 threwDenied = true
             }
         }
-        assertTrue(threwDenied)
+        assertTrue(threwDenied, "captureDisplay must fail with permissionDenied when authorizer is ungranted")
+        assertEqual(extLoaderDen.value, 0, "External loader must not be called when permission is denied")
+        assertEqual(extCapDen.value, 0, "External capturer must not be called when permission is denied")
+        assertEqual(extEncDen.value, 0, "External encoder must not be called when permission is denied")
+        assertEqual(await engine18.contentLoaderInvocationCount, 0)
         assertEqual(await engine18.frameworkInvocationCount, 0)
+        assertEqual(await engine18.encoderInvocationCount, 0)
 
-        let engine18_granted = SCScreenshotCaptureEngine(
-            authorizer: FakeScreenRecordingAuthorizer(granted: true)
-        )
-
-        let invalidDimensions: [(Int, Int)] = [
-            (0, 100),
-            (-1, -1),
-            (Int.max, Int.max),
-            (5213, 12277) // Exact 64,000,001 (64M+1)
+        // I2 — Exact typed invalid-dimension reasons (0x100, -1x-1, Int.max, exact 64M+1)
+        let invalidDimensions: [(Int, Int, String)] = [
+            (0, 100, "Pixel dimensions (0x100) must be positive"),
+            (-1, -1, "Pixel dimensions (-1x-1) must be positive"),
+            (Int.max, Int.max, "Pixel dimensions (\(Int.max)x\(Int.max)) exceed 64-megapixel safety limit"),
+            (5213, 12277, "Pixel dimensions (5213x12277) exceed 64-megapixel safety limit")
         ]
 
-        for (pw, ph) in invalidDimensions {
+        for (pw, ph, exactMsg) in invalidDimensions {
+            let extLoaderInv = AtomicCounter()
+            let extCapInv = AtomicCounter()
+            let extEncInv = AtomicCounter()
+
+            let engineInv = SCScreenshotCaptureEngine(
+                authorizer: FakeScreenRecordingAuthorizer(granted: true),
+                contentLoader: {
+                    extLoaderInv.increment()
+                    throw ComputerUseError.ipcError(reason: "Should not be called")
+                },
+                imageCapturer: { filter, config in
+                    extCapInv.increment()
+                    throw ComputerUseError.ipcError(reason: "Should not be called")
+                },
+                jpegEncoder: { image, quality in
+                    extEncInv.increment()
+                    throw ComputerUseError.ipcError(reason: "Should not be called")
+                }
+            )
+
             let invalidTop = DisplayTopology(
                 version: "v1.0",
                 primaryDisplayId: 1,
@@ -1962,57 +2008,79 @@ public struct ComputerUseHostTestRunner {
             )
             var threwInvalid = false
             do {
-                _ = try await engine18_granted.captureDisplay(displayId: 1, topology: invalidTop)
-            } catch {
-                threwInvalid = true
+                _ = try await engineInv.captureDisplay(displayId: 1, topology: invalidTop)
+            } catch let err as ComputerUseError {
+                if case .targetUnreachable(let reason) = err {
+                    assertEqual(reason, exactMsg)
+                    threwInvalid = true
+                }
             }
             assertTrue(threwInvalid, "captureDisplay must fail on invalid pixel dimensions (\(pw)x\(ph))")
-            assertEqual(await engine18_granted.contentLoaderInvocationCount, 0, "Content loader must not be called on invalid dimensions (\(pw)x\(ph))")
-            assertEqual(await engine18_granted.frameworkInvocationCount, 0, "Framework allocation must not be called on invalid dimensions (\(pw)x\(ph))")
-            assertEqual(await engine18_granted.encoderInvocationCount, 0, "JPEG encoder must not be called on invalid dimensions (\(pw)x\(ph))")
+            assertEqual(extLoaderInv.value, 0, "External loader must not be called on invalid dimensions (\(pw)x\(ph))")
+            assertEqual(extCapInv.value, 0, "External capturer must not be called on invalid dimensions (\(pw)x\(ph))")
+            assertEqual(extEncInv.value, 0, "External encoder must not be called on invalid dimensions (\(pw)x\(ph))")
+            assertEqual(await engineInv.contentLoaderInvocationCount, 0)
+            assertEqual(await engineInv.frameworkInvocationCount, 0)
+            assertEqual(await engineInv.encoderInvocationCount, 0)
         }
 
-        // Test exact 64M limit (8000 x 8000 = 64,000,000) with lightweight fake injected dependencies
-        let fakeCGImage = CGImage(
+        // C3-2 — Deterministic active display and low-memory exact-64M success
+        let initialSCContent = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        assertTrue(initialSCContent.displays.first != nil, "SCShareableContent must contain at least one display")
+        let activeDisplayId = Int(initialSCContent.displays.first!.displayID)
+        let initialContentBox = UncheckedSendableBox(initialSCContent)
+
+        let extLoader64M = AtomicCounter()
+        let extCap64M = AtomicCounter()
+        let extEnc64M = AtomicCounter()
+
+        // 8000 x 8000 1-bit grayscale image (1 bit/pixel = 8,000,000 bytes backing)
+        let fakeCGImage64M = CGImage(
             width: 8000,
             height: 8000,
-            bitsPerComponent: 8,
-            bitsPerPixel: 8,
-            bytesPerRow: 8000,
+            bitsPerComponent: 1,
+            bitsPerPixel: 1,
+            bytesPerRow: 1000,
             space: CGColorSpaceCreateDeviceGray(),
             bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
-            provider: CGDataProvider(data: Data(repeating: 0, count: 64_000_000) as CFData)!,
+            provider: CGDataProvider(data: Data(repeating: 0, count: 8_000_000) as CFData)!,
             decode: nil,
             shouldInterpolate: false,
             intent: .defaultIntent
         )!
 
+        let validSOF0_8000x8000 = Data([
+            0xFF, 0xD8,
+            0xFF, 0xC0, 0x00, 0x11, 0x08, 0x1F, 0x40, 0x1F, 0x40, 0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01,
+            0xFF, 0xDA, 0x00, 0x0C, 0x03, 0x01, 0x00, 0x02, 0x11, 0x03, 0x11, 0x00, 0x3F, 0x00,
+            0x00,
+            0xFF, 0xD9
+        ])
+
         let engine64M = SCScreenshotCaptureEngine(
             authorizer: FakeScreenRecordingAuthorizer(granted: true),
             contentLoader: {
-                // Return dummy SCShareableContent
-                try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+                extLoader64M.increment()
+                return initialContentBox.value
             },
             imageCapturer: { filter, config in
-                return fakeCGImage
+                extCap64M.increment()
+                assertEqual(config.width, 8000)
+                assertEqual(config.height, 8000)
+                return fakeCGImage64M
             },
             jpegEncoder: { image, quality in
-                return Data([
-                    0xFF, 0xD8,
-                    0xFF, 0xC0, 0x00, 0x11, 0x08, 0x1F, 0x40, 0x1F, 0x40, 0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01,
-                    0xFF, 0xDA, 0x00, 0x0C, 0x03, 0x01, 0x00, 0x02, 0x11, 0x03, 0x11, 0x00, 0x3F, 0x00,
-                    0x00,
-                    0xFF, 0xD9
-                ])
+                extEnc64M.increment()
+                return validSOF0_8000x8000
             }
         )
 
         let valid64MTop = DisplayTopology(
             version: "v1.0",
-            primaryDisplayId: 1,
+            primaryDisplayId: activeDisplayId,
             displays: [
                 DisplayInfo(
-                    id: 1,
+                    id: activeDisplayId,
                     widthPoints: 8000,
                     heightPoints: 8000,
                     scaleFactor: 1.0,
@@ -2025,12 +2093,105 @@ public struct ComputerUseHostTestRunner {
             ]
         )
 
-        let frame64M = try await engine64M.captureDisplay(displayId: 1, topology: valid64MTop)
+        let frame64M = try await engine64M.captureDisplay(displayId: activeDisplayId, topology: valid64MTop)
+        assertEqual(frame64M.displayId, activeDisplayId)
         assertEqual(frame64M.pixelWidth, 8000)
         assertEqual(frame64M.pixelHeight, 8000)
-        assertEqual(await engine64M.contentLoaderInvocationCount, 1, "Content loader must be invoked exactly once for 64M boundary")
-        assertEqual(await engine64M.frameworkInvocationCount, 1, "Framework capturer must be invoked exactly once for 64M boundary")
-        assertEqual(await engine64M.encoderInvocationCount, 1, "JPEG encoder must be invoked exactly once for 64M boundary")
+        assertEqual(frame64M.imageDataBase64, validSOF0_8000x8000.base64EncodedString())
+        assertEqual(Data(base64Encoded: frame64M.imageDataBase64), validSOF0_8000x8000)
+        // I1 — Complete frame identity assertions
+        assertEqual(frame64M.topologyVersion, valid64MTop.version)
+        assertTrue(frame64M.captureId.hasPrefix("cap-"), "captureId must start with cap-")
+        let uuidPart = String(frame64M.captureId.dropFirst(4))
+        assertTrue(UUID(uuidString: uuidPart) != nil, "captureId suffix must parse as valid UUID string")
+        assertEqual(extLoader64M.value, 1, "External loader must be called once")
+        assertEqual(extCap64M.value, 1, "External capturer must be called once")
+        assertEqual(extEnc64M.value, 1, "External encoder must be called once")
+        assertEqual(await engine64M.contentLoaderInvocationCount, 1)
+        assertEqual(await engine64M.frameworkInvocationCount, 1)
+        assertEqual(await engine64M.encoderInvocationCount, 1)
+
+        // C3-3 — Mismatched width, height, and invalid encoder output separately discriminated
+        // Case 1: Width mismatch (requested 8000, returned 7999) — I3 low-memory 1-bit backing
+        let extL1 = AtomicCounter(); let extC1 = AtomicCounter(); let extE1 = AtomicCounter()
+        let fakeCGImageW7999 = CGImage(
+            width: 7999, height: 8000, bitsPerComponent: 1, bitsPerPixel: 1, bytesPerRow: 1000,
+            space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
+            provider: CGDataProvider(data: Data(repeating: 0, count: 8_000_000) as CFData)!,
+            decode: nil, shouldInterpolate: false, intent: .defaultIntent
+        )!
+        let engineWMismatch = SCScreenshotCaptureEngine(
+            authorizer: FakeScreenRecordingAuthorizer(granted: true),
+            contentLoader: { extL1.increment(); return initialContentBox.value },
+            imageCapturer: { filter, config in extC1.increment(); return fakeCGImageW7999 },
+            jpegEncoder: { image, quality in extE1.increment(); return validSOF0_8000x8000 }
+        )
+        var threwWMismatch = false
+        do {
+            _ = try await engineWMismatch.captureDisplay(displayId: activeDisplayId, topology: valid64MTop)
+        } catch let err as ComputerUseError {
+            if case .targetUnreachable(let reason) = err {
+                assertEqual(reason, "Captured CGImage dimensions (7999x8000) mismatch requested topology (8000x8000)")
+                threwWMismatch = true
+            }
+        }
+        assertTrue(threwWMismatch, "captureDisplay must fail on captured width mismatch")
+        assertEqual(extL1.value, 1); assertEqual(extC1.value, 1); assertEqual(extE1.value, 0)
+        assertEqual(await engineWMismatch.contentLoaderInvocationCount, 1)
+        assertEqual(await engineWMismatch.frameworkInvocationCount, 1)
+        assertEqual(await engineWMismatch.encoderInvocationCount, 0)
+
+        // Case 2: Height mismatch (requested 8000, returned 7999) — I3 low-memory 1-bit backing
+        let extL2 = AtomicCounter(); let extC2 = AtomicCounter(); let extE2 = AtomicCounter()
+        let fakeCGImageH7999 = CGImage(
+            width: 8000, height: 7999, bitsPerComponent: 1, bitsPerPixel: 1, bytesPerRow: 1000,
+            space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
+            provider: CGDataProvider(data: Data(repeating: 0, count: 7_999_000) as CFData)!,
+            decode: nil, shouldInterpolate: false, intent: .defaultIntent
+        )!
+        let engineHMismatch = SCScreenshotCaptureEngine(
+            authorizer: FakeScreenRecordingAuthorizer(granted: true),
+            contentLoader: { extL2.increment(); return initialContentBox.value },
+            imageCapturer: { filter, config in extC2.increment(); return fakeCGImageH7999 },
+            jpegEncoder: { image, quality in extE2.increment(); return validSOF0_8000x8000 }
+        )
+        var threwHMismatch = false
+        do {
+            _ = try await engineHMismatch.captureDisplay(displayId: activeDisplayId, topology: valid64MTop)
+        } catch let err as ComputerUseError {
+            if case .targetUnreachable(let reason) = err {
+                assertEqual(reason, "Captured CGImage dimensions (8000x7999) mismatch requested topology (8000x8000)")
+                threwHMismatch = true
+            }
+        }
+        assertTrue(threwHMismatch, "captureDisplay must fail on captured height mismatch")
+        assertEqual(extL2.value, 1); assertEqual(extC2.value, 1); assertEqual(extE2.value, 0)
+        assertEqual(await engineHMismatch.contentLoaderInvocationCount, 1)
+        assertEqual(await engineHMismatch.frameworkInvocationCount, 1)
+        assertEqual(await engineHMismatch.encoderInvocationCount, 0)
+
+        // Case 3: Invalid JPEG encoder output
+        let extL3 = AtomicCounter(); let extC3 = AtomicCounter(); let extE3 = AtomicCounter()
+        let engineInvalidEnc = SCScreenshotCaptureEngine(
+            authorizer: FakeScreenRecordingAuthorizer(granted: true),
+            contentLoader: { extL3.increment(); return initialContentBox.value },
+            imageCapturer: { filter, config in extC3.increment(); return fakeCGImage64M },
+            jpegEncoder: { image, quality in extE3.increment(); return Data([0x00, 0x01, 0x02, 0x03]) }
+        )
+        var threwInvalidEnc = false
+        do {
+            _ = try await engineInvalidEnc.captureDisplay(displayId: activeDisplayId, topology: valid64MTop)
+        } catch let err as ComputerUseError {
+            if case .ipcError(let reason) = err {
+                assertEqual(reason, "Invalid JPEG magic header")
+                threwInvalidEnc = true
+            }
+        }
+        assertTrue(threwInvalidEnc, "captureDisplay must fail on invalid JPEG magic from encoder")
+        assertEqual(extL3.value, 1); assertEqual(extC3.value, 1); assertEqual(extE3.value, 1)
+        assertEqual(await engineInvalidEnc.contentLoaderInvocationCount, 1)
+        assertEqual(await engineInvalidEnc.frameworkInvocationCount, 1)
+        assertEqual(await engineInvalidEnc.encoderInvocationCount, 1)
     }
 
     public static func run19_PureJPEGValidatorExactAndNear10MiBBoundaries() async throws {
@@ -2080,7 +2241,52 @@ public struct ComputerUseHostTestRunner {
         assertTrue(threwPixelOver64MP)
     }
 
+    private static func decodeHexStrict(_ hexStr: String) throws -> Data {
+        // I4 — No trimming; validate original string directly
+        guard !hexStr.isEmpty, hexStr.count % 2 == 0 else {
+            throw ComputerUseError.ipcError(reason: "Hex string must have even non-zero length")
+        }
+        var data = Data(capacity: hexStr.count / 2)
+        var idx = hexStr.startIndex
+        while idx < hexStr.endIndex {
+            let nextIdx = hexStr.index(idx, offsetBy: 2)
+            let pair = String(hexStr[idx..<nextIdx])
+            guard let byte = UInt8(pair, radix: 16), pair.lowercased() == pair else {
+                throw ComputerUseError.ipcError(reason: "Invalid hex character or uppercase byte pair '\(pair)'")
+            }
+            data.append(byte)
+            idx = nextIdx
+        }
+        let roundtrip = data.compactMap { String(format: "%02x", $0) }.joined()
+        guard roundtrip == hexStr else {
+            throw ComputerUseError.ipcError(reason: "Hex encode-back roundtrip mismatch")
+        }
+        return data
+    }
+
     public static func run20_SOF0AndSOF2MarkerValidation() async throws {
+        // Direct negative decoder assertions
+        var threwOdd = false
+        do { _ = try decodeHexStrict("0") } catch { threwOdd = true }
+        assertTrue(threwOdd, "Hex decoder must reject odd length")
+
+        var threwNonHex = false
+        do { _ = try decodeHexStrict("gg") } catch { threwNonHex = true }
+        assertTrue(threwNonHex, "Hex decoder must reject non-hex characters")
+
+        var threwUpper = false
+        do { _ = try decodeHexStrict("AA") } catch { threwUpper = true }
+        assertTrue(threwUpper, "Hex decoder must reject uppercase characters")
+
+        // I4 — Whitespace negative assertions
+        var threwLeadingWs = false
+        do { _ = try decodeHexStrict(" 00") } catch { threwLeadingWs = true }
+        assertTrue(threwLeadingWs, "Hex decoder must reject leading whitespace")
+
+        var threwTrailingWs = false
+        do { _ = try decodeHexStrict("00\n") } catch { threwTrailingWs = true }
+        assertTrue(threwTrailingWs, "Hex decoder must reject trailing whitespace")
+
         let repoRoot = URL(fileURLWithPath: #file)
             .deletingLastPathComponent() // ComputerUseHostTestRunner
             .deletingLastPathComponent() // Tests
@@ -2092,6 +2298,8 @@ public struct ComputerUseHostTestRunner {
 
         let goldenData = try Data(contentsOf: goldenURL)
         assertTrue(goldenData.count > 0, "golden_progressive.jpg must be non-empty")
+        // I5 — Explicit golden size anchor in Swift
+        assertEqual(goldenData.count, 534, "golden_progressive.jpg count must be exactly 534 bytes")
 
         // ImageIO decode verification
         let imageSource = CGImageSourceCreateWithData(goldenData as CFData, nil)
@@ -2113,98 +2321,34 @@ public struct ComputerUseHostTestRunner {
             let expectedWidth: Int?
             let expectedHeight: Int?
             let sha256: String
+            let hex: String
         }
 
         let table = try JSONDecoder().decode([MutationRow].self, from: tableData)
         assertEqual(table.count, 16, "Canonical JPEG mutation table must contain exactly 16 rows")
 
-        for row in table {
-            var mutData = Data()
-            switch row.id {
-            case 1:
-                mutData = goldenData
-            case 2:
-                mutData = goldenData
-                mutData[4] = 0x00; mutData[5] = 0x01
-            case 3:
-                mutData = goldenData
-                guard let sofIdx = mutData.range(of: Data([0xFF, 0xC2]))?.lowerBound else {
-                    fatalError("SOF marker not found for row \(row.id)")
-                }
-                mutData[sofIdx + 13] = mutData[sofIdx + 10]
-            case 4:
-                mutData = goldenData
-                guard let sosIdx = mutData.range(of: Data([0xFF, 0xDA]))?.lowerBound else {
-                    fatalError("SOS marker not found for row \(row.id)")
-                }
-                mutData[sosIdx + 7] = mutData[sosIdx + 5]
-            case 5:
-                mutData = goldenData
-                guard let sosIdx = mutData.range(of: Data([0xFF, 0xDA]))?.lowerBound else {
-                    fatalError("SOS marker not found for row \(row.id)")
-                }
-                mutData[sosIdx + 5] = 0x99
-            case 6:
-                mutData = goldenData
-                guard let sosIdx = mutData.range(of: Data([0xFF, 0xDA]))?.lowerBound else {
-                    fatalError("SOS marker not found for row \(row.id)")
-                }
-                mutData[sosIdx + 4] = 0
-            case 7:
-                mutData = goldenData
-                guard let sosIdx = mutData.range(of: Data([0xFF, 0xDA]))?.lowerBound else {
-                    fatalError("SOS marker not found for row \(row.id)")
-                }
-                mutData[sosIdx + 4] = 5
-            case 8:
-                mutData = Data([0xFF, 0xD8, 0xFF, 0xD8]) + goldenData.dropFirst(2)
-            case 9:
-                guard let sofIdx = goldenData.range(of: Data([0xFF, 0xC2]))?.lowerBound else {
-                    fatalError("SOF marker not found for row \(row.id)")
-                }
-                let segLen = Int(goldenData[sofIdx + 2]) << 8 | Int(goldenData[sofIdx + 3])
-                let sofChunk = goldenData[sofIdx..<(sofIdx + 2 + segLen)]
-                mutData.append(goldenData[0..<(sofIdx + 2 + segLen)])
-                mutData.append(sofChunk)
-                mutData.append(goldenData[(sofIdx + 2 + segLen)...])
-            case 10:
-                mutData = goldenData
-                guard let sosIdx = mutData.range(of: Data([0xFF, 0xDA]))?.lowerBound else {
-                    fatalError("SOS marker not found for row \(row.id)")
-                }
-                var found = false
-                for i in (sosIdx + 10)..<(mutData.count - 1) {
-                    if mutData[i] == 0xFF && mutData[i + 1] != 0x00 && !(mutData[i + 1] >= 0xD0 && mutData[i + 1] <= 0xD7) && mutData[i + 1] != 0xD9 {
-                        mutData[i + 1] = 0x02
-                        found = true
-                        break
-                    }
-                }
-                assertTrue(found, "Inter-scan marker must be found for row \(row.id)")
-            case 11:
-                mutData = Data(goldenData.prefix(goldenData.count - 10))
-            case 12:
-                mutData = Data(goldenData.prefix(goldenData.count - 2))
-            case 13:
-                mutData = goldenData
-                guard let sofIdx = mutData.range(of: Data([0xFF, 0xC2]))?.lowerBound else {
-                    fatalError("SOF marker not found for row \(row.id)")
-                }
-                mutData[sofIdx + 5] = 0x1F; mutData[sofIdx + 6] = 0x40
-                mutData[sofIdx + 7] = 0x1F; mutData[sofIdx + 8] = 0x40
-            case 14:
-                mutData = goldenData
-                guard let sofIdx = mutData.range(of: Data([0xFF, 0xC2]))?.lowerBound else {
-                    fatalError("SOF marker not found for row \(row.id)")
-                }
-                mutData[sofIdx + 5] = 0x14; mutData[sofIdx + 6] = 0x5D // height = 5213
-                mutData[sofIdx + 7] = 0x2F; mutData[sofIdx + 8] = 0xF5 // width = 12277
-            case 15:
-                mutData = goldenData + Data([0x00, 0x00])
-            case 16:
-                mutData = goldenData + Data([0xAA])
-            default:
-                fatalError("Unexpected row ID \(row.id)")
+        var seenIds = Set<Int>()
+        for (idx, row) in table.enumerated() {
+            assertEqual(row.id, idx + 1, "Ordered IDs must equal 1..16")
+            seenIds.insert(row.id)
+            assertTrue(row.expectedResult == "accept" || row.expectedResult == "reject", "expectedResult must be accept or reject")
+            if row.expectedResult == "accept" {
+                assertTrue(row.expectedWidth != nil, "Accepted row \(row.id) must have expectedWidth")
+                assertTrue(row.expectedHeight != nil, "Accepted row \(row.id) must have expectedHeight")
+            } else {
+                assertTrue(row.expectedWidth == nil, "Rejected row \(row.id) must not have expectedWidth")
+                assertTrue(row.expectedHeight == nil, "Rejected row \(row.id) must not have expectedHeight")
+            }
+
+            let mutData = try decodeHexStrict(row.hex)
+
+            if row.id == 1 {
+                assertEqual(row.name, "Identity")
+                assertEqual(row.expectedResult, "accept")
+                assertEqual(row.expectedWidth, 10)
+                assertEqual(row.expectedHeight, 10)
+                assertEqual(row.sha256, "afc2917f7357e4f883aa4105aa90aa4e5cb0b4df83365eb00a4142cd1980f24d")
+                assertEqual(mutData, goldenData, "Row 1 decoded bytes must be byte-identical to golden fixture")
             }
 
             let computedHash = SHA256.hash(data: mutData).compactMap { String(format: "%02x", $0) }.joined()
@@ -2219,6 +2363,7 @@ public struct ComputerUseHostTestRunner {
                 assertTrue(dims == nil, "Row \(row.id) (\(row.name)) must be rejected")
             }
         }
+        assertEqual(seenIds.count, 16, "Unique ID set size must be 16")
     }
 
     public static func run21_JPEGInvalidMagicTruncatedSegmentAndMismatchRejection() async throws {
