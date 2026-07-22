@@ -200,93 +200,119 @@ test('RP-1: Discriminator: host-principal argument handling prevents shell injec
     assert.ok(stdout.includes('unsigned_or_invalid'), 'Must report unsigned_or_invalid for non-existent path');
 });
 
-test('RP-2: Pure classifier authority for 13 principal states', async (t) => {
-    await t.test('1. Verification failed -> unsigned_or_invalid', () => {
-        const res = parseAndClassifyPrincipal('Identifier=com.saariuslystoned.agy-computer-use.host\nSignature=adhoc', '', false);
-        assert.equal(res.classification, 'unsigned_or_invalid');
-    });
+test('RP-2: Table-driven production principal classification authority & mandatory counterprobes', async (t) => {
+    const validAdHocCodesign = 'Executable=/path/to/app\nIdentifier=com.saariuslystoned.agy-computer-use.host\nFormat=app bundle\nSignature=adhoc\nTeamIdentifier=not set';
+    const validAdHocReq = 'Executable=/path/to/app\ndesignated => identifier "com.saariuslystoned.agy-computer-use.host"';
 
-    await t.test('2. Exact valid ad-hoc -> ad_hoc_ephemeral', () => {
-        const codesignOutput = 'Identifier=com.saariuslystoned.agy-computer-use.host\nSignature=adhoc\nTeamIdentifier=not set\nAuthority=adhoc';
-        const res = parseAndClassifyPrincipal(codesignOutput, '', true);
+    const validCanonicalTeamCodesign = 'Executable=/path/to/app\nIdentifier=com.saariuslystoned.agy-computer-use.host\nFormat=app bundle\nSignature size=4520\nAuthority=Developer ID Application: Test (ABCDE12345)\nAuthority=Developer ID Certification Authority\nAuthority=Apple Root CA\nSigned Time=Jul 21, 2026\nTeamIdentifier=ABCDE12345';
+    const validCanonicalTeamReq = 'Executable=/path/to/app\ndesignated => identifier "com.saariuslystoned.agy-computer-use.host" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = ABCDE12345';
+
+    const validMinimalTeamCodesign = 'Identifier=com.saariuslystoned.agy-computer-use.host\nSignature size=100\nAuthority=Developer ID Application: Test (ABCDE12345)\nTeamIdentifier=ABCDE12345';
+    const validMinimalTeamReq = 'designated => identifier "com.saariuslystoned.agy-computer-use.host" and anchor apple generic and certificate leaf[subject.OU] = ABCDE12345';
+
+    await t.test('Positive 1: Exact ad-hoc -> ad_hoc_ephemeral', () => {
+        const res = parseAndClassifyPrincipal(validAdHocCodesign, validAdHocReq, true);
         assert.equal(res.classification, 'ad_hoc_ephemeral');
         assert.equal(res.identifier, 'com.saariuslystoned.agy-computer-use.host');
         assert.equal(res.teamId, null);
     });
 
-    await t.test('3. Exact valid team candidate -> stable_team_signed_candidate', () => {
-        const codesignOutput = 'Identifier=com.saariuslystoned.agy-computer-use.host\nSignature=size=4520\nTeamIdentifier=TEAM123456\nAuthority=Developer ID Application: Test (TEAM123456)';
-        const reqOutput = 'designated => identifier "com.saariuslystoned.agy-computer-use.host" and anchor apple generic and certificate leaf[subject.OU] = "TEAM123456"';
-        const res = parseAndClassifyPrincipal(codesignOutput, reqOutput, true);
+    await t.test('Positive 2: Realistic canonical team -> stable_team_signed_candidate (Counterprobe 1)', () => {
+        const res = parseAndClassifyPrincipal(validCanonicalTeamCodesign, validCanonicalTeamReq, true);
         assert.equal(res.classification, 'stable_team_signed_candidate');
         assert.equal(res.identifier, 'com.saariuslystoned.agy-computer-use.host');
-        assert.equal(res.teamId, 'TEAM123456');
+        assert.equal(res.teamId, 'ABCDE12345');
     });
 
-    await t.test('4. Wrong bundle ID -> unsigned_or_invalid', () => {
-        const codesignOutput = 'Identifier=com.wrong.bundle\nSignature=adhoc\nTeamIdentifier=not set';
-        const res = parseAndClassifyPrincipal(codesignOutput, '', true);
-        assert.equal(res.classification, 'unsigned_or_invalid');
+    await t.test('Positive 3: Minimal team -> stable_team_signed_candidate (Counterprobe 2)', () => {
+        const res = parseAndClassifyPrincipal(validMinimalTeamCodesign, validMinimalTeamReq, true);
+        assert.equal(res.classification, 'stable_team_signed_candidate');
+        assert.equal(res.identifier, 'com.saariuslystoned.agy-computer-use.host');
+        assert.equal(res.teamId, 'ABCDE12345');
     });
 
-    await t.test('5. Missing signature line -> unsigned_or_invalid', () => {
-        const codesignOutput = 'Identifier=com.saariuslystoned.agy-computer-use.host\nTeamIdentifier=TEAM123456';
-        const res = parseAndClassifyPrincipal(codesignOutput, '', true);
-        assert.equal(res.classification, 'unsigned_or_invalid');
-    });
+    function replaceExactToken(sourceStr, targetToken, replacementToken) {
+        const count = sourceStr.split(targetToken).length - 1;
+        assert.equal(count, 1, `Target token '${targetToken}' must occur exactly once in source template (found ${count})`);
+        return sourceStr.replace(targetToken, replacementToken);
+    }
 
-    await t.test('6. Malformed signature -> unsigned_or_invalid', () => {
-        const codesignOutput = 'Identifier=com.saariuslystoned.agy-computer-use.host\nSignature=CORRUPT_SIG\nTeamIdentifier=TEAM123456';
-        const res = parseAndClassifyPrincipal(codesignOutput, '', true);
-        assert.equal(res.classification, 'unsigned_or_invalid');
-    });
+    const negativeCases = [
+        { name: 'Counterprobe 3: Quoted OU -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: replaceExactToken(validCanonicalTeamReq, 'certificate leaf[subject.OU] = ABCDE12345', 'certificate leaf[subject.OU] = "ABCDE12345"'), verified: true },
+        { name: 'Counterprobe 4: Invented Signature=size=4520 -> unsigned_or_invalid', codesign: replaceExactToken(validCanonicalTeamCodesign, 'Signature size=4520', 'Signature=size=4520'), req: validCanonicalTeamReq, verified: true },
+        { name: 'Counterprobe 5a: Exact ad hoc plus Authority=adhoc -> unsigned_or_invalid', codesign: validAdHocCodesign + '\nAuthority=adhoc', req: validAdHocReq, verified: true },
+        { name: 'Counterprobe 5b: Exact ad hoc plus Authority=not set -> unsigned_or_invalid', codesign: validAdHocCodesign + '\nAuthority=not set', req: validAdHocReq, verified: true },
+        { name: 'Counterprobe 6: Broad invented Apple OID -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: replaceExactToken(validCanonicalTeamReq, 'certificate 1[field.1.2.840.113635.100.6.2.6]', 'certificate 1.2.840.113635.100.6.1.99'), verified: true },
+        { name: 'Counterprobe 7: Same-line prefix before designated => -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: 'prefix: ' + validCanonicalTeamReq, verified: true },
+        { name: 'Counterprobe 8: Appended second designated record -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: validCanonicalTeamReq + '\ndesignated => identifier "com.saariuslystoned.agy-computer-use.host"', verified: true },
+        { name: 'Negative: Verification failed -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: validCanonicalTeamReq, verified: false },
+        { name: 'Negative: Signature=signed -> unsigned_or_invalid', codesign: replaceExactToken(validCanonicalTeamCodesign, 'Signature size=4520', 'Signature=signed'), req: validCanonicalTeamReq, verified: true },
+        { name: 'Negative: Zero signature size -> unsigned_or_invalid', codesign: replaceExactToken(validCanonicalTeamCodesign, 'Signature size=4520', 'Signature size=0'), req: validCanonicalTeamReq, verified: true },
+        { name: 'Negative: Leading zero signature size -> unsigned_or_invalid', codesign: replaceExactToken(validCanonicalTeamCodesign, 'Signature size=4520', 'Signature size=04520'), req: validCanonicalTeamReq, verified: true },
+        { name: 'Negative: Duplicate signature -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign + '\nSignature size=100', req: validCanonicalTeamReq, verified: true },
+        { name: 'Negative: Identifier mismatch -> unsigned_or_invalid', codesign: replaceExactToken(validCanonicalTeamCodesign, 'com.saariuslystoned.agy-computer-use.host', 'com.other.app'), req: validCanonicalTeamReq, verified: true },
+        { name: 'Negative: Identifier with whitespace -> unsigned_or_invalid', codesign: replaceExactToken(validCanonicalTeamCodesign, 'Identifier=com.saariuslystoned.agy-computer-use.host', 'Identifier=com.saariuslystoned.agy-computer-use.host '), req: validCanonicalTeamReq, verified: true },
+        { name: 'Negative: Duplicate Identifier record -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign + '\nIdentifier=com.saariuslystoned.agy-computer-use.host', req: validCanonicalTeamReq, verified: true },
+        { name: 'Negative: TeamIdentifier mismatch in requirement -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: replaceExactToken(validCanonicalTeamReq, 'certificate leaf[subject.OU] = ABCDE12345', 'certificate leaf[subject.OU] = OTHER12345'), verified: true },
+        { name: 'Negative: Disallowed OR in requirement -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: replaceExactToken(validMinimalTeamReq, ' and anchor apple generic', ' or anchor apple generic'), verified: true },
+        { name: 'Negative: Duplicate allowlisted OID -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: validCanonicalTeamReq + ' and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */', verified: true },
+        { name: 'Negative: Extra non-empty record in requirement -> unsigned_or_invalid', codesign: validCanonicalTeamCodesign, req: validCanonicalTeamReq + '\nExtraField=123', verified: true },
+        { name: 'Negative: --require-stable on ad-hoc -> ad_hoc_ephemeral with error', codesign: validAdHocCodesign, req: validAdHocReq, verified: true, requireStable: true }
+    ];
 
-    await t.test('7. Missing TeamIdentifier on non-ad-hoc -> unsigned_or_invalid', () => {
-        const codesignOutput = 'Identifier=com.saariuslystoned.agy-computer-use.host\nSignature=signed\nAuthority=Developer ID Application: Test';
-        const res = parseAndClassifyPrincipal(codesignOutput, '', true);
-        assert.equal(res.classification, 'unsigned_or_invalid');
-    });
+    for (const c of negativeCases) {
+        await t.test(c.name, () => {
+            const res = parseAndClassifyPrincipal(c.codesign, c.req, c.verified, { requireStable: c.requireStable });
+            if (c.requireStable) {
+                assert.equal(res.classification, 'ad_hoc_ephemeral');
+                assert.ok(res.error, '--require-stable must yield error');
+            } else {
+                assert.equal(res.classification, 'unsigned_or_invalid', `Must return unsigned_or_invalid for case '${c.name}'`);
+            }
+        });
+    }
+});
 
-    await t.test('8. Missing designated requirement -> unsigned_or_invalid', () => {
-        const codesignOutput = 'Identifier=com.saariuslystoned.agy-computer-use.host\nSignature=signed\nTeamIdentifier=TEAM123456\nAuthority=Developer ID Application: Test (TEAM123456)';
-        const res = parseAndClassifyPrincipal(codesignOutput, '', true);
-        assert.equal(res.classification, 'unsigned_or_invalid');
-    });
+test('AR-P1: Recording runner test for classifyPrincipal', async () => {
+    const stageRes = await stageHostApp();
+    const appPath = stageRes.appPath;
 
-    await t.test('9. Wrong identifier requirement -> unsigned_or_invalid', () => {
-        const codesignOutput = 'Identifier=com.saariuslystoned.agy-computer-use.host\nSignature=signed\nTeamIdentifier=TEAM123456\nAuthority=Developer ID Application: Test (TEAM123456)';
-        const reqOutput = 'designated => identifier "com.other.app" and certificate leaf[subject.OU] = "TEAM123456"';
-        const res = parseAndClassifyPrincipal(codesignOutput, reqOutput, true);
-        assert.equal(res.classification, 'unsigned_or_invalid');
-    });
+    const recordedCalls = [];
 
-    await t.test('10. Wrong team requirement -> unsigned_or_invalid', () => {
-        const codesignOutput = 'Identifier=com.saariuslystoned.agy-computer-use.host\nSignature=signed\nTeamIdentifier=TEAM123456\nAuthority=Developer ID Application: Test (TEAM123456)';
-        const reqOutput = 'designated => identifier "com.saariuslystoned.agy-computer-use.host" and certificate leaf[subject.OU] = "OTHERTEAM"';
-        const res = parseAndClassifyPrincipal(codesignOutput, reqOutput, true);
-        assert.equal(res.classification, 'unsigned_or_invalid');
-    });
+    const fakeRunner = async (cmd, args) => {
+        recordedCalls.push({ cmd, args });
+        if (args.includes('--verify')) {
+            return { stdout: '', stderr: '' };
+        }
+        if (args.includes('-dv')) {
+            const stderr = 'Executable=/path/to/ComputerUseHost\nIdentifier=com.saariuslystoned.agy-computer-use.host\nFormat=app bundle\nSignature size=4520\nAuthority=Developer ID Application: Test (ABCDE12345)\nTeamIdentifier=ABCDE12345\n';
+            return { stdout: '', stderr };
+        }
+        if (args.includes('-r-')) {
+            const stdout = 'Executable=/path/to/ComputerUseHost\ndesignated => identifier "com.saariuslystoned.agy-computer-use.host" and anchor apple generic and certificate leaf[subject.OU] = ABCDE12345\n';
+            return { stdout, stderr: '' };
+        }
+        throw new Error(`Unexpected args: ${args.join(' ')}`);
+    };
 
-    await t.test('11. Alternate/OR requirement -> unsigned_or_invalid', () => {
-        const codesignOutput = 'Identifier=com.saariuslystoned.agy-computer-use.host\nSignature=signed\nTeamIdentifier=TEAM123456\nAuthority=Developer ID Application: Test (TEAM123456)';
-        const reqOutput = 'designated => identifier "com.saariuslystoned.agy-computer-use.host" or certificate leaf[subject.OU] = "TEAM123456"';
-        const res = parseAndClassifyPrincipal(codesignOutput, reqOutput, true);
-        assert.equal(res.classification, 'unsigned_or_invalid');
-    });
+    const res = await classifyPrincipal(appPath, { execFileAsync: fakeRunner });
+    assert.equal(res.classification, 'stable_team_signed_candidate');
+    assert.equal(res.teamId, 'ABCDE12345');
 
-    await t.test('12. Contradictory/duplicate requirement predicates -> unsigned_or_invalid', () => {
-        const codesignOutput = 'Identifier=com.saariuslystoned.agy-computer-use.host\nSignature=signed\nTeamIdentifier=TEAM123456\nAuthority=Developer ID Application: Test (TEAM123456)';
-        const reqOutput = 'designated => identifier "com.saariuslystoned.agy-computer-use.host" and identifier "com.other.app" and certificate leaf[subject.OU] = "TEAM123456"';
-        const res = parseAndClassifyPrincipal(codesignOutput, reqOutput, true);
-        assert.equal(res.classification, 'unsigned_or_invalid');
-    });
+    assert.equal(recordedCalls.length, 3, 'Must record exactly 3 codesign invocations');
+    assert.deepEqual(recordedCalls[0], { cmd: 'codesign', args: ['--verify', '--strict', appPath] });
+    assert.deepEqual(recordedCalls[1], { cmd: 'codesign', args: ['-dv', '--verbose=4', appPath] });
+    assert.deepEqual(recordedCalls[2], { cmd: 'codesign', args: ['-d', '-r-', appPath] });
 
-    await t.test('13. --require-stable on ad-hoc -> ad_hoc_ephemeral with error', () => {
-        const codesignOutput = 'Identifier=com.saariuslystoned.agy-computer-use.host\nSignature=adhoc\nTeamIdentifier=not set';
-        const res = parseAndClassifyPrincipal(codesignOutput, '', true, { requireStable: true });
-        assert.equal(res.classification, 'ad_hoc_ephemeral');
-        assert.ok(res.error);
-    });
+    const failingRunner = async (cmd, args) => {
+        if (args.includes('--verify')) {
+            throw new Error('Verification failed');
+        }
+        return { stdout: '', stderr: '' };
+    };
+
+    const failRes = await classifyPrincipal(appPath, { execFileAsync: failingRunner });
+    assert.equal(failRes.classification, 'unsigned_or_invalid');
 });
 
 test('E2-P2: Component-aware stage target directory validation discriminators', () => {
