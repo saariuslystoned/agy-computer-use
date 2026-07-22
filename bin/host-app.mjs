@@ -12,26 +12,84 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const REPO_ROOT = path.resolve(__dirname, '..');
 
+const harnessStateMap = new WeakMap();
+let _testValidationHook = null;
+
+export function _setTestValidationHook(fn) {
+    _testValidationHook = fn;
+}
+
 export class TestStagingHarness {
-    constructor(options = {}) {
-        this._isHarness = true;
-        if (options.productionMode) {
-            this.rootDir = path.join(REPO_ROOT, 'apps/computer-use-host/.build/staged');
-            if (!fs.existsSync(this.rootDir)) {
-                fs.mkdirSync(this.rootDir, { recursive: true, mode: 0o700 });
-            }
-        } else {
-            this.rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-harness-root-'));
-            fs.chmodSync(this.rootDir, 0o700);
+    constructor(...args) {
+        if (args.length > 0) {
+            throw new Error('TestStagingHarness constructor accepts no arguments');
         }
-        this.beforeRemovalHook = null;
-        this.removalSpyCount = 0;
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-harness-root-'));
+        fs.chmodSync(tmpDir, 0o700);
+        const lstat = fs.lstatSync(tmpDir);
+
+        harnessStateMap.set(this, {
+            rootDir: tmpDir,
+            savedDev: lstat.dev,
+            savedIno: lstat.ino,
+            beforeRemovalHook: null,
+            removalSpyCount: 0
+        });
+    }
+
+    get rootDir() {
+        const state = harnessStateMap.get(this);
+        if (!state) throw new Error('Invalid TestStagingHarness instance');
+        return state.rootDir;
+    }
+
+    get removalSpyCount() {
+        const state = harnessStateMap.get(this);
+        if (!state) throw new Error('Invalid TestStagingHarness instance');
+        return state.removalSpyCount;
+    }
+
+    setBeforeRemovalHook(fn) {
+        const state = harnessStateMap.get(this);
+        if (!state) throw new Error('Invalid TestStagingHarness instance');
+        if (typeof fn !== 'function' && fn !== null) {
+            throw new Error('beforeRemovalHook must be a function or null');
+        }
+        state.beforeRemovalHook = fn;
     }
 
     cleanup() {
-        if (this.rootDir && this.rootDir.includes('agy-harness-root-') && fs.existsSync(this.rootDir)) {
-            fs.rmSync(this.rootDir, { recursive: true, force: true });
+        const state = harnessStateMap.get(this);
+        if (!state) return;
+
+        const { rootDir, savedDev, savedIno } = state;
+        const tmpParent = path.resolve(os.tmpdir());
+        const resolved = path.resolve(rootDir);
+
+        if (!resolved.startsWith(tmpParent) || !path.basename(resolved).startsWith('agy-harness-root-')) {
+            return;
         }
+
+        if (!fs.existsSync(resolved)) {
+            return;
+        }
+
+        let lstat;
+        try {
+            lstat = fs.lstatSync(resolved);
+        } catch (e) {
+            return;
+        }
+
+        if (lstat.isSymbolicLink() || !lstat.isDirectory()) {
+            return;
+        }
+
+        if (lstat.dev !== savedDev || lstat.ino !== savedIno) {
+            return;
+        }
+
+        fs.rmSync(resolved, { recursive: true, force: true });
     }
 }
 
@@ -112,12 +170,12 @@ export async function stageHostApp(options = {}) {
         }
     }
 
-    let harness = null;
+    let harnessState = null;
     if ('harness' in options) {
-        if (!options.harness || !options.harness._isHarness) {
+        harnessState = harnessStateMap.get(options.harness);
+        if (!harnessState) {
             throw new Error('Option harness must be an instance of TestStagingHarness');
         }
-        harness = options.harness;
     } else {
         if ('relativeTarget' in options) {
             throw new Error('Option relativeTarget is forbidden without a test harness');
@@ -128,8 +186,8 @@ export async function stageHostApp(options = {}) {
     let stagingRoot;
     let stagedAppDir;
 
-    if (harness) {
-        stagingRoot = harness.rootDir;
+    if (harnessState) {
+        stagingRoot = harnessState.rootDir;
         const rootLstat = fs.lstatSync(stagingRoot);
         if (rootLstat.isSymbolicLink()) {
             throw new Error(`Allowed root ${stagingRoot} cannot be a symbolic link`);
@@ -190,15 +248,19 @@ export async function stageHostApp(options = {}) {
         }
     }
 
-    if (harness && typeof harness.beforeRemovalHook === 'function') {
-        await harness.beforeRemovalHook();
+    if (harnessState && typeof harnessState.beforeRemovalHook === 'function') {
+        await harnessState.beforeRemovalHook();
+    }
+
+    if (typeof _testValidationHook === 'function') {
+        await _testValidationHook();
     }
 
     // Revalidate target immediately before removal
     validateStageTargetDir(stagedAppDir, stagingRoot);
 
-    if (harness) {
-        harness.removalSpyCount++;
+    if (harnessState) {
+        harnessState.removalSpyCount++;
     }
 
     if (fs.existsSync(stagedAppDir)) {
