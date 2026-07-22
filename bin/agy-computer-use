@@ -40,6 +40,13 @@ function validateMcpConfigStruct() {
   }
 
   const prodServer = mcpConfig.mcpServers["computer-use"];
+  const allowedServerKeys = new Set(["command", "args", "cwd", "disabled"]);
+  for (const key of Object.keys(prodServer)) {
+    if (!allowedServerKeys.has(key)) {
+      throw new Error(`Forbidden key '${key}' in computer-use server configuration`);
+    }
+  }
+
   if (prodServer.command !== "node") {
     throw new Error(`computer-use server command must be 'node'`);
   }
@@ -55,8 +62,6 @@ function validateMcpConfigStruct() {
 }
 
 async function verifyProductionMcpConfiguredStdio() {
-  validateMcpConfigStruct();
-
   const clientSdkPath = path.join(mcpPkgDir, "node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js");
   const stdioSdkPath = path.join(mcpPkgDir, "node_modules/@modelcontextprotocol/sdk/dist/esm/client/stdio.js");
 
@@ -78,21 +83,45 @@ async function verifyProductionMcpConfiguredStdio() {
     { capabilities: {} }
   );
 
-  await client.connect(transport);
-  const toolsResult = await client.listTools();
-  await client.close();
-  await transport.close();
-
-  if (!toolsResult || !toolsResult.tools || toolsResult.tools.length !== 2) {
-    throw new Error(`Public production MCP tool inventory count must be EXACTLY 2, got ${toolsResult?.tools?.length ?? 0}`);
+  let cleanupDone = false;
+  async function cleanup() {
+    if (cleanupDone) return;
+    cleanupDone = true;
+    try {
+      await client.close();
+    } catch {
+      try {
+        await transport.close();
+      } catch {}
+    }
   }
 
-  const toolNames = toolsResult.tools.map(t => t.name).sort();
-  if (toolNames[0] !== "computer_use_observe" || toolNames[1] !== "computer_use_status") {
-    throw new Error(`Production tool names must be ['computer_use_observe', 'computer_use_status'], got ${JSON.stringify(toolNames)}`);
-  }
+  try {
+    const connectPromise = client.connect(transport);
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("connect timeout after 5000ms")), 5000)
+    );
+    await Promise.race([connectPromise, timeoutPromise]);
 
-  return toolNames;
+    const listPromise = client.listTools();
+    const listTimeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("listTools timeout after 5000ms")), 5000)
+    );
+    const toolsResult = await Promise.race([listPromise, listTimeoutPromise]);
+
+    if (!toolsResult || !toolsResult.tools || toolsResult.tools.length !== 2) {
+      throw new Error(`Public production MCP tool inventory count must be EXACTLY 2, got ${toolsResult?.tools?.length ?? 0}`);
+    }
+
+    const toolNames = toolsResult.tools.map(t => t.name).sort();
+    if (toolNames[0] !== "computer_use_observe" || toolNames[1] !== "computer_use_status") {
+      throw new Error(`Production tool names must be ['computer_use_observe', 'computer_use_status'], got ${JSON.stringify(toolNames)}`);
+    }
+
+    return toolNames;
+  } finally {
+    await cleanup();
+  }
 }
 
 async function main() {

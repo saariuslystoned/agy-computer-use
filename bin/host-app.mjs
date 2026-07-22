@@ -43,7 +43,7 @@ export async function stageHostApp(options = {}) {
     const projectRoot = options.projectRoot || process.cwd();
     const root = path.resolve(projectRoot);
     const hostPackageDir = path.join(root, 'apps/computer-use-host');
-    
+
     let stagedAppDir;
     if (options.targetDir) {
         const testRoot = options.allowedTestRoot || options.testRoot;
