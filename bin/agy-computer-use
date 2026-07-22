@@ -140,10 +140,16 @@ async function main() {
 
     const selectionModulePath = path.join(mcpPkgDir, "dist/src/native-authority-selection.js");
     if (!fs.existsSync(selectionModulePath)) {
-      if (!fs.existsSync(path.join(rootDir, "node_modules")) && !fs.existsSync(path.join(mcpPkgDir, "node_modules"))) {
-        execSync(`pnpm --dir "${rootDir}" install --frozen-lockfile`, { env: process.env, stdio: "ignore" });
+      try {
+        if (!fs.existsSync(path.join(rootDir, "node_modules")) && !fs.existsSync(path.join(mcpPkgDir, "node_modules"))) {
+          execSync(`pnpm --dir "${rootDir}" install --frozen-lockfile`, { env: process.env, stdio: "pipe" });
+        }
+        execSync(`pnpm --dir "${mcpPkgDir}" run build`, { env: process.env, stdio: "pipe" });
+      } catch (err) {
+        const stderr = err.stderr ? err.stderr.toString() : "";
+        const stdout = err.stdout ? err.stdout.toString() : "";
+        fail(`Failed to build MCP selection module: ${err.message}\n${stdout}\n${stderr}`);
       }
-      execSync(`pnpm --dir "${mcpPkgDir}" build`, { env: process.env, stdio: "ignore" });
     }
 
     const { classifyNativeAuthoritySelection } = await import(pathToFileURL(selectionModulePath).href);
