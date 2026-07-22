@@ -128,7 +128,7 @@ public final class SocketListener: @unchecked Sendable {
             self.boundDirDev = dirStat.st_dev
             self.boundDirInode = dirStat.st_ino
 
-            lockFd = syscalls.openat(self.dirFd, "host.lock", O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0o600)
+            lockFd = syscalls.openat(self.dirFd, "host.lock", O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK, 0o600)
             guard lockFd >= 0 else {
                 throw ComputerUseError.ipcError(reason: "Failed to open or create host.lock file via runtime directory descriptor")
             }
@@ -289,8 +289,6 @@ public final class SocketListener: @unchecked Sendable {
                   (boundStat.st_mode & S_IFMT) == S_IFSOCK else {
                 throw ComputerUseError.ipcError(reason: "Bound socket state revalidation failed via fstatat")
             }
-            self.boundDev = boundStat.st_dev
-            self.boundInode = boundStat.st_ino
             boundDevForRollback = boundStat.st_dev
             boundInodeForRollback = boundStat.st_ino
 
@@ -315,6 +313,8 @@ public final class SocketListener: @unchecked Sendable {
                 throw ComputerUseError.ipcError(reason: "Failed to listen on socket at \(socketPath): errno \(err)")
             }
 
+            self.boundDev = boundStat.st_dev
+            self.boundInode = boundStat.st_ino
             isRunning = true
         } catch {
             if serverFd >= 0 {

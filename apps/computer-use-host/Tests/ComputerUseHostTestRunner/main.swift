@@ -40,16 +40,10 @@ public final class TestManualClock: HostClock, @unchecked Sendable {
     }
 }
 
-public enum WaiterState {
-    case registering
-    case pending(CheckedContinuation<Void, Error>)
-    case completed
-    case cancelledBeforeRegistration
-}
-
-public actor ManualSleeper: Sleeper {
+public final class ManualSleeper: Sleeper, @unchecked Sendable {
+    private let lock = NSLock()
     private var nextWaiterID: UInt64 = 0
-    private var waiters: [UInt64: WaiterState] = [:]
+    private var waiters: [UInt64: CheckedContinuation<Void, Error>] = [:]
     private var pendingOrder: [UInt64] = []
     private var armedWaiters: [Int: [CheckedContinuation<Void, Never>]] = [:]
     private var totalArmedCount: Int = 0
@@ -58,123 +52,119 @@ public actor ManualSleeper: Sleeper {
     public init() {}
 
     private func reserveID() -> UInt64 {
+        lock.lock(); defer { lock.unlock() }
         nextWaiterID += 1
-        let id = nextWaiterID
-        waiters[id] = .registering
-        return id
+        return nextWaiterID
     }
 
     public func sleep(nanoseconds: UInt64) async throws {
         try Task.checkCancellation()
-        let waiterID = self.reserveID()
 
-        try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                Task {
-                    self.registerOrResume(id: waiterID, continuation: continuation)
+        let id = reserveID()
+
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                lock.lock()
+                if Task.isCancelled {
+                    lock.unlock()
+                    continuation.resume(throwing: CancellationError())
+                    return
                 }
+                if self.bufferedAdvances > 0 {
+                    self.bufferedAdvances -= 1
+                    self.totalArmedCount += 1
+                    let armedToResume = self.collectArmedWaitersLocked()
+                    lock.unlock()
+                    for armed in armedToResume { armed.resume() }
+                    continuation.resume()
+                    return
+                }
+                self.waiters[id] = continuation
+                self.pendingOrder.append(id)
+                self.totalArmedCount += 1
+                let armedToResume = self.collectArmedWaitersLocked()
+                lock.unlock()
+                for armed in armedToResume { armed.resume() }
             }
         } onCancel: {
-            Task {
-                await self.cancel(id: waiterID)
-            }
-        }
-    }
-
-    private func registerOrResume(id: UInt64, continuation: CheckedContinuation<Void, Error>) {
-        guard let state = waiters[id] else {
-            continuation.resume(throwing: CancellationError())
-            return
-        }
-        switch state {
-        case .cancelledBeforeRegistration:
-            waiters.removeValue(forKey: id)
-            continuation.resume(throwing: CancellationError())
-        case .registering:
-            if bufferedAdvances > 0 {
-                bufferedAdvances -= 1
-                waiters[id] = .completed
-                totalArmedCount += 1
-                notifyArmedWaiters()
-                continuation.resume()
-                waiters.removeValue(forKey: id)
-            } else {
-                waiters[id] = .pending(continuation)
-                pendingOrder.append(id)
-                totalArmedCount += 1
-                notifyArmedWaiters()
-            }
-        case .pending, .completed:
-            break
+            self.cancel(id: id)
         }
     }
 
     public func cancel(id: UInt64) {
-        guard let state = waiters[id] else {
-            // Cancellation of a completed or unknown waiter is a no-op, never a new tombstone
-            return
-        }
-        switch state {
-        case .registering:
-            waiters[id] = .cancelledBeforeRegistration
-        case .pending(let continuation):
-            waiters.removeValue(forKey: id)
-            pendingOrder.removeAll { $0 == id }
-            continuation.resume(throwing: CancellationError())
-        case .completed, .cancelledBeforeRegistration:
-            break
-        }
+        lock.lock()
+        let cont = waiters.removeValue(forKey: id)
+        pendingOrder.removeAll { $0 == id }
+        lock.unlock()
+        cont?.resume(throwing: CancellationError())
     }
 
     public func advance() {
+        lock.lock()
         if pendingOrder.isEmpty {
             bufferedAdvances += 1
+            lock.unlock()
             return
         }
         let id = pendingOrder.removeFirst()
-        if case .pending(let continuation) = waiters[id] {
-            waiters[id] = .completed
-            continuation.resume()
-            waiters.removeValue(forKey: id)
-        }
+        let cont = waiters.removeValue(forKey: id)
+        lock.unlock()
+        cont?.resume()
     }
 
     public func advanceAll() {
-        let order = pendingOrder
+        lock.lock()
+        let continuations = pendingOrder.compactMap { waiters.removeValue(forKey: $0) }
         pendingOrder.removeAll()
-        for id in order {
-            if case .pending(let continuation) = waiters[id] {
-                waiters[id] = .completed
-                continuation.resume()
-                waiters.removeValue(forKey: id)
-            }
-        }
+        waiters.removeAll()
+        lock.unlock()
+        for cont in continuations { cont.resume() }
     }
 
     public func cancelAll() {
-        let keys = Array(waiters.keys)
-        for id in keys {
-            cancel(id: id)
-        }
+        lock.lock()
+        let continuations = Array(waiters.values)
+        waiters.removeAll()
+        pendingOrder.removeAll()
+        lock.unlock()
+        for cont in continuations { cont.resume(throwing: CancellationError()) }
+    }
+
+    public func isArmed(count: Int) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return totalArmedCount >= count
+    }
+
+    public func addArmedWaiter(count: Int, continuation: CheckedContinuation<Void, Never>) {
+        lock.lock(); defer { lock.unlock() }
+        armedWaiters[count, default: []].append(continuation)
     }
 
     public func waitUntilArmed(count: Int) async {
-        if totalArmedCount >= count {
+        if isArmed(count: count) {
             return
         }
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            armedWaiters[count, default: []].append(continuation)
+            addArmedWaiter(count: count, continuation: continuation)
         }
     }
 
-    private func notifyArmedWaiters() {
+    public func assertNoUnresolvedContinuations() {
+        lock.lock()
+        let pending = waiters.count
+        let armed = armedWaiters.values.reduce(0) { $0 + $1.count }
+        lock.unlock()
+        assertTrue(pending == 0 && armed == 0, "No unresolved continuations must remain in ManualSleeper")
+    }
+
+    private func collectArmedWaitersLocked() -> [CheckedContinuation<Void, Never>] {
         let currentCount = totalArmedCount
+        var toResume: [CheckedContinuation<Void, Never>] = []
         for (targetCount, waiters) in armedWaiters where currentCount >= targetCount {
             armedWaiters.removeValue(forKey: targetCount)
-            for waiter in waiters {
-                waiter.resume()
-            }
+            toResume.append(contentsOf: waiters)
         }
+        return toResume
     }
 }
 
@@ -1614,7 +1604,7 @@ public struct ComputerUseHostTestRunner {
         await controlledEngine.waitUntilRegistered(count: 1)
         await sleeper.waitUntilArmed(count: 1)
         manualClock.advance(by: .seconds(5))
-        await sleeper.advance()
+        sleeper.advance()
 
         let respA = await reqATask.value
         assertTrue(!respA.success)
@@ -1728,7 +1718,7 @@ public struct ComputerUseHostTestRunner {
         await controlledEngine.waitUntilRegistered(count: 1)
         await sleeper.waitUntilArmed(count: 1)
         manualClock.advance(by: .seconds(5))
-        await sleeper.advance()
+        sleeper.advance()
 
         let respA = await taskA.value
         assertTrue(!respA.success)
@@ -2327,13 +2317,14 @@ public struct ComputerUseHostTestRunner {
         let sleeper1 = ManualSleeper()
         let t1 = Task { try await sleeper1.sleep(nanoseconds: 100_000_000) }
         await sleeper1.waitUntilArmed(count: 1)
-        await sleeper1.advance()
+        sleeper1.advance()
         try await t1.value
 
         let t2 = Task { try await sleeper1.sleep(nanoseconds: 100_000_000) }
         await sleeper1.waitUntilArmed(count: 2)
-        await sleeper1.advance()
+        sleeper1.advance()
         try await t2.value
+        sleeper1.assertNoUnresolvedContinuations()
 
         // 2. Exactly one later timeout response under HostServer
         let controlledEngine = ControlledCaptureEngine()
@@ -2354,7 +2345,7 @@ public struct ComputerUseHostTestRunner {
         await controlledEngine.waitUntilRegistered(count: 1)
         await sleeper2.waitUntilArmed(count: 1)
         manualClock.advance(by: .seconds(2))
-        await sleeper2.advance()
+        sleeper2.advance()
         let resp1 = await reqTask1.value
         assertTrue(!resp1.success, "Scenario 2: First request must timeout")
         assertEqual(resp1.error?.code, "TIMEOUT")
@@ -2365,6 +2356,7 @@ public struct ComputerUseHostTestRunner {
         try await controlledEngine.complete(index: 1, with: .success(frame2))
         let resp2 = await reqTask2.value
         assertTrue(resp2.success, "Scenario 2: Second request must complete independently with status 0")
+        sleeper2.assertNoUnresolvedContinuations()
 
         // 3. Cancellation before registration
         let sleeper3 = ManualSleeper()
@@ -2376,6 +2368,7 @@ public struct ComputerUseHostTestRunner {
         var threwCancel3 = false
         do { try await t3.value } catch is CancellationError { threwCancel3 = true } catch {}
         assertTrue(threwCancel3, "Scenario 3: Cancellation before registration must throw CancellationError")
+        sleeper3.assertNoUnresolvedContinuations()
 
         // 4. Cancellation after registration
         let sleeper4 = ManualSleeper()
@@ -2385,10 +2378,11 @@ public struct ComputerUseHostTestRunner {
         var threwCancel4 = false
         do { try await t4.value } catch is CancellationError { threwCancel4 = true } catch {}
         assertTrue(threwCancel4, "Scenario 4: Cancellation after registration must throw CancellationError")
+        sleeper4.assertNoUnresolvedContinuations()
 
         // 5. Cancellation racing buffered advance
         let sleeper5 = ManualSleeper()
-        await sleeper5.advance() // Buffered advance = 1
+        sleeper5.advance() // Buffered advance = 1
         let t5 = Task {
             try Task.checkCancellation()
             try await sleeper5.sleep(nanoseconds: 100_000_000)
@@ -2397,6 +2391,7 @@ public struct ComputerUseHostTestRunner {
         var threwCancel5 = false
         do { try await t5.value } catch is CancellationError { threwCancel5 = true } catch {}
         assertTrue(threwCancel5, "Scenario 5: Cancellation racing buffered advance must throw CancellationError")
+        sleeper5.assertNoUnresolvedContinuations()
 
         // 6. Two-waiter isolation
         let sleeper6 = ManualSleeper()
@@ -2408,23 +2403,29 @@ public struct ComputerUseHostTestRunner {
         do { try await w1.value } catch is CancellationError { threwCancel6 = true } catch {}
         assertTrue(threwCancel6, "Scenario 6: Cancelled waiter 1 must throw CancellationError")
 
-        await sleeper6.advance()
+        sleeper6.advance()
         try await w2.value
+        sleeper6.assertNoUnresolvedContinuations()
 
-        // 7. Non-cancellation sleeper error propagation
+        // 7. Non-cancellation sleeper error propagation through HostServer production logic
         struct CustomSleeperError: Error, Equatable {}
         struct ThrowingSleeper: Sleeper {
             func sleep(nanoseconds: UInt64) async throws {
                 throw CustomSleeperError()
             }
         }
-        let throwingSleeper = ThrowingSleeper()
-        var threwCustomError = false
-        do {
-            try await throwingSleeper.sleep(nanoseconds: 100_000_000)
-        } catch is CustomSleeperError {
-            threwCustomError = true
-        } catch {}
-        assertTrue(threwCustomError, "Scenario 7: Non-cancellation sleeper error must propagate exact error")
+        let controlledEngine7 = ControlledCaptureEngine()
+        let throwingServer = HostServer(
+            authorizer: FakeScreenRecordingAuthorizer(granted: true),
+            topologyProvider: FakeDisplayTopologyProvider(),
+            captureEngine: controlledEngine7,
+            axEngine: DisabledAXInspector(),
+            inputEngine: DisabledInputInjector(),
+            observationTimeoutSec: 1.0,
+            sleeper: ThrowingSleeper()
+        )
+        let resp7 = await throwingServer.handleRequest(IPCRequest(id: "err-1", method: "observe"))
+        assertTrue(!resp7.success, "Scenario 7: Injected sleeper error must cause request failure")
+        assertEqual(resp7.error?.code, "HOST_ERROR", "Scenario 7: Error code must be HOST_ERROR")
     }
 }

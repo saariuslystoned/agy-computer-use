@@ -295,10 +295,8 @@ public actor SCScreenshotCaptureEngine: DisplayCaptureEngine {
             return nil
         }
 
-        for i in (eoiOffset + 2)..<data.count {
-            if data[i] != 0 {
-                return nil
-            }
+        guard eoiOffset + 2 == data.count else {
+            return nil
         }
 
         return dims
