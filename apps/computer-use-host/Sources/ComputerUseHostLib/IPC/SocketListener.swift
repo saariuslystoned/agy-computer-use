@@ -10,7 +10,7 @@ public final class SocketListener: @unchecked Sendable {
     private var serverFd: Int32 = -1
     private var lockFd: Int32 = -1
     private var dirFd: Int32 = -1
-    private var isRunning: Bool = false
+    public private(set) var isRunning: Bool = false
     public private(set) var responseAttemptCount = 0
     private var boundDev: dev_t = 0
     private var boundInode: ino_t = 0
@@ -592,58 +592,39 @@ public final class SocketListener: @unchecked Sendable {
         }
     }
 
+    public enum CleanupStepResult: Sendable, Equatable {
+        case notAttempted
+        case attempted(result: Int32, errno: Int32)
+    }
+
     public struct StopReport: Sendable, Equatable {
         public let listenerFd: Int32
         public let shutdownHow: Int32
-        public let shutdownResult: Int32
-        public let shutdownErrno: Int32
-        public let serverCloseResult: Int32
-        public let serverCloseErrno: Int32
-        public let socketUnlinked: Bool
-        public let unlinkResult: Int32
-        public let unlinkErrno: Int32
-        public let lockUnlocked: Bool
-        public let unlockResult: Int32
-        public let unlockErrno: Int32
-        public let lockCloseResult: Int32
-        public let lockCloseErrno: Int32
-        public let dirCloseResult: Int32
-        public let dirCloseErrno: Int32
+        public let shutdown: CleanupStepResult
+        public let serverClose: CleanupStepResult
+        public let socketUnlink: CleanupStepResult
+        public let lockUnlock: CleanupStepResult
+        public let lockClose: CleanupStepResult
+        public let dirClose: CleanupStepResult
 
         public init(
             listenerFd: Int32 = -1,
             shutdownHow: Int32 = SHUT_RDWR,
-            shutdownResult: Int32 = 0,
-            shutdownErrno: Int32 = 0,
-            serverCloseResult: Int32 = 0,
-            serverCloseErrno: Int32 = 0,
-            socketUnlinked: Bool = false,
-            unlinkResult: Int32 = 0,
-            unlinkErrno: Int32 = 0,
-            lockUnlocked: Bool = false,
-            unlockResult: Int32 = 0,
-            unlockErrno: Int32 = 0,
-            lockCloseResult: Int32 = 0,
-            lockCloseErrno: Int32 = 0,
-            dirCloseResult: Int32 = 0,
-            dirCloseErrno: Int32 = 0
+            shutdown: CleanupStepResult = .notAttempted,
+            serverClose: CleanupStepResult = .notAttempted,
+            socketUnlink: CleanupStepResult = .notAttempted,
+            lockUnlock: CleanupStepResult = .notAttempted,
+            lockClose: CleanupStepResult = .notAttempted,
+            dirClose: CleanupStepResult = .notAttempted
         ) {
             self.listenerFd = listenerFd
             self.shutdownHow = shutdownHow
-            self.shutdownResult = shutdownResult
-            self.shutdownErrno = shutdownErrno
-            self.serverCloseResult = serverCloseResult
-            self.serverCloseErrno = serverCloseErrno
-            self.socketUnlinked = socketUnlinked
-            self.unlinkResult = unlinkResult
-            self.unlinkErrno = unlinkErrno
-            self.lockUnlocked = lockUnlocked
-            self.unlockResult = unlockResult
-            self.unlockErrno = unlockErrno
-            self.lockCloseResult = lockCloseResult
-            self.lockCloseErrno = lockCloseErrno
-            self.dirCloseResult = dirCloseResult
-            self.dirCloseErrno = dirCloseErrno
+            self.shutdown = shutdown
+            self.serverClose = serverClose
+            self.socketUnlink = socketUnlink
+            self.lockUnlock = lockUnlock
+            self.lockClose = lockClose
+            self.dirClose = dirClose
         }
     }
 
@@ -657,69 +638,53 @@ public final class SocketListener: @unchecked Sendable {
         isRunning = false
 
         let origServerFd = serverFd
-        var shutRes: Int32 = 0
-        var shutErr: Int32 = 0
-        var closeRes: Int32 = 0
-        var closeErr: Int32 = 0
+        var shutStep: CleanupStepResult = .notAttempted
+        var serverCloseStep: CleanupStepResult = .notAttempted
 
         if serverFd >= 0 {
-            shutRes = syscalls.shutdown(serverFd, SHUT_RDWR)
-            if shutRes != 0 {
-                shutErr = syscalls.lastErrno
-            }
-            closeRes = syscalls.close(serverFd)
-            if closeRes != 0 {
-                closeErr = syscalls.lastErrno
-            }
+            let res = syscalls.shutdown(serverFd, SHUT_RDWR)
+            let err = (res != 0) ? syscalls.lastErrno : 0
+            shutStep = .attempted(result: res, errno: err)
+
+            let cRes = syscalls.close(serverFd)
+            let cErr = (cRes != 0) ? syscalls.lastErrno : 0
+            serverCloseStep = .attempted(result: cRes, errno: cErr)
             serverFd = -1
         }
 
         let socketFilename = (socketPath as NSString).lastPathComponent
-        var unlinked = false
-        var unlRes: Int32 = 0
-        var unlErr: Int32 = 0
+        var unlinkStep: CleanupStepResult = .notAttempted
 
         if dirFd >= 0 {
             var statBuf = stat()
             if syscalls.fstatat(dirFd, socketFilename, &statBuf, AT_SYMLINK_NOFOLLOW) == 0 {
                 if statBuf.st_dev == self.boundDev && statBuf.st_ino == self.boundInode && statBuf.st_uid == syscalls.getuid() && (statBuf.st_mode & S_IFMT) == S_IFSOCK {
-                    unlRes = syscalls.unlinkat(dirFd, socketFilename, 0)
-                    if unlRes != 0 {
-                        unlErr = syscalls.lastErrno
-                    } else {
-                        unlinked = true
-                    }
+                    let uRes = syscalls.unlinkat(dirFd, socketFilename, 0)
+                    let uErr = (uRes != 0) ? syscalls.lastErrno : 0
+                    unlinkStep = .attempted(result: uRes, errno: uErr)
                 }
             }
         }
 
-        var unlocked = false
-        var unlckRes: Int32 = 0
-        var unlckErr: Int32 = 0
-        var lockCloseRes: Int32 = 0
-        var lockCloseErr: Int32 = 0
+        var unlockStep: CleanupStepResult = .notAttempted
+        var lockCloseStep: CleanupStepResult = .notAttempted
 
         if lockFd >= 0 {
-            unlckRes = syscalls.fileFlock(lockFd, LOCK_UN)
-            if unlckRes != 0 {
-                unlckErr = syscalls.lastErrno
-            } else {
-                unlocked = true
-            }
-            lockCloseRes = syscalls.close(lockFd)
-            if lockCloseRes != 0 {
-                lockCloseErr = syscalls.lastErrno
-            }
+            let unlckRes = syscalls.fileFlock(lockFd, LOCK_UN)
+            let unlckErr = (unlckRes != 0) ? syscalls.lastErrno : 0
+            unlockStep = .attempted(result: unlckRes, errno: unlckErr)
+
+            let lCloseRes = syscalls.close(lockFd)
+            let lCloseErr = (lCloseRes != 0) ? syscalls.lastErrno : 0
+            lockCloseStep = .attempted(result: lCloseRes, errno: lCloseErr)
             lockFd = -1
         }
 
-        var dirCloseRes: Int32 = 0
-        var dirCloseErr: Int32 = 0
+        var dirCloseStep: CleanupStepResult = .notAttempted
         if dirFd >= 0 {
-            dirCloseRes = syscalls.close(dirFd)
-            if dirCloseRes != 0 {
-                dirCloseErr = syscalls.lastErrno
-            }
+            let dCloseRes = syscalls.close(dirFd)
+            let dCloseErr = (dCloseRes != 0) ? syscalls.lastErrno : 0
+            dirCloseStep = .attempted(result: dCloseRes, errno: dCloseErr)
             dirFd = -1
         }
 
@@ -730,20 +695,12 @@ public final class SocketListener: @unchecked Sendable {
         self.lastStopReport = StopReport(
             listenerFd: origServerFd,
             shutdownHow: SHUT_RDWR,
-            shutdownResult: shutRes,
-            shutdownErrno: shutErr,
-            serverCloseResult: closeRes,
-            serverCloseErrno: closeErr,
-            socketUnlinked: unlinked,
-            unlinkResult: unlRes,
-            unlinkErrno: unlErr,
-            lockUnlocked: unlocked,
-            unlockResult: unlckRes,
-            unlockErrno: unlckErr,
-            lockCloseResult: lockCloseRes,
-            lockCloseErrno: lockCloseErr,
-            dirCloseResult: dirCloseRes,
-            dirCloseErrno: dirCloseErr
+            shutdown: shutStep,
+            serverClose: serverCloseStep,
+            socketUnlink: unlinkStep,
+            lockUnlock: unlockStep,
+            lockClose: lockCloseStep,
+            dirClose: dirCloseStep
         )
     }
 }

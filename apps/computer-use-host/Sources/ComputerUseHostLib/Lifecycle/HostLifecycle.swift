@@ -1,15 +1,39 @@
 import Foundation
 import CagyPOSIX
 
+public protocol HostListener: Sendable {
+    func start() throws
+    func acceptAndHandleOneConnection() async throws -> Bool
+    func stop()
+}
+
+extension SocketListener: HostListener {}
+
+public enum LifecycleState: Sendable, Equatable {
+    case unstarted
+    case starting
+    case running
+    case stopRequested
+    case stopped
+}
+
 public final class HostLifecycle: @unchecked Sendable {
-    private let listener: SocketListener
+    private let listener: HostListener
     private let lock = NSLock()
-    private var isStopped = false
+    private var state: LifecycleState = .unstarted
     private var sigIntSource: (any DispatchSourceSignal)?
     private var sigTermSource: (any DispatchSourceSignal)?
+    private var startHook: (() -> Void)?
 
-    public init(listener: SocketListener) {
+    public init(listener: HostListener, startHook: (() -> Void)? = nil) {
         self.listener = listener
+        self.startHook = startHook
+    }
+
+    public var currentState: LifecycleState {
+        lock.lock()
+        defer { lock.unlock() }
+        return state
     }
 
     public func setupSignalHandlers() {
@@ -34,17 +58,41 @@ public final class HostLifecycle: @unchecked Sendable {
     }
 
     public func start() throws {
+        lock.lock()
+        guard state == .unstarted else {
+            lock.unlock()
+            return
+        }
+        state = .starting
+        lock.unlock()
+
         setupSignalHandlers()
+
+        startHook?()
+
         do {
             try listener.start()
         } catch {
             stop()
             throw error
         }
+
+        lock.lock()
+        if state == .stopRequested || state == .stopped {
+            state = .stopped
+            lock.unlock()
+            listener.stop()
+            cancelSignalSources()
+            return
+        }
+        state = .running
+        lock.unlock()
     }
 
     public func runAcceptLoop() async throws {
-        while !self.isStoppedState {
+        while true {
+            if self.isStoppedState { break }
+
             let handled = try await listener.acceptAndHandleOneConnection()
             if !handled {
                 if self.isStoppedState {
@@ -58,23 +106,32 @@ public final class HostLifecycle: @unchecked Sendable {
 
     public func stop() {
         lock.lock()
-        guard !isStopped else {
+        if state == .stopped {
             lock.unlock()
             return
         }
-        isStopped = true
+        if state == .starting {
+            state = .stopRequested
+            lock.unlock()
+            return
+        }
+        state = .stopped
         lock.unlock()
 
+        cancelSignalSources()
+        listener.stop()
+    }
+
+    private func cancelSignalSources() {
         sigIntSource?.cancel()
         sigTermSource?.cancel()
         sigIntSource = nil
         sigTermSource = nil
-        listener.stop()
     }
 
     public var isStoppedState: Bool {
         lock.lock()
         defer { lock.unlock() }
-        return isStopped
+        return state == .stopped || state == .stopRequested
     }
 }

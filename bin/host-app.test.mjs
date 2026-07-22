@@ -72,6 +72,56 @@ function waitForExit(proc, timeoutMs = 5000) {
     });
 }
 
+function spawnAndMonitor(binary, args = [], env = {}) {
+    const proc = spawn(binary, args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let exited = false;
+    let exitCode = null;
+    let exitErr = null;
+
+    const exitPromise = new Promise((resolve) => {
+        proc.on('exit', (code) => {
+            exited = true;
+            exitCode = code;
+            resolve(code);
+        });
+        proc.on('error', (err) => {
+            exited = true;
+            exitErr = err;
+            resolve(-1);
+        });
+    });
+
+    return { proc, exitPromise, isExited: () => exited, getExitCode: () => exitCode, getExitErr: () => exitErr };
+}
+
+async function waitForSocketOrExit(monitor, sockPath, timeoutMs = 5000) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+        if (monitor.isExited()) {
+            throw new Error(`Subprocess exited prematurely with code ${monitor.getExitCode()} before socket creation`);
+        }
+        if (fs.existsSync(sockPath)) {
+            return;
+        }
+        await new Promise(r => setTimeout(r, 50));
+    }
+    throw new Error(`Timed out waiting for socket creation at ${sockPath}`);
+}
+
+async function reapChild(monitor, timeoutMs = 5000) {
+    if (monitor.isExited()) {
+        return await monitor.exitPromise;
+    }
+    const killTimer = setTimeout(() => {
+        if (!monitor.isExited()) {
+            monitor.proc.kill('SIGKILL');
+        }
+    }, timeoutMs);
+    const code = await monitor.exitPromise;
+    clearTimeout(killTimer);
+    return code;
+}
+
 async function runBoundedSubprocessTest(stagedAppBinary, signalToTest) {
     const tmpDir = fs.mkdtempSync('/tmp/agy-host-smoke-');
     fs.chmodSync(tmpDir, 0o700);
@@ -82,49 +132,46 @@ async function runBoundedSubprocessTest(stagedAppBinary, signalToTest) {
     const sockPath = path.join(tmpDir, 'host.sock');
     const lockPath = path.join(tmpDir, 'host.lock');
 
-    let proc1 = null;
-    let proc2 = null;
+    let mon1 = null;
+    let mon2 = null;
 
     try {
-        proc1 = spawn(stagedAppBinary, [], {
-            env: { ...process.env, COMPUTER_USE_SOCKET_PATH: sockPath },
-            stdio: ['ignore', 'pipe', 'pipe']
-        });
+        const env = { ...process.env, COMPUTER_USE_SOCKET_PATH: sockPath };
+        mon1 = spawnAndMonitor(stagedAppBinary, [], env);
 
-        await waitForFile(sockPath, 5000);
+        await waitForSocketOrExit(mon1, sockPath, 5000);
         assert.equal(fs.existsSync(lockPath), true, 'host.lock file must exist after first launch');
-        const lockStat1 = fs.statSync(lockPath);
-        assert.equal(lockStat1.mode & 0o777, 0o600, 'host.lock file must have mode 0600');
-        const lockIno1 = lockStat1.ino;
+        const lockLstat1 = fs.lstatSync(lockPath);
+        assert.equal(lockLstat1.isFile(), true, 'host.lock must be a regular file');
+        assert.equal(lockLstat1.isSymbolicLink(), false, 'host.lock must NOT be a symbolic link');
+        assert.equal(lockLstat1.mode & 0o777, 0o600, 'host.lock file must have mode 0600');
+        const lockIno1 = lockLstat1.ino;
 
-        proc1.kill(signalToTest);
-        const exitCode1 = await waitForExit(proc1, 5000);
+        mon1.proc.kill(signalToTest);
+        const exitCode1 = await reapChild(mon1, 5000);
         assert.equal(exitCode1, 0, `Process 1 must exit 0 on ${signalToTest}`);
+        assert.equal(mon1.isExited(), true, 'Process 1 monitor must be marked exited');
         assert.equal(fs.existsSync(sockPath), false, 'Socket file must be unlinked after exit');
         assert.equal(fs.existsSync(lockPath), true, 'host.lock file is intentionally persistent and survives exit');
 
-        proc2 = spawn(stagedAppBinary, [], {
-            env: { ...process.env, COMPUTER_USE_SOCKET_PATH: sockPath },
-            stdio: ['ignore', 'pipe', 'pipe']
-        });
+        mon2 = spawnAndMonitor(stagedAppBinary, [], env);
 
-        await waitForFile(sockPath, 5000);
-        const lockStat2 = fs.statSync(lockPath);
-        assert.equal(lockStat2.mode & 0o777, 0o600, 'host.lock file must retain mode 0600 on second launch');
-        assert.equal(lockStat2.ino, lockIno1, 'host.lock file must retain exact inode across same-directory restart');
+        await waitForSocketOrExit(mon2, sockPath, 5000);
+        const lockLstat2 = fs.lstatSync(lockPath);
+        assert.equal(lockLstat2.isFile(), true, 'host.lock must retain regular file type on second launch');
+        assert.equal(lockLstat2.isSymbolicLink(), false, 'host.lock must NOT be a symbolic link on second launch');
+        assert.equal(lockLstat2.mode & 0o777, 0o600, 'host.lock file must retain mode 0600 on second launch');
+        assert.equal(lockLstat2.ino, lockIno1, 'host.lock file must retain exact inode across same-directory restart');
 
-        proc2.kill(signalToTest);
-        const exitCode2 = await waitForExit(proc2, 5000);
+        mon2.proc.kill(signalToTest);
+        const exitCode2 = await reapChild(mon2, 5000);
         assert.equal(exitCode2, 0, `Process 2 must exit 0 on ${signalToTest}`);
+        assert.equal(mon2.isExited(), true, 'Process 2 monitor must be marked exited');
         assert.equal(fs.existsSync(sockPath), false, 'Socket file must be unlinked after second exit');
         assert.equal(fs.existsSync(lockPath), true, 'host.lock file survives second exit');
     } finally {
-        if (proc1 && proc1.exitCode === null) {
-            proc1.kill('SIGKILL');
-        }
-        if (proc2 && proc2.exitCode === null) {
-            proc2.kill('SIGKILL');
-        }
+        if (mon1) await reapChild(mon1, 1000);
+        if (mon2) await reapChild(mon2, 1000);
         fs.rmSync(tmpDir, { recursive: true, force: true });
     }
 }
@@ -305,5 +352,59 @@ test('RL-3: Bounded real subprocess smoke tests for SIGTERM and SIGINT', async (
 
     await t.test('Subprocess handles SIGINT cleanly, unlinks socket, preserves lock file and inode, and permits second bind', async () => {
         await runBoundedSubprocessTest(stagedAppBinary, 'SIGINT');
+    });
+});
+
+test('A-L3: Bounded supervisor unit tests for spawn error, early exit, timeout, SIGKILL escalation, and idempotent cleanup', async (t) => {
+    await t.test('1. Early exit before socket creation is detected cleanly', async () => {
+        const mon = spawnAndMonitor('/usr/bin/false', [], {});
+        await assert.rejects(
+            async () => await waitForSocketOrExit(mon, '/tmp/nonexistent.sock', 1000),
+            /exited prematurely with code 1/
+        );
+        const code = await reapChild(mon, 1000);
+        assert.equal(code, 1);
+    });
+
+    await t.test('2. Non-existent binary spawn error is captured cleanly', async () => {
+        const mon = spawnAndMonitor('/tmp/nonexistent-binary-path-12345', [], {});
+        await assert.rejects(
+            async () => await waitForSocketOrExit(mon, '/tmp/nonexistent.sock', 1000),
+            /exited prematurely/
+        );
+        const code = await reapChild(mon, 1000);
+        assert.equal(code, -1);
+    });
+
+    await t.test('3. Bounded readiness timeout triggers when socket never appears', async () => {
+        const mon = spawnAndMonitor('/bin/sleep', ['10'], {});
+        try {
+            await assert.rejects(
+                async () => await waitForSocketOrExit(mon, '/tmp/nonexistent.sock', 200),
+                /Timed out waiting for socket creation/
+            );
+        } finally {
+            mon.proc.kill('SIGKILL');
+            await reapChild(mon, 1000);
+        }
+    });
+
+    await t.test('4. Graceful termination escalation to SIGKILL if process ignores SIGTERM', async () => {
+        const mon = spawnAndMonitor(process.execPath, ['-e', 'process.on("SIGTERM", ()=>{}); setInterval(()=>{}, 1000)'], {});
+        await new Promise(r => setTimeout(r, 100));
+        mon.proc.kill('SIGTERM');
+        const start = Date.now();
+        const code = await reapChild(mon, 200);
+        const elapsed = Date.now() - start;
+        assert.ok(elapsed >= 150, `Must wait for grace period before SIGKILL, got ${elapsed}ms`);
+        assert.ok(mon.isExited());
+    });
+
+    await t.test('5. Idempotent child reaping handles already exited process without error', async () => {
+        const mon = spawnAndMonitor('/usr/bin/true', [], {});
+        const code1 = await reapChild(mon, 1000);
+        assert.equal(code1, 0);
+        const code2 = await reapChild(mon, 1000);
+        assert.equal(code2, 0);
     });
 });

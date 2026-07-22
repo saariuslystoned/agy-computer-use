@@ -5322,11 +5322,37 @@ public struct ComputerUseHostTestRunner {
         try listener39_fail.start()
         listener39_fail.stop()
 
-        assertEqual(listener39_fail.lastStopReport?.shutdownResult, -1, "Injected shutdown failure must be reflected in stop report")
-        assertEqual(listener39_fail.lastStopReport?.shutdownErrno, EIO, "Injected shutdown errno EIO must be captured")
-        assertTrue(listener39_fail.lastStopReport?.socketUnlinked == true, "Socket unlinking must succeed even when shutdown reports error")
-        assertTrue(listener39_fail.lastStopReport?.lockUnlocked == true, "Lock unlocking must succeed even when shutdown reports error")
+        assertEqual(listener39_fail.lastStopReport?.shutdown, .attempted(result: -1, errno: EIO), "Injected shutdown failure must be reflected in stop report")
+        assertTrue(listener39_fail.lastStopReport?.socketUnlink == .attempted(result: 0, errno: 0), "Socket unlinking must succeed even when shutdown reports error")
+        assertTrue(listener39_fail.lastStopReport?.lockUnlock == .attempted(result: 0, errno: 0), "Lock unlocking must succeed even when shutdown reports error")
         assertTrue(scripted39_fail.areAllDescriptorsClosed, "All descriptors must be closed even when shutdown fails")
+
+        // Test signal-during-start: stop called while state is starting prevents listener running state
+        let scripted39_startSignal = ScriptedPOSIXSyscalls()
+        let sockPath39_startSignal = "/tmp/agy-test-c39s-\(UUID().uuidString)/host.sock"
+        try SocketListener.prepareDirectory(at: sockPath39_startSignal, syscalls: scripted39_startSignal)
+
+        let listener39_startSignal = SocketListener(
+            socketPath: sockPath39_startSignal,
+            server: HostServer(
+                authorizer: FakeScreenRecordingAuthorizer(granted: true),
+                topologyProvider: FakeDisplayTopologyProvider(),
+                captureEngine: FakeCaptureEngine(),
+                axEngine: DisabledAXInspector(),
+                inputEngine: DisabledInputInjector()
+            ),
+            syscalls: scripted39_startSignal
+        )
+
+        var lifecycle39_startSignal: HostLifecycle!
+        lifecycle39_startSignal = HostLifecycle(listener: listener39_startSignal, startHook: {
+            lifecycle39_startSignal.stop()
+        })
+
+        try lifecycle39_startSignal.start()
+        assertEqual(lifecycle39_startSignal.currentState, .stopped, "Signal during start must leave lifecycle in stopped state")
+        assertTrue(!listener39_startSignal.isRunning, "Signal during start must stop listener before start returns")
+        assertTrue(scripted39_startSignal.areAllDescriptorsClosed, "All descriptors closed after signal-during-start")
 
         // Second bind on clean path must succeed
         let listener39b = SocketListener(
