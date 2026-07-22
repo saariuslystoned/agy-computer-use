@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn, execFileSync } from 'node:child_process';
-import { stageHostApp, classifyPrincipal, parseAndClassifyPrincipal } from './host-app.mjs';
+import { stageHostApp, classifyPrincipal, parseAndClassifyPrincipal, validateStageTargetDir } from './host-app.mjs';
 
 function computeTreeDigest(dirPath) {
     const entries = [];
@@ -146,13 +146,13 @@ test('RP-1: Discriminator: host-principal argument handling prevents shell injec
     assert.ok(stdout.includes('unsigned_or_invalid'), 'Must report unsigned_or_invalid for non-existent path');
 });
 
-test('RP-2: Pure classifier authority for principal states', async (t) => {
+test('RP-2: Pure classifier authority for 13 principal states', async (t) => {
     await t.test('1. Verification failed -> unsigned_or_invalid', () => {
         const res = parseAndClassifyPrincipal('Identifier=com.saariuslystoned.agy-computer-use.host\nSignature=adhoc', '', false);
         assert.equal(res.classification, 'unsigned_or_invalid');
     });
 
-    await t.test('2. Valid ad-hoc -> ad_hoc_ephemeral', () => {
+    await t.test('2. Exact valid ad-hoc -> ad_hoc_ephemeral', () => {
         const codesignOutput = 'Identifier=com.saariuslystoned.agy-computer-use.host\nSignature=adhoc\nTeamIdentifier=not set\nAuthority=adhoc';
         const res = parseAndClassifyPrincipal(codesignOutput, '', true);
         assert.equal(res.classification, 'ad_hoc_ephemeral');
@@ -160,7 +160,7 @@ test('RP-2: Pure classifier authority for principal states', async (t) => {
         assert.equal(res.teamId, null);
     });
 
-    await t.test('3. Valid non-ad-hoc team candidate -> stable_team_signed_candidate', () => {
+    await t.test('3. Exact valid team candidate -> stable_team_signed_candidate', () => {
         const codesignOutput = 'Identifier=com.saariuslystoned.agy-computer-use.host\nSignature=signed\nTeamIdentifier=TEAM123456\nAuthority=Developer ID Application: Test (TEAM123456)';
         const reqOutput = 'designated => identifier "com.saariuslystoned.agy-computer-use.host" and anchor apple generic and certificate leaf[subject.OU] = "TEAM123456"';
         const res = parseAndClassifyPrincipal(codesignOutput, reqOutput, true);
@@ -169,26 +169,65 @@ test('RP-2: Pure classifier authority for principal states', async (t) => {
         assert.equal(res.teamId, 'TEAM123456');
     });
 
-    await t.test('4. Identifier mismatch -> unsigned_or_invalid', () => {
+    await t.test('4. Wrong bundle ID -> unsigned_or_invalid', () => {
         const codesignOutput = 'Identifier=com.wrong.bundle\nSignature=adhoc\nTeamIdentifier=not set';
         const res = parseAndClassifyPrincipal(codesignOutput, '', true);
         assert.equal(res.classification, 'unsigned_or_invalid');
     });
 
-    await t.test('5. Non-ad-hoc missing designated requirement -> unsigned_or_invalid', () => {
+    await t.test('5. Missing signature line -> unsigned_or_invalid', () => {
+        const codesignOutput = 'Identifier=com.saariuslystoned.agy-computer-use.host\nTeamIdentifier=TEAM123456';
+        const res = parseAndClassifyPrincipal(codesignOutput, '', true);
+        assert.equal(res.classification, 'unsigned_or_invalid');
+    });
+
+    await t.test('6. Malformed signature -> unsigned_or_invalid', () => {
+        const codesignOutput = 'Identifier=com.saariuslystoned.agy-computer-use.host\nSignature=CORRUPT_SIG\nTeamIdentifier=TEAM123456';
+        const res = parseAndClassifyPrincipal(codesignOutput, '', true);
+        assert.equal(res.classification, 'unsigned_or_invalid');
+    });
+
+    await t.test('7. Missing TeamIdentifier on non-ad-hoc -> unsigned_or_invalid', () => {
+        const codesignOutput = 'Identifier=com.saariuslystoned.agy-computer-use.host\nSignature=signed\nAuthority=Developer ID Application: Test';
+        const res = parseAndClassifyPrincipal(codesignOutput, '', true);
+        assert.equal(res.classification, 'unsigned_or_invalid');
+    });
+
+    await t.test('8. Missing designated requirement -> unsigned_or_invalid', () => {
         const codesignOutput = 'Identifier=com.saariuslystoned.agy-computer-use.host\nSignature=signed\nTeamIdentifier=TEAM123456\nAuthority=Developer ID Application: Test (TEAM123456)';
         const res = parseAndClassifyPrincipal(codesignOutput, '', true);
         assert.equal(res.classification, 'unsigned_or_invalid');
     });
 
-    await t.test('6. Non-ad-hoc designated requirement for wrong team -> unsigned_or_invalid', () => {
+    await t.test('9. Wrong identifier requirement -> unsigned_or_invalid', () => {
         const codesignOutput = 'Identifier=com.saariuslystoned.agy-computer-use.host\nSignature=signed\nTeamIdentifier=TEAM123456\nAuthority=Developer ID Application: Test (TEAM123456)';
-        const reqOutput = 'designated => identifier "com.saariuslystoned.agy-computer-use.host" and anchor apple generic and certificate leaf[subject.OU] = "OTHERTEAM"';
+        const reqOutput = 'designated => identifier "com.other.app" and certificate leaf[subject.OU] = "TEAM123456"';
         const res = parseAndClassifyPrincipal(codesignOutput, reqOutput, true);
         assert.equal(res.classification, 'unsigned_or_invalid');
     });
 
-    await t.test('7. --require-stable on ad-hoc -> ad_hoc_ephemeral with error', () => {
+    await t.test('10. Wrong team requirement -> unsigned_or_invalid', () => {
+        const codesignOutput = 'Identifier=com.saariuslystoned.agy-computer-use.host\nSignature=signed\nTeamIdentifier=TEAM123456\nAuthority=Developer ID Application: Test (TEAM123456)';
+        const reqOutput = 'designated => identifier "com.saariuslystoned.agy-computer-use.host" and certificate leaf[subject.OU] = "OTHERTEAM"';
+        const res = parseAndClassifyPrincipal(codesignOutput, reqOutput, true);
+        assert.equal(res.classification, 'unsigned_or_invalid');
+    });
+
+    await t.test('11. Alternate/OR requirement -> unsigned_or_invalid', () => {
+        const codesignOutput = 'Identifier=com.saariuslystoned.agy-computer-use.host\nSignature=signed\nTeamIdentifier=TEAM123456\nAuthority=Developer ID Application: Test (TEAM123456)';
+        const reqOutput = 'designated => identifier "com.saariuslystoned.agy-computer-use.host" or certificate leaf[subject.OU] = "TEAM123456"';
+        const res = parseAndClassifyPrincipal(codesignOutput, reqOutput, true);
+        assert.equal(res.classification, 'unsigned_or_invalid');
+    });
+
+    await t.test('12. Contradictory/duplicate requirement predicates -> unsigned_or_invalid', () => {
+        const codesignOutput = 'Identifier=com.saariuslystoned.agy-computer-use.host\nSignature=signed\nTeamIdentifier=TEAM123456\nAuthority=Developer ID Application: Test (TEAM123456)';
+        const reqOutput = 'designated => identifier "com.saariuslystoned.agy-computer-use.host" and identifier "com.other.app" and certificate leaf[subject.OU] = "TEAM123456"';
+        const res = parseAndClassifyPrincipal(codesignOutput, reqOutput, true);
+        assert.equal(res.classification, 'unsigned_or_invalid');
+    });
+
+    await t.test('13. --require-stable on ad-hoc -> ad_hoc_ephemeral with error', () => {
         const codesignOutput = 'Identifier=com.saariuslystoned.agy-computer-use.host\nSignature=adhoc\nTeamIdentifier=not set';
         const res = parseAndClassifyPrincipal(codesignOutput, '', true, { requireStable: true });
         assert.equal(res.classification, 'ad_hoc_ephemeral');
@@ -196,14 +235,34 @@ test('RP-2: Pure classifier authority for principal states', async (t) => {
     });
 });
 
+test('E2-P2: Component-aware stage target directory validation discriminators', () => {
+    const testRoot = fs.mkdtempSync('/tmp/agy-target-val-');
+    try {
+        // 1. Equal root rejection
+        assert.throws(() => validateStageTargetDir(testRoot, testRoot), /cannot be equal to allowed root/);
+
+        // 2. Sibling prefix rejection (/tmp/agy-target-val-sibling vs /tmp/agy-target-val-)
+        const siblingDir = testRoot + '-sibling';
+        assert.throws(() => validateStageTargetDir(siblingDir, testRoot), /not strictly contained within allowed root/);
+
+        // 3. Parent traversal escape rejection
+        const traversalDir = path.join(testRoot, '../outside');
+        assert.throws(() => validateStageTargetDir(traversalDir, testRoot), /not strictly contained within allowed root/);
+
+        // 4. Valid nested target passes
+        const validSubdir = path.join(testRoot, 'sub/target.app');
+        assert.equal(validateStageTargetDir(validSubdir, testRoot), path.resolve(validSubdir));
+    } finally {
+        fs.rmSync(testRoot, { recursive: true, force: true });
+    }
+});
+
 test('RP-3: Prove deterministic restaging of one built input', async () => {
-    // 1. Initial build and stage
     const initialStage = await stageHostApp({ build: true });
     assert.equal(initialStage.success, true);
     const initialBinaryHash = crypto.createHash('sha256').update(fs.readFileSync(initialStage.binaryPath)).digest('hex');
     const initialPlistHash = crypto.createHash('sha256').update(fs.readFileSync(initialStage.infoPlistPath)).digest('hex');
 
-    // 2. Stage from existing built input without rebuilding
     const stage1 = await stageHostApp({ build: false });
     const digest1 = computeTreeDigest(stage1.appPath);
     const binaryHash1 = crypto.createHash('sha256').update(fs.readFileSync(stage1.binaryPath)).digest('hex');
@@ -213,7 +272,6 @@ test('RP-3: Prove deterministic restaging of one built input', async () => {
     assert.equal(plistHash1, initialPlistHash, 'Plist hash must match built input');
     assert.equal(fs.statSync(stage1.binaryPath).mode & 0o777, 0o755, 'Executable mode must be 0755');
 
-    // 3. Stage second time from existing built input
     const stage2 = await stageHostApp({ build: false });
     const digest2 = computeTreeDigest(stage2.appPath);
 

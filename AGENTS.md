@@ -5,7 +5,7 @@ This repository defines the production architecture, protocol specifications, Sw
 
 ## Depth & Quality Standards
 - **Production Architecture & Bounded Contracts**: Screen capture, AX DOM extraction, coordinate normalization, and input synthesis are bound by strict schemas, error handling, depth limits, and security redaction rules.
-- **Native OS Integration & Security Principal**: A signed background macOS app (`ComputerUseHost.app`) serves as the single TCC principal for Screen Recording and Accessibility permissions. The MCP server connects to the host over a local Unix domain socket in an owner-only runtime directory (`chmod 0700`).
+- **Native OS Integration & Security Principal**: A staged background macOS app (`ComputerUseHost.app`, currently staged as an `ad_hoc_ephemeral` bundle) serves as the TCC principal for Screen Recording and Accessibility permissions. A future non-ad-hoc team-signed candidate may become the durable TCC principal only after separately gated signing, installation, launch, and TCC proof. The MCP server connects to the host over a local Unix domain socket in an owner-only runtime directory (`chmod 0700`).
 - **Antigravity Tooling**: Exposes clean MCP server tools (`computer_use_status`, `computer_use_observe`) alongside skill definitions compatible with Google Antigravity / Gemini 3.6 Flash in Milestone D2.
 
 ## Execution Rules & Safety Policy
@@ -46,5 +46,5 @@ This repository defines the production architecture, protocol specifications, Sw
 ## Agent Build & Verification Workflow
 1. Run authoritative native Swift test authority (`./bin/agy-computer-use test-native`).
 2. Run TypeScript MCP server checks and unit/integration tests (`pnpm check` and `pnpm test` in `mcp/computer-use-mcp`).
-3. Run offline readiness validation (`./bin/agy-computer-use canary-ready`).
+3. Run production readiness validation (`./bin/agy-computer-use production-ready`; `canary-ready` is a compatibility alias).
 4. Document test output and verification summary in `proof/d2_verification.md`.

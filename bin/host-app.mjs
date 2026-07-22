@@ -7,17 +7,54 @@ import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 
+export function validateStageTargetDir(targetDir, allowedRoot) {
+    const resolvedTarget = path.resolve(targetDir);
+    const resolvedRoot = path.resolve(allowedRoot);
+
+    if (resolvedTarget === resolvedRoot) {
+        throw new Error(`Target directory ${resolvedTarget} cannot be equal to allowed root ${resolvedRoot}`);
+    }
+
+    const rel = path.relative(resolvedRoot, resolvedTarget);
+    if (rel.startsWith('..') || path.isAbsolute(rel) || rel === '') {
+        throw new Error(`Target directory ${resolvedTarget} is not strictly contained within allowed root ${resolvedRoot}`);
+    }
+
+    let curr = resolvedRoot;
+    const parts = rel.split(path.sep);
+    for (const part of parts) {
+        curr = path.join(curr, part);
+        if (fs.existsSync(curr)) {
+            const lstat = fs.lstatSync(curr);
+            if (lstat.isSymbolicLink()) {
+                const real = fs.realpathSync(curr);
+                const realRel = path.relative(resolvedRoot, real);
+                if (realRel.startsWith('..') || path.isAbsolute(realRel)) {
+                    throw new Error(`Target directory ${resolvedTarget} traverses symlink ${curr} pointing outside allowed root ${resolvedRoot}`);
+                }
+            }
+        }
+    }
+
+    return resolvedTarget;
+}
+
 export async function stageHostApp(options = {}) {
     const projectRoot = options.projectRoot || process.cwd();
     const root = path.resolve(projectRoot);
     const hostPackageDir = path.join(root, 'apps/computer-use-host');
-    const stagedAppDir = options.targetDir ? path.resolve(options.targetDir) : path.join(hostPackageDir, '.build/staged/ComputerUseHost.app');
-
-    // Validate target destination path to prevent arbitrary recursive deletion
-    const allowedParent1 = path.resolve(hostPackageDir);
-    const allowedParent2 = path.resolve(os.tmpdir());
-    if (!stagedAppDir.startsWith(allowedParent1) && !stagedAppDir.startsWith(allowedParent2)) {
-        throw new Error(`Invalid stage target directory ${stagedAppDir}: must be inside ${allowedParent1} or ${allowedParent2}`);
+    
+    let stagedAppDir;
+    if (options.targetDir) {
+        const testRoot = options.allowedTestRoot || options.testRoot;
+        if (!testRoot) {
+            throw new Error(`Test-injected targetDir ${options.targetDir} requires explicit allowedTestRoot option`);
+        }
+        stagedAppDir = validateStageTargetDir(options.targetDir, testRoot);
+    } else {
+        const defaultStagingRoot = path.join(hostPackageDir, '.build/staged');
+        stagedAppDir = path.join(defaultStagingRoot, 'ComputerUseHost.app');
+        validateStageTargetDir(stagedAppDir, defaultStagingRoot);
     }
 
     const contentsDir = path.join(stagedAppDir, 'Contents');
@@ -74,18 +111,35 @@ export function parseAndClassifyPrincipal(codesignInfo, reqInfo, verificationPas
         return { classification: 'unsigned_or_invalid', details: 'Codesign verification failed' };
     }
 
-    const identifierMatch = (codesignInfo || '').match(/^Identifier=(.+)$/m);
-    const signatureMatch = (codesignInfo || '').match(/^Signature=(.+)$/m);
-    const teamIdMatch = (codesignInfo || '').match(/^TeamIdentifier=(.+)$/m);
-    const authorityMatch = (codesignInfo || '').match(/^Authority=(.+)$/m);
+    const infoLines = (codesignInfo || '').split('\n').map(l => l.trim());
+    let identifier = null;
+    let signature = null;
+    let teamId = null;
+    let authority = null;
+    let hasContradictoryMeta = false;
 
-    const identifier = identifierMatch ? identifierMatch[1].trim() : null;
-    const signature = signatureMatch ? signatureMatch[1].trim() : null;
-    const teamId = teamIdMatch ? teamIdMatch[1].trim() : null;
-    const authority = authorityMatch ? authorityMatch[1].trim() : null;
+    for (const line of infoLines) {
+        if (line.startsWith('Identifier=')) {
+            if (identifier !== null && identifier !== line.slice(11).trim()) hasContradictoryMeta = true;
+            identifier = line.slice(11).trim();
+        } else if (line.startsWith('Signature=')) {
+            if (signature !== null && signature !== line.slice(10).trim()) hasContradictoryMeta = true;
+            signature = line.slice(10).trim();
+        } else if (line.startsWith('TeamIdentifier=')) {
+            if (teamId !== null && teamId !== line.slice(15).trim()) hasContradictoryMeta = true;
+            teamId = line.slice(15).trim();
+        } else if (line.startsWith('Authority=')) {
+            if (authority !== null && authority !== line.slice(10).trim()) hasContradictoryMeta = true;
+            authority = line.slice(10).trim();
+        }
+    }
+
+    if (hasContradictoryMeta) {
+        return { classification: 'unsigned_or_invalid', details: 'Contradictory signature metadata' };
+    }
 
     const expectedIdentifier = 'com.saariuslystoned.agy-computer-use.host';
-    if (identifier !== expectedIdentifier) {
+    if (!identifier || identifier !== expectedIdentifier) {
         return {
             classification: 'unsigned_or_invalid',
             identifier,
@@ -94,11 +148,10 @@ export function parseAndClassifyPrincipal(codesignInfo, reqInfo, verificationPas
         };
     }
 
-    const isAdHoc = (signature === 'adhoc') ||
-        (authority && authority.includes('adhoc')) ||
-        (!teamId || teamId === 'not set');
+    const isExplicitAdHocSignature = (signature === 'adhoc') || (authority === 'adhoc') || (authority && authority.includes('adhoc'));
+    const isTeamNotSet = (teamId === 'not set');
 
-    if (isAdHoc) {
+    if (isExplicitAdHocSignature && (isTeamNotSet || teamId === null)) {
         if (options.requireStable) {
             return {
                 classification: 'ad_hoc_ephemeral',
@@ -115,13 +168,37 @@ export function parseAndClassifyPrincipal(codesignInfo, reqInfo, verificationPas
         };
     }
 
-    const hasTeamId = Boolean(teamId && teamId !== 'not set');
-    const reqStr = reqInfo || '';
-    const hasDesignatedReq = reqStr.includes('designated =>') &&
-        reqStr.includes(`identifier "${expectedIdentifier}"`) &&
-        reqStr.includes(`certificate leaf[subject.OU] = "${teamId}"`);
+    if (!teamId || teamId === 'not set') {
+        return {
+            classification: 'unsigned_or_invalid',
+            identifier,
+            teamId: null,
+            details: 'Non-ad-hoc signature missing valid TeamIdentifier'
+        };
+    }
 
-    if (hasTeamId && hasDesignatedReq) {
+    const reqStr = (reqInfo || '').trim();
+    if (!reqStr.includes('designated =>')) {
+        return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Missing designated requirement' };
+    }
+
+    const designatedBody = reqStr.split('designated =>')[1].trim();
+
+    if (/\bor\b/i.test(designatedBody) || designatedBody.includes('||')) {
+        return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Disallowed OR or alternate clauses in designated requirement' };
+    }
+
+    const hasExactId = designatedBody.includes(`identifier "${expectedIdentifier}"`);
+    const hasExactTeam = designatedBody.includes(`certificate leaf[subject.OU] = "${teamId}"`);
+
+    const idMatches = designatedBody.match(/identifier\s+"([^"]+)"/g) || [];
+    const teamMatches = designatedBody.match(/certificate\s+leaf\[subject\.OU\]\s*=\s*"([^"]+)"/g) || [];
+
+    if (idMatches.length !== 1 || teamMatches.length !== 1) {
+        return { classification: 'unsigned_or_invalid', identifier, teamId, details: 'Duplicate or contradictory requirement predicates' };
+    }
+
+    if (hasExactId && hasExactTeam) {
         return {
             classification: 'stable_team_signed_candidate',
             identifier,

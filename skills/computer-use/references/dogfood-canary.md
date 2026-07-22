@@ -1,4 +1,7 @@
-# Dogfood Canary Reference (`v0.1.0-dogfood-d1`)
+# Dogfood Canary Reference (`v0.1.0-dogfood-d1`) [HISTORICAL & INACTIVE]
+
+> [!NOTE]
+> **Historical D1 Reference**: This reference describes the D1 test harness canary. In Milestone D2 and Phase E, the active `.agents/mcp_config.json` configuration is production-only with exactly one `computer-use` server (`computer_use_observe` and `computer_use_status`). This canary reference is historical and inactive.
 
 ## Test Harness Canary vs Production Host
 
