@@ -1,5 +1,6 @@
 import Foundation
 import CoreGraphics
+import ImageIO
 import ComputerUseHostLib
 
 private final class AtomicCounter: @unchecked Sendable {
@@ -35,29 +36,39 @@ public final class TestManualClock: HostClock, @unchecked Sendable {
     }
 }
 
+public enum WaiterState {
+    case registering
+    case pending(CheckedContinuation<Void, Error>)
+    case completed
+    case cancelledBeforeRegistration
+}
+
 public actor ManualSleeper: Sleeper {
     private var nextWaiterID: UInt64 = 0
-    private var pending: [UInt64: CheckedContinuation<Void, Error>] = [:]
+    private var waiters: [UInt64: WaiterState] = [:]
     private var pendingOrder: [UInt64] = []
-    private var cancelledIDs: Set<UInt64> = []
     private var armedWaiters: [Int: [CheckedContinuation<Void, Never>]] = [:]
     private var totalArmedCount: Int = 0
     private var bufferedAdvances: Int = 0
 
     public init() {}
 
-    private func generateID() -> UInt64 {
+    private func reserveID() -> UInt64 {
         nextWaiterID += 1
-        return nextWaiterID
+        let id = nextWaiterID
+        waiters[id] = .registering
+        return id
     }
 
     public func sleep(nanoseconds: UInt64) async throws {
         try Task.checkCancellation()
-        let waiterID = self.generateID()
+        let waiterID = self.reserveID()
 
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                self.registerOrResume(id: waiterID, continuation: continuation)
+                Task {
+                    self.registerOrResume(id: waiterID, continuation: continuation)
+                }
             }
         } onCancel: {
             Task {
@@ -67,30 +78,47 @@ public actor ManualSleeper: Sleeper {
     }
 
     private func registerOrResume(id: UInt64, continuation: CheckedContinuation<Void, Error>) {
-        if cancelledIDs.contains(id) {
-            cancelledIDs.remove(id)
+        guard let state = waiters[id] else {
             continuation.resume(throwing: CancellationError())
             return
         }
-        if bufferedAdvances > 0 {
-            bufferedAdvances -= 1
-            totalArmedCount += 1
-            notifyArmedWaiters()
-            continuation.resume()
-            return
+        switch state {
+        case .cancelledBeforeRegistration:
+            waiters.removeValue(forKey: id)
+            continuation.resume(throwing: CancellationError())
+        case .registering:
+            if bufferedAdvances > 0 {
+                bufferedAdvances -= 1
+                waiters[id] = .completed
+                totalArmedCount += 1
+                notifyArmedWaiters()
+                continuation.resume()
+                waiters.removeValue(forKey: id)
+            } else {
+                waiters[id] = .pending(continuation)
+                pendingOrder.append(id)
+                totalArmedCount += 1
+                notifyArmedWaiters()
+            }
+        case .pending, .completed:
+            break
         }
-        pending[id] = continuation
-        pendingOrder.append(id)
-        totalArmedCount += 1
-        notifyArmedWaiters()
     }
 
     public func cancel(id: UInt64) {
-        if let continuation = pending.removeValue(forKey: id) {
+        guard let state = waiters[id] else {
+            // Cancellation of a completed or unknown waiter is a no-op, never a new tombstone
+            return
+        }
+        switch state {
+        case .registering:
+            waiters[id] = .cancelledBeforeRegistration
+        case .pending(let continuation):
+            waiters.removeValue(forKey: id)
             pendingOrder.removeAll { $0 == id }
             continuation.resume(throwing: CancellationError())
-        } else {
-            cancelledIDs.insert(id)
+        case .completed, .cancelledBeforeRegistration:
+            break
         }
     }
 
@@ -100,8 +128,10 @@ public actor ManualSleeper: Sleeper {
             return
         }
         let id = pendingOrder.removeFirst()
-        if let continuation = pending.removeValue(forKey: id) {
+        if case .pending(let continuation) = waiters[id] {
+            waiters[id] = .completed
             continuation.resume()
+            waiters.removeValue(forKey: id)
         }
     }
 
@@ -109,8 +139,10 @@ public actor ManualSleeper: Sleeper {
         let order = pendingOrder
         pendingOrder.removeAll()
         for id in order {
-            if let continuation = pending.removeValue(forKey: id) {
+            if case .pending(let continuation) = waiters[id] {
+                waiters[id] = .completed
                 continuation.resume()
+                waiters.removeValue(forKey: id)
             }
         }
     }
@@ -119,7 +151,8 @@ public actor ManualSleeper: Sleeper {
         let order = pendingOrder
         pendingOrder.removeAll()
         for id in order {
-            if let continuation = pending.removeValue(forKey: id) {
+            if case .pending(let continuation) = waiters[id] {
+                waiters.removeValue(forKey: id)
                 continuation.resume(throwing: CancellationError())
             }
         }
@@ -158,6 +191,9 @@ public final class ScriptedPOSIXSyscalls: POSIXSyscallProviding, @unchecked Send
     public var acceptCallCount: Int = 0
     public var readCallCount: Int = 0
     public var writeCallCount: Int = 0
+    public var unlinkatCallCount: Int = 0
+    public var closeCallCount: Int = 0
+    public var unlinkedFiles: [String] = []
 
     public init() {}
 
@@ -225,10 +261,23 @@ public final class ScriptedPOSIXSyscalls: POSIXSyscallProviding, @unchecked Send
     public func fstatat(_ dirFd: Int32, _ path: UnsafePointer<CChar>, _ buf: UnsafeMutablePointer<stat>?, _ flag: Int32) -> Int32 { clearErrno(); return underlying.fstatat(dirFd, path, buf, flag) }
     public func fileFlock(_ fd: Int32, _ operation: Int32) -> Int32 { clearErrno(); return underlying.fileFlock(fd, operation) }
     public func unlink(_ path: UnsafePointer<CChar>) -> Int32 { clearErrno(); return underlying.unlink(path) }
-    public func unlinkat(_ dirFd: Int32, _ path: UnsafePointer<CChar>, _ flag: Int32) -> Int32 { clearErrno(); return underlying.unlinkat(dirFd, path, flag) }
+    public func unlinkat(_ dirFd: Int32, _ path: UnsafePointer<CChar>, _ flag: Int32) -> Int32 {
+        clearErrno()
+        lock.lock()
+        unlinkatCallCount += 1
+        unlinkedFiles.append(String(cString: path))
+        lock.unlock()
+        return underlying.unlinkat(dirFd, path, flag)
+    }
     public func rmdir(_ path: UnsafePointer<CChar>) -> Int32 { clearErrno(); return underlying.rmdir(path) }
     public func mkdir(_ path: UnsafePointer<CChar>, _ mode: mode_t) -> Int32 { clearErrno(); return underlying.mkdir(path, mode) }
-    public func close(_ fd: Int32) -> Int32 { clearErrno(); return underlying.close(fd) }
+    public func close(_ fd: Int32) -> Int32 {
+        clearErrno()
+        lock.lock()
+        closeCallCount += 1
+        lock.unlock()
+        return underlying.close(fd)
+    }
     public func getuid() -> uid_t { underlying.getuid() }
     public func setsockopt(_ socket: Int32, _ level: Int32, _ optionName: Int32, _ optionValue: UnsafeRawPointer?, _ optionLen: socklen_t) -> Int32 { clearErrno(); return underlying.setsockopt(socket, level, optionName, optionValue, optionLen) }
     public func connect(_ socket: Int32, _ address: UnsafePointer<sockaddr>?, _ addressLen: socklen_t) -> Int32 { clearErrno(); return underlying.connect(socket, address, addressLen) }
@@ -1203,31 +1252,43 @@ public struct ComputerUseHostTestRunner {
         let engine18_granted = SCScreenshotCaptureEngine(
             authorizer: FakeScreenRecordingAuthorizer(granted: true)
         )
-        let invalidTop = DisplayTopology(
-            version: "v1.0",
-            primaryDisplayId: 1,
-            displays: [
-                DisplayInfo(
-                    id: 1,
-                    widthPoints: 8001,
-                    heightPoints: 8000,
-                    scaleFactor: 1.0,
-                    originX: 0,
-                    originY: 0,
-                    pixelWidth: 8001,
-                    pixelHeight: 8000,
-                    rotation: 0.0
-                )
-            ]
-        )
-        var threwInvalidDimensions = false
-        do {
-            _ = try await engine18_granted.captureDisplay(displayId: 1, topology: invalidTop)
-        } catch {
-            threwInvalidDimensions = true
+
+        let invalidDimensions: [(Int, Int)] = [
+            (0, 100),
+            (-1, -1),
+            (Int.max, Int.max),
+            (8001, 8000)
+        ]
+
+        for (pw, ph) in invalidDimensions {
+            let invalidTop = DisplayTopology(
+                version: "v1.0",
+                primaryDisplayId: 1,
+                displays: [
+                    DisplayInfo(
+                        id: 1,
+                        widthPoints: Double(pw),
+                        heightPoints: Double(ph),
+                        scaleFactor: 1.0,
+                        originX: 0,
+                        originY: 0,
+                        pixelWidth: pw,
+                        pixelHeight: ph,
+                        rotation: 0.0
+                    )
+                ]
+            )
+            var threwInvalid = false
+            do {
+                _ = try await engine18_granted.captureDisplay(displayId: 1, topology: invalidTop)
+            } catch {
+                threwInvalid = true
+            }
+            assertTrue(threwInvalid, "captureDisplay must fail on invalid pixel dimensions (\(pw)x\(ph))")
+            assertEqual(await engine18_granted.contentLoaderInvocationCount, 0, "Content loader must not be called on invalid dimensions (\(pw)x\(ph))")
+            assertEqual(await engine18_granted.frameworkInvocationCount, 0, "Framework allocation must not be called on invalid dimensions (\(pw)x\(ph))")
+            assertEqual(await engine18_granted.encoderInvocationCount, 0, "JPEG encoder must not be called on invalid dimensions (\(pw)x\(ph))")
         }
-        assertTrue(threwInvalidDimensions)
-        assertEqual(await engine18_granted.frameworkInvocationCount, 0, "captureDisplay must fail before Framework allocation on >64MP pixel dimensions")
     }
 
     public static func run19_PureJPEGValidatorExactAndNear10MiBBoundaries() async throws {
@@ -1278,74 +1339,134 @@ public struct ComputerUseHostTestRunner {
     }
 
     public static func run20_SOF0AndSOF2MarkerValidation() async throws {
-        let sof0Data = Data([
-            0xFF, 0xD8,
-            0xFF, 0xC0, 0x00, 0x11, 0x08, 0x02, 0x00, 0x03, 0x20, 0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01,
-            0xFF, 0xDA, 0x00, 0x0C, 0x03, 0x01, 0x00, 0x02, 0x11, 0x03, 0x11, 0x00, 0x3F, 0x00,
-            0xFF, 0xD9
-        ])
-        let dimsSOF0 = SCScreenshotCaptureEngine.parseJPEGDimensions(data: sof0Data)
-        assertTrue(dimsSOF0 != nil)
-        assertEqual(dimsSOF0?.width, 800)
-        assertEqual(dimsSOF0?.height, 512)
+        let repoRoot = URL(fileURLWithPath: #file)
+            .deletingLastPathComponent() // ComputerUseHostTestRunner
+            .deletingLastPathComponent() // Tests
+            .deletingLastPathComponent() // apps/computer-use-host
+            .deletingLastPathComponent() // apps
+            .deletingLastPathComponent() // repo root
+        let goldenURL = repoRoot.appendingPathComponent("docs/fixtures/golden_progressive.jpg")
+        assertTrue(FileManager.default.fileExists(atPath: goldenURL.path), "docs/fixtures/golden_progressive.jpg must exist")
 
-        let sof2Data = Data([
-            0xFF, 0xD8,
-            0xFF, 0xC2, 0x00, 0x11, 0x08, 0x01, 0x00, 0x02, 0x00, 0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01,
-            0xFF, 0xDA, 0x00, 0x0C, 0x03, 0x01, 0x00, 0x02, 0x11, 0x03, 0x11, 0x00, 0x3F, 0x00,
-            0xFF, 0xD9
-        ])
-        let dimsSOF2 = SCScreenshotCaptureEngine.parseJPEGDimensions(data: sof2Data)
-        assertTrue(dimsSOF2 != nil)
-        assertEqual(dimsSOF2?.width, 512)
-        assertEqual(dimsSOF2?.height, 256)
+        let goldenData = try Data(contentsOf: goldenURL)
+        assertTrue(goldenData.count > 0, "golden_progressive.jpg must be non-empty")
 
-        // Test COM (0xFE) segment before SOF
-        let comData = Data([
-            0xFF, 0xD8,
-            0xFF, 0xFE, 0x00, 0x07, 0x48, 0x65, 0x6C, 0x6C, 0x6F,
-            0xFF, 0xC0, 0x00, 0x11, 0x08, 0x01, 0x00, 0x02, 0x00, 0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01,
-            0xFF, 0xDA, 0x00, 0x0C, 0x03, 0x01, 0x00, 0x02, 0x11, 0x03, 0x11, 0x00, 0x3F, 0x00,
-            0xFF, 0xD9
-        ])
-        let dimsCOM = SCScreenshotCaptureEngine.parseJPEGDimensions(data: comData)
-        assertTrue(dimsCOM != nil, "COM (0xFE) segment before SOF must be parsed successfully")
-        assertEqual(dimsCOM?.width, 512)
-        assertEqual(dimsCOM?.height, 256)
+        // ImageIO decode verification
+        let imageSource = CGImageSourceCreateWithData(goldenData as CFData, nil)
+        assertTrue(imageSource != nil, "golden_progressive.jpg must create CGImageSource")
+        let cgImage = imageSource.flatMap { CGImageSourceCreateImageAtIndex($0, 0, nil) }
+        assertTrue(cgImage != nil, "golden_progressive.jpg must decode to CGImage via ImageIO")
+        assertEqual(cgImage?.width, 10, "golden_progressive.jpg width must be 10")
+        assertEqual(cgImage?.height, 10, "golden_progressive.jpg height must be 10")
 
-        // Test Multi-scan Progressive JPEG with inter-scan DHT/DQT markers
-        let multiScanData = Data([
-            0xFF, 0xD8,
-            0xFF, 0xC2, 0x00, 0x11, 0x08, 0x01, 0x00, 0x02, 0x00, 0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01,
-            0xFF, 0xDB, 0x00, 0x05, 0x00, 0x01, 0x02,
-            0xFF, 0xDA, 0x00, 0x0C, 0x03, 0x01, 0x00, 0x02, 0x11, 0x03, 0x11, 0x00, 0x3F, 0x00,
-            0xFF, 0xC4, 0x00, 0x05, 0x00, 0x00, 0x00,
-            0xFF, 0xDA, 0x00, 0x0C, 0x03, 0x01, 0x00, 0x02, 0x11, 0x03, 0x11, 0x00, 0x3F, 0x00,
-            0xFF, 0xD9
-        ])
-        let dimsMulti = SCScreenshotCaptureEngine.parseJPEGDimensions(data: multiScanData)
-        assertTrue(dimsMulti != nil, "Multi-scan progressive JPEG must be parsed successfully")
-        assertEqual(dimsMulti?.width, 512)
-        assertEqual(dimsMulti?.height, 256)
+        // 14-Mutation Parity Table in Swift
+        // 1. Identity
+        let dims1 = SCScreenshotCaptureEngine.parseJPEGDimensions(data: goldenData)
+        assertTrue(dims1 != nil, "Golden JPEG identity parse must succeed")
+        assertEqual(dims1?.width, 10)
+        assertEqual(dims1?.height, 10)
 
-        // Negative: Nested SOI inside stream
-        let nestedSOIData = Data([
-            0xFF, 0xD8,
-            0xFF, 0xD8,
-            0xFF, 0xC0, 0x00, 0x11, 0x08, 0x01, 0x00, 0x02, 0x00, 0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01,
-            0xFF, 0xDA, 0x00, 0x0C, 0x03, 0x01, 0x00, 0x02, 0x11, 0x03, 0x11, 0x00, 0x3F, 0x00,
-            0xFF, 0xD9
-        ])
-        assertTrue(SCScreenshotCaptureEngine.parseJPEGDimensions(data: nestedSOIData) == nil, "Must reject nested SOI")
+        // 2. Malformed APP/COM length
+        var mut2 = goldenData
+        mut2[4] = 0x00; mut2[5] = 0x01
+        assertTrue(SCScreenshotCaptureEngine.parseJPEGDimensions(data: mut2) == nil, "Must reject malformed APP/COM length")
 
-        // Negative: Zero-component SOS (Ns == 0)
-        let zeroCompSOSData = Data([
-            0xFF, 0xD8,
-            0xFF, 0xC0, 0x00, 0x11, 0x08, 0x01, 0x00, 0x02, 0x00, 0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01,
-            0xFF, 0xDA, 0x00, 0x06, 0x00, 0x00, 0x3F, 0x00,
-            0xFF, 0xD9
-        ])
-        assertTrue(SCScreenshotCaptureEngine.parseJPEGDimensions(data: zeroCompSOSData) == nil, "Must reject zero-component SOS")
+        // 3. Duplicate SOF IDs
+        var mut3 = goldenData
+        if let sofIdx3 = mut3.range(of: Data([0xFF, 0xC2]))?.lowerBound {
+            mut3[sofIdx3 + 13] = mut3[sofIdx3 + 10]
+        }
+        assertTrue(SCScreenshotCaptureEngine.parseJPEGDimensions(data: mut3) == nil, "Must reject duplicate SOF IDs")
+
+        // 4. Duplicate same-SOS selectors
+        var mut4 = goldenData
+        if let sosIdx4 = mut4.range(of: Data([0xFF, 0xDA]))?.lowerBound {
+            mut4[sosIdx4 + 7] = mut4[sosIdx4 + 5]
+        }
+        assertTrue(SCScreenshotCaptureEngine.parseJPEGDimensions(data: mut4) == nil, "Must reject duplicate same-SOS selectors")
+
+        // 5. Unknown selector in SOS
+        var mut5 = goldenData
+        if let sosIdx5 = mut5.range(of: Data([0xFF, 0xDA]))?.lowerBound {
+            mut5[sosIdx5 + 5] = 0x99
+        }
+        assertTrue(SCScreenshotCaptureEngine.parseJPEGDimensions(data: mut5) == nil, "Must reject unknown selector in SOS")
+
+        // 6. Zero/excess counts in SOS
+        var mut6a = goldenData
+        if let sosIdx6a = mut6a.range(of: Data([0xFF, 0xDA]))?.lowerBound {
+            mut6a[sosIdx6a + 4] = 0
+        }
+        assertTrue(SCScreenshotCaptureEngine.parseJPEGDimensions(data: mut6a) == nil, "Must reject zero count in SOS")
+
+        var mut6b = goldenData
+        if let sosIdx6b = mut6b.range(of: Data([0xFF, 0xDA]))?.lowerBound {
+            mut6b[sosIdx6b + 4] = 5
+        }
+        assertTrue(SCScreenshotCaptureEngine.parseJPEGDimensions(data: mut6b) == nil, "Must reject excess count in SOS")
+
+        // 7. Repeated SOI
+        let mut7 = Data([0xFF, 0xD8, 0xFF, 0xD8]) + goldenData.dropFirst(2)
+        assertTrue(SCScreenshotCaptureEngine.parseJPEGDimensions(data: mut7) == nil, "Must reject repeated SOI")
+
+        // 8. Duplicate SOF
+        if let sofIdx8 = goldenData.range(of: Data([0xFF, 0xC2]))?.lowerBound {
+            let segLen8 = Int(goldenData[sofIdx8 + 2]) << 8 | Int(goldenData[sofIdx8 + 3])
+            let sofChunk = goldenData[sofIdx8..<(sofIdx8 + 2 + segLen8)]
+            var mut8 = Data()
+            mut8.append(goldenData[0..<(sofIdx8 + 2 + segLen8)])
+            mut8.append(sofChunk)
+            mut8.append(goldenData[(sofIdx8 + 2 + segLen8)...])
+            assertTrue(SCScreenshotCaptureEngine.parseJPEGDimensions(data: mut8) == nil, "Must reject duplicate SOF segment")
+        }
+
+        // 9. Bad inter-scan marker/length
+        var mut9 = goldenData
+        if let sosIdx9 = mut9.range(of: Data([0xFF, 0xDA]))?.lowerBound {
+            for i in (sosIdx9 + 10)..<(mut9.count - 1) {
+                if mut9[i] == 0xFF && mut9[i + 1] != 0x00 && !(mut9[i + 1] >= 0xD0 && mut9[i + 1] <= 0xD7) && mut9[i + 1] != 0xD9 {
+                    mut9[i + 1] = 0x02
+                    break
+                }
+            }
+        }
+        assertTrue(SCScreenshotCaptureEngine.parseJPEGDimensions(data: mut9) == nil, "Must reject bad inter-scan marker/length")
+
+        // 10. Truncated entropy
+        let mut10 = goldenData.prefix(goldenData.count - 10)
+        assertTrue(SCScreenshotCaptureEngine.parseJPEGDimensions(data: Data(mut10)) == nil, "Must reject truncated entropy")
+
+        // 11. Missing EOI
+        let mut11 = goldenData.prefix(goldenData.count - 2)
+        assertTrue(SCScreenshotCaptureEngine.parseJPEGDimensions(data: Data(mut11)) == nil, "Must reject missing EOI")
+
+        // 12. Exact 64M (8000x8000)
+        var mut12 = goldenData
+        if let sofIdx12 = mut12.range(of: Data([0xFF, 0xC2]))?.lowerBound {
+            mut12[sofIdx12 + 5] = 0x1F; mut12[sofIdx12 + 6] = 0x40
+            mut12[sofIdx12 + 7] = 0x1F; mut12[sofIdx12 + 8] = 0x40
+        }
+        let dims12 = SCScreenshotCaptureEngine.parseJPEGDimensions(data: mut12)
+        assertTrue(dims12 != nil, "Exact 64M JPEG parse must succeed")
+        assertEqual(dims12?.width, 8000)
+        assertEqual(dims12?.height, 8000)
+
+        // 13. 64M+1 (8000x8001 = 64,008,000)
+        var mut13 = goldenData
+        if let sofIdx13 = mut13.range(of: Data([0xFF, 0xC2]))?.lowerBound {
+            mut13[sofIdx13 + 5] = 0x1F; mut13[sofIdx13 + 6] = 0x41
+            mut13[sofIdx13 + 7] = 0x1F; mut13[sofIdx13 + 8] = 0x40
+        }
+        assertTrue(SCScreenshotCaptureEngine.parseJPEGDimensions(data: mut13) == nil, "Must reject 64M+1 JPEG")
+
+        // 14. Canonical trailing-byte policy
+        let mut14a = goldenData + Data([0x00, 0x00])
+        let dims14a = SCScreenshotCaptureEngine.parseJPEGDimensions(data: mut14a)
+        assertTrue(dims14a != nil, "Canonical trailing zero bytes must be accepted")
+        assertEqual(dims14a?.width, 10)
+
+        let mut14b = goldenData + Data([0xAA])
+        assertTrue(SCScreenshotCaptureEngine.parseJPEGDimensions(data: mut14b) == nil, "Non-zero trailing garbage must be rejected")
     }
 
     public static func run21_JPEGInvalidMagicTruncatedSegmentAndMismatchRejection() async throws {
@@ -1840,6 +1961,9 @@ public struct ComputerUseHostTestRunner {
 
         var sockStat = stat()
         assertTrue(scriptedSyscalls.lstat(sockPath, &sockStat) != 0, "Failed socket file must be removed after listen failure rollback")
+        assertTrue(scriptedSyscalls.closeCallCount > 0, "Descriptors must be closed on listen failure rollback")
+        assertTrue(scriptedSyscalls.unlinkatCallCount > 0, "Descriptor-relative unlinkat must be called on rollback")
+        assertTrue(scriptedSyscalls.unlinkedFiles.contains("host.sock"), "Descriptor-relative unlinkat must unlink host.sock token")
 
         scriptedSyscalls.listenHook = nil
         var secondStartThrew = false
@@ -2014,7 +2138,7 @@ public struct ComputerUseHostTestRunner {
         assertThrows({ try validateFourSurfaces(FourSurfaces(manifest: surfaces.manifest, xctestFuncs: surfaces.xctestFuncs, allTests: Array(baseList.dropFirst()), runnerCalls: surfaces.runnerCalls)) }, "Surface 3 missing item must throw")
         assertThrows({ try validateFourSurfaces(FourSurfaces(manifest: surfaces.manifest, xctestFuncs: surfaces.xctestFuncs, allTests: baseList + [extraItem], runnerCalls: surfaces.runnerCalls)) }, "Surface 3 extra item must throw")
         assertThrows({ try validateFourSurfaces(FourSurfaces(manifest: surfaces.manifest, xctestFuncs: surfaces.xctestFuncs, allTests: baseList + [firstItem], runnerCalls: surfaces.runnerCalls)) }, "Surface 3 duplicate item must throw")
-        assertThrows({ try validateFourSurfaces(FourSurfaces(manifest: surfaces.manifest, xctestFuncs: [renamedItem] + Array(baseList.dropFirst()), allTests: surfaces.allTests, runnerCalls: surfaces.runnerCalls)) }, "Surface 3 renamed item must throw")
+        assertThrows({ try validateFourSurfaces(FourSurfaces(manifest: surfaces.manifest, xctestFuncs: surfaces.xctestFuncs, allTests: [renamedItem] + Array(baseList.dropFirst()), runnerCalls: surfaces.runnerCalls)) }, "Surface 3 renamed item must throw")
 
         // Surface 4 (runner calls) mutations: missing, extra, duplicate, renamed
         assertThrows({ try validateFourSurfaces(FourSurfaces(manifest: surfaces.manifest, xctestFuncs: surfaces.xctestFuncs, allTests: surfaces.allTests, runnerCalls: Array(baseList.dropFirst()))) }, "Surface 4 missing item must throw")
