@@ -65,10 +65,34 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
     const obsCall = await client.callTool({ name: "computer_use_observe", arguments: {} });
     assert.ok(obsCall.content);
     const obsContent = obsCall.content as any[];
-    assert.equal(obsContent.length, 2);
+    assert.equal(obsContent.length, 2, "Must return exactly 2 ordered content blocks");
+
+    // Block 1: Text metadata without base64 string
+    assert.equal(obsContent[0].type, "text");
     const textMeta = JSON.parse(obsContent[0].text);
-    const cap1 = textMeta.capture_id;
-    assert.ok(cap1);
+    assert.ok(textMeta.capture_id);
+    assert.equal(textMeta.image_format, "jpeg");
+    assert.equal(textMeta.image_data_base64, undefined, "Text metadata block MUST NOT contain image_data_base64");
+    assert.ok(textMeta.image_byte_length > 0);
+    assert.match(textMeta.image_sha256, /^[0-9a-f]{64}$/);
+
+    // Block 2: Image payload
+    assert.equal(obsContent[1].type, "image");
+    assert.equal(obsContent[1].mimeType, "image/jpeg");
+    assert.ok(obsContent[1].data);
+
+    // Verify byte length, SHA-256 digest, and magic bytes / dimensions match native metadata
+    const imgBuf = Buffer.from(obsContent[1].data, "base64");
+    assert.equal(imgBuf.length, textMeta.image_byte_length);
+    const recomputedSha = crypto.createHash("sha256").update(imgBuf).digest("hex");
+    assert.equal(recomputedSha, textMeta.image_sha256);
+    assert.equal(imgBuf[0], 0xff);
+    assert.equal(imgBuf[1], 0xd8);
+    assert.equal(imgBuf[2], 0xff);
+    const dims = parseJPEGDimensions(imgBuf);
+    assert.ok(dims);
+    assert.equal(dims.width, textMeta.pixel_width);
+    assert.equal(dims.height, textMeta.pixel_height);
 
     await client.close();
     await server.close();

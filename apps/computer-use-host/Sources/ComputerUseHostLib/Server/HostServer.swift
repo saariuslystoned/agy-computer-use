@@ -361,6 +361,8 @@ public actor HostServer {
                     "pixel_height": .int(frame.pixelHeight),
                     "image_format": .string(frame.imageFormat),
                     "image_data_base64": .string(frame.imageDataBase64),
+                    "image_byte_length": .int(frame.imageByteLength),
+                    "image_sha256": .string(frame.imageSha256),
                     "normalized_bounds": .dictionary([
                         "min_x": .int(0),
                         "min_y": .int(0),

@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 @preconcurrency import ScreenCaptureKit
 import ImageIO
 import UniformTypeIdentifiers
@@ -17,6 +18,8 @@ public struct CaptureFrameDTO: Codable, Equatable, Sendable {
     public let pixelHeight: Int
     public let imageFormat: String
     public let imageDataBase64: String
+    public let imageByteLength: Int
+    public let imageSha256: String
 
     enum CodingKeys: String, CodingKey {
         case captureId = "capture_id"
@@ -30,6 +33,8 @@ public struct CaptureFrameDTO: Codable, Equatable, Sendable {
         case pixelHeight = "pixel_height"
         case imageFormat = "image_format"
         case imageDataBase64 = "image_data_base64"
+        case imageByteLength = "image_byte_length"
+        case imageSha256 = "image_sha256"
     }
 
     public init(
@@ -43,7 +48,9 @@ public struct CaptureFrameDTO: Codable, Equatable, Sendable {
         pixelWidth: Int,
         pixelHeight: Int,
         imageFormat: String,
-        imageDataBase64: String
+        imageDataBase64: String,
+        imageByteLength: Int,
+        imageSha256: String
     ) {
         self.captureId = captureId
         self.timestamp = timestamp
@@ -56,6 +63,8 @@ public struct CaptureFrameDTO: Codable, Equatable, Sendable {
         self.pixelHeight = pixelHeight
         self.imageFormat = imageFormat
         self.imageDataBase64 = imageDataBase64
+        self.imageByteLength = imageByteLength
+        self.imageSha256 = imageSha256
     }
 }
 
@@ -149,7 +158,7 @@ public actor SCScreenshotCaptureEngine: DisplayCaptureEngine {
             throw ComputerUseError.targetUnreachable(reason: "Captured CGImage dimensions (\(cgImage.width)x\(cgImage.height)) mismatch requested topology (\(targetDisplay.pixelWidth)x\(targetDisplay.pixelHeight))")
         }
         encoderInvocationCount += 1
-        let (_, base64Str) = try SCScreenshotCaptureEngine.validateAndEncode(image: cgImage, targetDisplay: targetDisplay, quality: 0.8, jpegEncoder: self.jpegEncoder)
+        let (_, base64Str, byteLen, sha256Str) = try SCScreenshotCaptureEngine.validateAndEncode(image: cgImage, targetDisplay: targetDisplay, quality: 0.8, jpegEncoder: self.jpegEncoder)
 
         let capId = "cap-\(UUID().uuidString)"
         return CaptureFrameDTO(
@@ -163,7 +172,9 @@ public actor SCScreenshotCaptureEngine: DisplayCaptureEngine {
             pixelWidth: targetDisplay.pixelWidth,
             pixelHeight: targetDisplay.pixelHeight,
             imageFormat: "jpeg",
-            imageDataBase64: base64Str
+            imageDataBase64: base64Str,
+            imageByteLength: byteLen,
+            imageSha256: sha256Str
         )
     }
 
@@ -337,7 +348,7 @@ public actor SCScreenshotCaptureEngine: DisplayCaptureEngine {
         quality: Double = 0.8,
         overrideDataSize: Int? = nil,
         jpegEncoder: JPEGEncoder? = nil
-    ) throws -> (data: Data, base64: String) {
+    ) throws -> (data: Data, base64: String, byteLength: Int, sha256: String) {
         let pixelWidth = targetDisplay.pixelWidth
         let pixelHeight = targetDisplay.pixelHeight
 
@@ -355,7 +366,10 @@ public actor SCScreenshotCaptureEngine: DisplayCaptureEngine {
         }
         try validateJPEGData(data: jpegData, expectedWidth: pixelWidth, expectedHeight: pixelHeight, maxBytes: 10 * 1024 * 1024)
 
-        return (jpegData, jpegData.base64EncodedString())
+        let digest = SHA256.hash(data: jpegData)
+        let sha256Str = digest.map { String(format: "%02x", $0) }.joined()
+
+        return (jpegData, jpegData.base64EncodedString(), jpegData.count, sha256Str)
     }
 
     public static func encodeToJPEG(image: CGImage, quality: Double = 0.8) throws -> Data {
