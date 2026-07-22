@@ -596,7 +596,7 @@ public final class ScriptedPOSIXSyscalls: POSIXSyscallProviding, @unchecked Send
     public var lstatHook: ((UnsafePointer<CChar>, UnsafeMutablePointer<stat>?) -> Int32?)?
     public var openHook: ((UnsafePointer<CChar>, Int32, mode_t) -> Int32?)?
     public var closeHook: ((Int32) -> Int32?)?
-    public var shutdownHook: ((Int32, Int32) -> Int32?)?
+    public var shutdownHook: ((Int32, Int32) -> (result: Int32, errno: Int32)?)?
 
     public var acceptCallCount: Int = 0
     public var readCallCount: Int = 0
@@ -856,8 +856,8 @@ public final class ScriptedPOSIXSyscalls: POSIXSyscallProviding, @unchecked Send
         shutdownCalls.append((fd: socket, how: how))
         let hook = shutdownHook
         lock.unlock()
-        if let res = hook?(socket, how) {
-            if res != 0 { setErrno(ENOTCONN) }
+        if let (res, err) = hook?(socket, how) {
+            if res != 0 { setErrno(err != 0 ? err : ENOTCONN) }
             return res
         }
         return underlying.shutdown(socket, how)
@@ -4541,7 +4541,13 @@ public struct ComputerUseHostTestRunner {
 
         // 14. HostServer deadline authority: early wake -> re-arm -> single timeout response
         let controlledEngine = ControlledCaptureEngine()
-        let sleeper14 = ManualSleeper()
+        let call3Gate = TestGate()
+        let manualSleeper14 = ManualSleeper(hooks: ManualSleeper.Hooks(
+            afterReserveBeforeRegistering: { _, id in
+                if id == 3 { call3Gate.signalArrived() }
+            }
+        ))
+        let sleeper14 = ObservedSleeper(sleeper: manualSleeper14)
         let manualClock = TestManualClock()
         let server14 = HostServer(
             authorizer: FakeScreenRecordingAuthorizer(granted: true),
@@ -4556,14 +4562,16 @@ public struct ComputerUseHostTestRunner {
 
         let reqTask1 = Task { await server14.handleRequest(IPCRequest(id: "timeout-1", method: "observe")) }
         await controlledEngine.waitUntilRegistered(count: 1)
-        await sleeper14.waitUntilIssued(count: 1)
+        let iss1 = await sleeper14.waitUntilIssuedCount(1)
+        assertEqual(iss1, .satisfied)
 
         manualClock.advance(by: .milliseconds(500))
-        sleeper14.advance()
-        await sleeper14.waitUntilIssued(count: 2)
+        manualSleeper14.advance()
+        let iss2 = await sleeper14.waitUntilIssuedCount(2)
+        assertEqual(iss2, .satisfied)
 
         manualClock.advance(by: .seconds(2))
-        sleeper14.advance()
+        manualSleeper14.advance()
 
         let resp1 = await reqTask1.value
         assertTrue(!resp1.success, "HostServer deadline: First request must timeout")
@@ -4576,11 +4584,24 @@ public struct ComputerUseHostTestRunner {
         let frame2 = try FakeCaptureEngine().generateDTO(topology: FakeDisplayTopologyProvider().getTopology())
         let reqTask2 = Task { await server14.handleRequest(IPCRequest(id: "timeout-2", method: "observe")) }
         await controlledEngine.waitUntilRegistered(count: 2)
+
+        // Hold call 3 at afterReserveBeforeRegistering gate while request 2 capture succeeds
+        call3Gate.waitUntilArrived()
         try await controlledEngine.complete(index: 1, with: .success(frame2))
         let resp2 = await reqTask2.value
         assertTrue(resp2.success, "HostServer deadline: Second request must complete independently")
         assertEqual(await controlledEngine.pendingCount, 0, "HostServer deadline: Pending capture count zero")
-        sleeper14.assertNoUnresolvedContinuations()
+
+        // Release call 3 gate and verify bounded terminal count 3 with exact [.succeeded, .succeeded, .cancelled]
+        call3Gate.release()
+        let termRes14 = await sleeper14.waitUntilTerminalCount(3)
+        assertEqual(termRes14, .satisfied)
+        sleeper14.assertCloseout(
+            expectedIssuedCount: 3,
+            expectedDurations: [1_000_000_000, 500_000_000, 1_000_000_000],
+            expectedTerminals: [.succeeded, .succeeded, .cancelled]
+        )
+        call3Gate.assertClosed()
 
         // 15. Non-cancellation sleeper error propagation through HostServer production logic & capture exit
         struct CustomSleeperError: Error, Equatable {}
@@ -5278,13 +5299,13 @@ public struct ComputerUseHostTestRunner {
 
         assertTrue(scripted39.areAllDescriptorsClosed, "All descriptors must be closed after lifecycle stop")
 
-        // Test injected shutdown failure scenario: shutdown fails but close & unlink succeed
+        // Test injected shutdown failure scenario: shutdown fails with EIO but close & unlink succeed
         let scripted39_fail = ScriptedPOSIXSyscalls()
         let sockPath39_fail = "/tmp/agy-test-c39f-\(UUID().uuidString)/host.sock"
         try SocketListener.prepareDirectory(at: sockPath39_fail, syscalls: scripted39_fail)
 
         scripted39_fail.shutdownHook = { _, _ in
-            return -1 // inject ENOTCONN failure
+            return (result: -1, errno: EIO) // inject EIO failure
         }
 
         let listener39_fail = SocketListener(
@@ -5302,7 +5323,9 @@ public struct ComputerUseHostTestRunner {
         listener39_fail.stop()
 
         assertEqual(listener39_fail.lastStopReport?.shutdownResult, -1, "Injected shutdown failure must be reflected in stop report")
+        assertEqual(listener39_fail.lastStopReport?.shutdownErrno, EIO, "Injected shutdown errno EIO must be captured")
         assertTrue(listener39_fail.lastStopReport?.socketUnlinked == true, "Socket unlinking must succeed even when shutdown reports error")
+        assertTrue(listener39_fail.lastStopReport?.lockUnlocked == true, "Lock unlocking must succeed even when shutdown reports error")
         assertTrue(scripted39_fail.areAllDescriptorsClosed, "All descriptors must be closed even when shutdown fails")
 
         // Second bind on clean path must succeed

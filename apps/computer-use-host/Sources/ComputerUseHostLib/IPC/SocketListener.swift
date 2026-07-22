@@ -593,27 +593,57 @@ public final class SocketListener: @unchecked Sendable {
     }
 
     public struct StopReport: Sendable, Equatable {
+        public let listenerFd: Int32
+        public let shutdownHow: Int32
         public let shutdownResult: Int32
         public let shutdownErrno: Int32
-        public let closeResult: Int32
-        public let closeErrno: Int32
+        public let serverCloseResult: Int32
+        public let serverCloseErrno: Int32
         public let socketUnlinked: Bool
+        public let unlinkResult: Int32
+        public let unlinkErrno: Int32
         public let lockUnlocked: Bool
+        public let unlockResult: Int32
+        public let unlockErrno: Int32
+        public let lockCloseResult: Int32
+        public let lockCloseErrno: Int32
+        public let dirCloseResult: Int32
+        public let dirCloseErrno: Int32
 
         public init(
-            shutdownResult: Int32,
-            shutdownErrno: Int32,
-            closeResult: Int32,
-            closeErrno: Int32,
-            socketUnlinked: Bool,
-            lockUnlocked: Bool
+            listenerFd: Int32 = -1,
+            shutdownHow: Int32 = SHUT_RDWR,
+            shutdownResult: Int32 = 0,
+            shutdownErrno: Int32 = 0,
+            serverCloseResult: Int32 = 0,
+            serverCloseErrno: Int32 = 0,
+            socketUnlinked: Bool = false,
+            unlinkResult: Int32 = 0,
+            unlinkErrno: Int32 = 0,
+            lockUnlocked: Bool = false,
+            unlockResult: Int32 = 0,
+            unlockErrno: Int32 = 0,
+            lockCloseResult: Int32 = 0,
+            lockCloseErrno: Int32 = 0,
+            dirCloseResult: Int32 = 0,
+            dirCloseErrno: Int32 = 0
         ) {
+            self.listenerFd = listenerFd
+            self.shutdownHow = shutdownHow
             self.shutdownResult = shutdownResult
             self.shutdownErrno = shutdownErrno
-            self.closeResult = closeResult
-            self.closeErrno = closeErrno
+            self.serverCloseResult = serverCloseResult
+            self.serverCloseErrno = serverCloseErrno
             self.socketUnlinked = socketUnlinked
+            self.unlinkResult = unlinkResult
+            self.unlinkErrno = unlinkErrno
             self.lockUnlocked = lockUnlocked
+            self.unlockResult = unlockResult
+            self.unlockErrno = unlockErrno
+            self.lockCloseResult = lockCloseResult
+            self.lockCloseErrno = lockCloseErrno
+            self.dirCloseResult = dirCloseResult
+            self.dirCloseErrno = dirCloseErrno
         }
     }
 
@@ -626,6 +656,7 @@ public final class SocketListener: @unchecked Sendable {
         guard isRunning else { return }
         isRunning = false
 
+        let origServerFd = serverFd
         var shutRes: Int32 = 0
         var shutErr: Int32 = 0
         var closeRes: Int32 = 0
@@ -645,27 +676,50 @@ public final class SocketListener: @unchecked Sendable {
 
         let socketFilename = (socketPath as NSString).lastPathComponent
         var unlinked = false
+        var unlRes: Int32 = 0
+        var unlErr: Int32 = 0
 
         if dirFd >= 0 {
             var statBuf = stat()
             if syscalls.fstatat(dirFd, socketFilename, &statBuf, AT_SYMLINK_NOFOLLOW) == 0 {
                 if statBuf.st_dev == self.boundDev && statBuf.st_ino == self.boundInode && statBuf.st_uid == syscalls.getuid() && (statBuf.st_mode & S_IFMT) == S_IFSOCK {
-                    let unlRes = syscalls.unlinkat(dirFd, socketFilename, 0)
-                    unlinked = (unlRes == 0)
+                    unlRes = syscalls.unlinkat(dirFd, socketFilename, 0)
+                    if unlRes != 0 {
+                        unlErr = syscalls.lastErrno
+                    } else {
+                        unlinked = true
+                    }
                 }
             }
         }
 
         var unlocked = false
+        var unlckRes: Int32 = 0
+        var unlckErr: Int32 = 0
+        var lockCloseRes: Int32 = 0
+        var lockCloseErr: Int32 = 0
+
         if lockFd >= 0 {
-            let unlRes = syscalls.fileFlock(lockFd, LOCK_UN)
-            unlocked = (unlRes == 0)
-            _ = syscalls.close(lockFd)
+            unlckRes = syscalls.fileFlock(lockFd, LOCK_UN)
+            if unlckRes != 0 {
+                unlckErr = syscalls.lastErrno
+            } else {
+                unlocked = true
+            }
+            lockCloseRes = syscalls.close(lockFd)
+            if lockCloseRes != 0 {
+                lockCloseErr = syscalls.lastErrno
+            }
             lockFd = -1
         }
 
+        var dirCloseRes: Int32 = 0
+        var dirCloseErr: Int32 = 0
         if dirFd >= 0 {
-            _ = syscalls.close(dirFd)
+            dirCloseRes = syscalls.close(dirFd)
+            if dirCloseRes != 0 {
+                dirCloseErr = syscalls.lastErrno
+            }
             dirFd = -1
         }
 
@@ -674,12 +728,22 @@ public final class SocketListener: @unchecked Sendable {
         self.boundDirDev = 0
         self.boundDirInode = 0
         self.lastStopReport = StopReport(
+            listenerFd: origServerFd,
+            shutdownHow: SHUT_RDWR,
             shutdownResult: shutRes,
             shutdownErrno: shutErr,
-            closeResult: closeRes,
-            closeErrno: closeErr,
+            serverCloseResult: closeRes,
+            serverCloseErrno: closeErr,
             socketUnlinked: unlinked,
-            lockUnlocked: unlocked
+            unlinkResult: unlRes,
+            unlinkErrno: unlErr,
+            lockUnlocked: unlocked,
+            unlockResult: unlckRes,
+            unlockErrno: unlckErr,
+            lockCloseResult: lockCloseRes,
+            lockCloseErrno: lockCloseErr,
+            dirCloseResult: dirCloseRes,
+            dirCloseErrno: dirCloseErr
         )
     }
 }

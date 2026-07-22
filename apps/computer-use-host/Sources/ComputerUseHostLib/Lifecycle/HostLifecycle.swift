@@ -34,7 +34,13 @@ public final class HostLifecycle: @unchecked Sendable {
     }
 
     public func start() throws {
-        try listener.start()
+        setupSignalHandlers()
+        do {
+            try listener.start()
+        } catch {
+            stop()
+            throw error
+        }
     }
 
     public func runAcceptLoop() async throws {

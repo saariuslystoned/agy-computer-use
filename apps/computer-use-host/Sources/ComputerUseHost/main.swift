@@ -36,8 +36,6 @@ struct ComputerUseHostMain {
         logStderr("[ComputerUseHost] Socket path: \(listener.socketPath)")
 
         let lifecycle = HostLifecycle(listener: listener)
-        lifecycle.setupSignalHandlers()
-
         try lifecycle.start()
         logStderr("[ComputerUseHost] Socket listener bound and listening. Entering event loop...")
 
