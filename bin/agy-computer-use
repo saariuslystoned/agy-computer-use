@@ -140,6 +140,9 @@ async function main() {
 
     const selectionModulePath = path.join(mcpPkgDir, "dist/src/native-authority-selection.js");
     if (!fs.existsSync(selectionModulePath)) {
+      if (!fs.existsSync(path.join(rootDir, "node_modules")) && !fs.existsSync(path.join(mcpPkgDir, "node_modules"))) {
+        execSync(`pnpm --dir "${rootDir}" install --frozen-lockfile`, { env: process.env, stdio: "ignore" });
+      }
       execSync(`pnpm --dir "${mcpPkgDir}" build`, { env: process.env, stdio: "ignore" });
     }
 
