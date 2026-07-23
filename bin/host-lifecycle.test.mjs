@@ -103,24 +103,8 @@ function encodeFrame(value) {
   return Buffer.concat([header, body]);
 }
 
-function killOrphanNativeProcesses() {
-  try {
-    const out = execSync('ps -ax -o pid,command', { encoding: 'utf-8' });
-    for (const line of out.split('\n')) {
-      if (line.includes('ComputerUseHost') && !line.includes('grep')) {
-        const parts = line.trim().split(/\s+/);
-        const pid = parseInt(parts[0], 10);
-        if (pid && pid !== process.pid) {
-          try { process.kill(pid, 'SIGKILL'); } catch {}
-        }
-      }
-    }
-  } catch {}
-}
-
 // D1/D2: Cold Concurrency, Preconditions & Native Process Accounting
 test('D1-D2: Cold concurrent start, stopped precondition, single winner, and native process accounting', { timeout: 20000 }, async (t) => {
-  killOrphanNativeProcesses();
 
   const cleanupStack = [];
   t.after(async () => {
@@ -316,6 +300,7 @@ test('D6, D12: Cooperative vs stubborn child teardown with grace timer and KILL 
   cleanupStack.push(async () => { try { coopProc.kill('SIGKILL'); } catch {} });
 
   const supervisor1 = new ProductionHostSupervisor({ runtimeDir: testDir });
+  supervisor1.ensureLockFile();
   supervisor1.child = coopProc;
   supervisor1.childClosedPromise = new Promise((resolve) => {
     coopProc.on('close', (code, signal) => resolve({ code, signal }));
@@ -335,6 +320,7 @@ test('D6, D12: Cooperative vs stubborn child teardown with grace timer and KILL 
   cleanupStack.push(async () => { try { stubbornProc.kill('SIGKILL'); } catch {} });
 
   const supervisor2 = new ProductionHostSupervisor({ runtimeDir: testDir });
+  supervisor2.ensureLockFile();
   supervisor2.child = stubbornProc;
   supervisor2.childClosedPromise = new Promise((resolve) => {
     stubbornProc.on('close', (code, signal) => resolve({ code, signal }));
@@ -474,6 +460,19 @@ test('D9: Dangling control socket returns STALE_OR_AMBIGUOUS via public CLI comm
 
   const paths = getCanonicalSocketPaths();
   await createRealDanglingSocket(paths.controlSocketPath);
+
+  const danglingSt = fs.lstatSync(paths.controlSocketPath);
+  const rootIdentity = getCanonicalRuntimeDirIdentity();
+  cleanupStack.push(async () => {
+    try {
+      safeUnlinkSocket(paths.controlSocketPath, rootIdentity, {
+        uid: danglingSt.uid,
+        type: 'socket',
+        ino: danglingSt.ino,
+        dev: danglingSt.dev
+      });
+    } catch {}
+  });
 
   const initialIno = fs.lstatSync(paths.controlSocketPath).ino;
 
@@ -738,6 +737,7 @@ test('Commit 1: Slow cooperative stop and bounded never-closing child', { timeou
   t.after(() => cleanupTestDir(testDir));
 
   const supervisor = new ProductionHostSupervisor({ runtimeDir: testDir });
+  supervisor.ensureLockFile();
   // Mock a non-closing child process
   supervisor.child = {
     pid: 99999,
