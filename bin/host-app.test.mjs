@@ -1837,4 +1837,3 @@ test('ARP3-BUILD-ARG: buildHostRelease strict argument rejection and state immut
 
     assert.deepStrictEqual(captureStateIdentity(), stateBeforeAll, 'Overall state identity must be invariant across full matrix');
 });
-
