@@ -742,23 +742,23 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
     assert.deepEqual(prodServer.args, []);
     assert.equal(prodServer.cwd, ".");
 
-    let toolchainBinDir = "/usr/bin";
+    const nodeBinDir = path.dirname(process.execPath);
+    let pnpmBinDir = nodeBinDir;
     try {
-      const misePath = execSync("command -v mise || true", { encoding: "utf-8" }).trim();
-      if (misePath) {
-        toolchainBinDir = path.dirname(misePath);
-      } else {
-        toolchainBinDir = path.dirname(process.execPath);
+      const pnpmPath = execSync("command -v pnpm || true", { encoding: "utf-8" }).trim();
+      if (pnpmPath) {
+        pnpmBinDir = path.dirname(pnpmPath);
       }
-    } catch {
-      toolchainBinDir = path.dirname(process.execPath);
-    }
+    } catch {}
+
+    const pathDirs = Array.from(new Set([nodeBinDir, pnpmBinDir, "/usr/bin", "/bin"])).join(":");
 
     const minimalPathEnv = {
-      PATH: `${toolchainBinDir}:/usr/bin:/bin`,
+      PATH: pathDirs,
       HOME: process.env.HOME || "",
       USER: process.env.USER || "",
-      SHELL: process.env.SHELL || "/bin/sh"
+      SHELL: process.env.SHELL || "/bin/sh",
+      TEST_FORCE_MISSING_MISE: "1"
     };
 
     const transport = new StdioClientTransport({
