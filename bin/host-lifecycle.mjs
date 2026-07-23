@@ -153,15 +153,12 @@ export async function executeHostStart(customSupervisor) {
 
   while (Date.now() - startTime < timeoutMs) {
     const cProbe = await supervisor.checkControlStatus(300);
-    if (cProbe.alive) {
-      const nProbe = await supervisor.checkNativeStatus(300);
-      if (nProbe.alive) {
-        ctrlReady = true;
-        nativeData = nProbe.data;
-        finalCtrlData = cProbe.data;
-        break;
-      }
-    } else if (daemonClosed || daemon.exitCode !== null || daemon.signalCode !== null) {
+    if (cProbe.alive && cProbe.data.status === 'running' && cProbe.data.native) {
+      ctrlReady = true;
+      finalCtrlData = cProbe.data;
+      nativeData = cProbe.data.native;
+      break;
+    } else if (!cProbe.alive && (daemonClosed || daemon.exitCode !== null || daemon.signalCode !== null)) {
       break;
     }
     await new Promise((r) => setTimeout(r, 150));
@@ -292,12 +289,12 @@ export async function executeHostStop(customSupervisor) {
           receipt.generation !== ownerGen ||
           typeof receipt.daemonPid !== 'number' ||
           receipt.daemonPid !== ownerDaemonPid ||
-          (receipt.nativePid !== null && typeof receipt.nativePid !== 'number') ||
+          receipt.nativePid !== ownerNativePid ||
           receipt.native_closed !== true ||
           typeof receipt.killEscalated !== 'boolean' ||
           !receipt.residueState ||
-          typeof receipt.residueState.hostSocketClean !== 'boolean' ||
-          typeof receipt.residueState.lockFilePreserved !== 'boolean'
+          receipt.residueState.hostSocketClean !== true ||
+          receipt.residueState.lockFilePreserved !== true
         ) {
           fail('Malformed stop receipt received from supervisor', 'error', 'MALFORMED_RECEIPT', 1);
         }

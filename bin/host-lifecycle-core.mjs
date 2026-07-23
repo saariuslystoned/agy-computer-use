@@ -102,6 +102,12 @@ export function safeUnlinkSocket(socketPath, rootIdentity, socketIdentity) {
   if (st.uid !== currentUid) {
     throw new Error(`Refusing to unlink socket owned by UID ${st.uid} (expected ${currentUid})`);
   }
+  if (socketIdentity.uid !== undefined && socketIdentity.uid !== null && st.uid !== socketIdentity.uid) {
+    throw new Error(`Refusing to unlink socket at ${socketPath}: UID mismatch (expected ${socketIdentity.uid}, got ${st.uid})`);
+  }
+  if (socketIdentity.type !== undefined && socketIdentity.type !== null && socketIdentity.type === 'socket' && !st.isSocket()) {
+    throw new Error(`Refusing to unlink socket at ${socketPath}: type mismatch (expected socket, got non-socket)`);
+  }
   if (socketIdentity.ino !== undefined && socketIdentity.ino !== null && st.ino !== socketIdentity.ino) {
     throw new Error(`Refusing to unlink socket at ${socketPath}: inode mismatch (expected ${socketIdentity.ino}, got ${st.ino})`);
   }
@@ -407,7 +413,12 @@ export class ProductionHostSupervisor {
           return reject(new Error(`Active supervisor control server already running on ${this.controlSocketPath}`));
         }
         try {
-          safeUnlinkSocket(this.controlSocketPath, this.rootIdentity, { ino: existingControlSt.ino, dev: existingControlSt.dev });
+          safeUnlinkSocket(this.controlSocketPath, this.rootIdentity, {
+            uid: existingControlSt.uid,
+            type: 'socket',
+            ino: existingControlSt.ino,
+            dev: existingControlSt.dev
+          });
         } catch (unlinkErr) {
           return reject(unlinkErr);
         }
@@ -510,9 +521,17 @@ export class ProductionHostSupervisor {
               socket.write(Buffer.concat([headBuf, respBuf]), () => {
                 try { socket.end(); } catch {}
                 if (req.method === 'stop') {
-                  setImmediate(() => {
-                    this._finalizeDaemonTeardown();
-                  });
+                  let teardownDone = false;
+                  const triggerTeardown = () => {
+                    if (teardownDone) return;
+                    teardownDone = true;
+                    setImmediate(() => {
+                      this._finalizeDaemonTeardown();
+                    });
+                  };
+                  socket.once('close', triggerTeardown);
+                  socket.once('finish', triggerTeardown);
+                  setTimeout(triggerTeardown, 1000);
                 }
               });
             }).catch((err) => {
@@ -532,6 +551,9 @@ export class ProductionHostSupervisor {
     });
 
     server.on('error', (err) => {
+      if (this.state === 'starting' || this.state === 'running') {
+        this.stop().then(() => this.finalizeDaemonTeardown()).catch(() => this.finalizeDaemonTeardown());
+      }
       reject(err);
     });
 
@@ -573,9 +595,7 @@ export class ProductionHostSupervisor {
       });
     }
     if (this.controlSocketIno !== null && this.controlSocketDev !== null && this.rootIdentity) {
-      let st = null;
-      try { st = fs.lstatSync(this.controlSocketPath); } catch {}
-      const socketUid = st ? st.uid : (process.getuid ? process.getuid() : 501);
+      const socketUid = this.rootIdentity.uid;
       safeUnlinkSocket(this.controlSocketPath, this.rootIdentity, { uid: socketUid, type: 'socket', ino: this.controlSocketIno, dev: this.controlSocketDev });
     }
     if (this.isDaemonProcess) {
@@ -711,6 +731,9 @@ export class ProductionHostSupervisor {
         if (this.childClosedResolver) {
           this.childClosedResolver({ code, signal });
         }
+        if (this.state === 'running' && !this.cleanupPromise) {
+          this.stop().then(() => this.finalizeDaemonTeardown()).catch(() => this.finalizeDaemonTeardown());
+        }
       });
 
       proc.on('error', (err) => {
@@ -818,6 +841,10 @@ export class ProductionHostSupervisor {
       } else {
         nativeClosed = true;
       }
+      if (!nativeClosed) {
+        this.cleanupPromise = null;
+        throw new Error('Native child process failed to close after bounded TERM/KILL waits');
+      }
       this.child = null;
     } else {
       nativeClosed = true;
@@ -826,9 +853,7 @@ export class ProductionHostSupervisor {
     let hostSocketClean = true;
     if (this.hostSocketIno !== null && this.hostSocketDev !== null && this.rootIdentity) {
       try {
-        let st = null;
-        try { st = fs.lstatSync(this.hostSocketPath); } catch {}
-        const socketUid = st ? st.uid : (process.getuid ? process.getuid() : 501);
+        const socketUid = this.rootIdentity.uid;
         safeUnlinkSocket(this.hostSocketPath, this.rootIdentity, { uid: socketUid, type: 'socket', ino: this.hostSocketIno, dev: this.hostSocketDev });
       } catch (err) {
         if (err.code !== 'ENOENT') hostSocketClean = false;

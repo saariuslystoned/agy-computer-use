@@ -65,7 +65,7 @@ function runAGYAsync(args, env = {}, timeoutMs = 12000) {
 function getNativeProcessCount() {
   try {
     const out = execSync('ps -ax -o pid,command', { encoding: 'utf-8' });
-    const lines = out.split('\n').filter(line => line.includes('ComputerUseHost') && !line.includes('grep'));
+    const lines = out.split('\n').filter(line => (line.includes('/ComputerUseHost') || line.includes('ComputerUseHost.app')) && !line.includes('TestRunner') && !line.includes('grep') && !line.includes('swift'));
     return lines.length;
   } catch {
     return 0;
@@ -119,11 +119,7 @@ test('D1-D2: Cold concurrent start, stopped precondition, single winner, and nat
 
   // Ensure genuinely stopped state
   const initialStop = await runAGYAsync(['host-stop']);
-  if (initialStop.code !== 0) {
-    const paths = getCanonicalSocketPaths();
-    try { fs.unlinkSync(paths.controlSocketPath); } catch {}
-    try { fs.unlinkSync(paths.hostSocketPath); } catch {}
-  }
+  assert.equal(initialStop.code, 0, `Precondition failed: host-stop must succeed cleanly without raw socket unlinking: ${initialStop.stderr}`);
 
   // Cold-start two separate public commands concurrently
   const [cStart1, cStart2] = await Promise.all([
@@ -783,5 +779,23 @@ test('Commit 1: Cross-session status consistency', { timeout: 10000 }, async (t)
   assert.equal(probe.alive, false, 'running state without embedded native observation rejected');
   await supervisor.finalizeDaemonTeardown();
 });
+
+test('Commit 2: Unclosed child retains authority and throws terminal failure', { timeout: 10000 }, async (t) => {
+  const testDir = createTestHarnessDir();
+  t.after(() => cleanupTestDir(testDir));
+
+  const supervisor = new ProductionHostSupervisor({ runtimeDir: testDir });
+  supervisor.ensureLockFile();
+  const mockChild = { pid: 99999, kill: () => true };
+  supervisor.child = mockChild;
+  supervisor.childClosedPromise = new Promise(() => {}); // Never resolves
+
+  await assert.rejects(
+    supervisor.stop(50),
+    /Native child process failed to close/
+  );
+  assert.equal(supervisor.child, mockChild, 'Child authority must be retained when close is not proved');
+});
+
 
 
