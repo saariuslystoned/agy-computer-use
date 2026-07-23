@@ -78,9 +78,9 @@ jobs:
           }
 
           check_no_match "CGRequestScreenCaptureAccess" 'apps/computer-use-host/Sources/'
-          check_no_match "CGEvent" 'apps/computer-use-host/Sources/'
           check_no_match "Fake" 'apps/computer-use-host/Sources/'
           check_no_match "recordCase(" 'apps/computer-use-host/Tests/'
+          git grep -q "let inputEngine = CGEventInputSynthesisEngine()" -- 'apps/computer-use-host/Sources/ComputerUseHost/main.swift'
 
           # Self-probes proving guards fail closed independently
           # 1. Positive match probe (must fail with status 1 because 'import' exists)
