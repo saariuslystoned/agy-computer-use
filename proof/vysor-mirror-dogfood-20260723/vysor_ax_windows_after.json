@@ -1,0 +1,20 @@
+[
+  {
+    "title": "Pixel 10_Pro_XL",
+    "bounds": {
+      "x": 704,
+      "y": 30,
+      "width": 394,
+      "height": 963
+    }
+  },
+  {
+    "title": "Vysor",
+    "bounds": {
+      "x": 16,
+      "y": 33,
+      "width": 800,
+      "height": 940
+    }
+  }
+]

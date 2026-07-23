@@ -1,0 +1,53 @@
+[
+  {
+    "title": "Vysor",
+    "bounds": {
+      "x": 16,
+      "y": 33,
+      "width": 800,
+      "height": 940
+    },
+    "children": [
+      {
+        "role": "AXGroup",
+        "title": "",
+        "bounds": {
+          "x": 16,
+          "y": 33,
+          "width": 800,
+          "height": 940
+        }
+      },
+      {
+        "role": "AXButton",
+        "title": "",
+        "bounds": {
+          "x": 29,
+          "y": 45,
+          "width": 12,
+          "height": 14
+        }
+      },
+      {
+        "role": "AXButton",
+        "title": "",
+        "bounds": {
+          "x": 69,
+          "y": 45,
+          "width": 12,
+          "height": 14
+        }
+      },
+      {
+        "role": "AXButton",
+        "title": "",
+        "bounds": {
+          "x": 49,
+          "y": 45,
+          "width": 12,
+          "height": 14
+        }
+      }
+    ]
+  }
+]
