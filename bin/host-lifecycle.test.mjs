@@ -899,8 +899,23 @@ test('M9-LAUNCHSERVICES: Staged app launch uses LaunchServices open with exact f
   const validAppDir = path.join(REPO_ROOT, 'apps/computer-use-host/.build/staged/ComputerUseHost.app');
   const openLogFile = path.join(testDir, 'open-args.json');
   const launcherPidFile = path.join(testDir, 'launcher-pid.json');
+  const childPidFile = path.join(testDir, 'child-pid.json');
   const mockNativeBin = path.join(testDir, 'mock-native-host.js');
   const mockOpenBin = path.join(testDir, 'mock-open.js');
+
+  const stagedBinaryPath = path.resolve(path.join(validAppDir, 'Contents/MacOS/ComputerUseHost'));
+
+  t.after(() => {
+    try {
+      if (fs.existsSync(childPidFile)) {
+        const childPid = parseInt(fs.readFileSync(childPidFile, 'utf8'), 10);
+        if (childPid > 0) {
+          try { process.kill(childPid, 'SIGKILL'); } catch {}
+        }
+      }
+    } catch {}
+    cleanupTestDir(testDir);
+  });
 
   const nativeScriptContent = `#!/usr/bin/env node
 import fs from 'node:fs';
@@ -962,15 +977,28 @@ if (socketPath) {
     detached: true,
     stdio: 'ignore'
   });
+  fs.writeFileSync(${JSON.stringify(childPidFile)}, String(child.pid));
   child.unref();
 }
 process.exit(0);
 `;
   fs.writeFileSync(mockOpenBin, openScriptContent, { mode: 0o755 });
 
+  let spawnedChildPid = null;
+  const mockProcessInspector = () => {
+    if (fs.existsSync(childPidFile)) {
+      spawnedChildPid = parseInt(fs.readFileSync(childPidFile, 'utf8'), 10);
+      if (spawnedChildPid > 0) {
+        return [{ pid: spawnedChildPid, executable: stagedBinaryPath }];
+      }
+    }
+    return [];
+  };
+
   const supervisor = new ProductionHostSupervisor({
     runtimeDir: testDir,
-    stagedAppDir: validAppDir
+    stagedAppDir: validAppDir,
+    processInspector: mockProcessInspector
   });
 
   const startRes = await supervisor.start({
@@ -999,6 +1027,73 @@ process.exit(0);
   const stopRes = await supervisor.stop();
   assert.equal(stopRes.status, 'stopped');
   assert.equal(stopRes.native_closed, true);
+
+  if (spawnedChildPid) {
+    let alive = true;
+    try { process.kill(spawnedChildPid, 0); } catch { alive = false; }
+    assert.equal(alive, false, 'Fixture child process MUST be terminated by supervisor stop with zero leak');
+  }
+});
+
+test('M9-LAUNCHSERVICES-REJECT-PREEXISTING: Rejects launch if pre-existing staged native process exists before launch', async (t) => {
+  const testDir = createTestHarnessDir();
+  t.after(() => cleanupTestDir(testDir));
+
+  const validAppDir = path.join(REPO_ROOT, 'apps/computer-use-host/.build/staged/ComputerUseHost.app');
+  const stagedBinaryPath = path.resolve(path.join(validAppDir, 'Contents/MacOS/ComputerUseHost'));
+
+  const supervisor = new ProductionHostSupervisor({
+    runtimeDir: testDir,
+    stagedAppDir: validAppDir,
+    processInspector: () => [{ pid: 88888, executable: stagedBinaryPath }]
+  });
+
+  await assert.rejects(
+    async () => { await supervisor.start(); },
+    (err) => {
+      assert.match(err.message, /Refusing to launch staged app/);
+      assert.match(err.message, /pre-existing running instance/);
+      return true;
+    },
+    'Must fail closed when pre-existing running process is found before launch'
+  );
+});
+
+test('M9-LAUNCHSERVICES-REJECT-MULTIPLE: Rejects launch if ambiguous multiple processes found post readiness', async (t) => {
+  const testDir = createTestHarnessDir();
+  t.after(() => cleanupTestDir(testDir));
+
+  const validAppDir = path.join(REPO_ROOT, 'apps/computer-use-host/.build/staged/ComputerUseHost.app');
+  const stagedBinaryPath = path.resolve(path.join(validAppDir, 'Contents/MacOS/ComputerUseHost'));
+
+  let callCount = 0;
+  const mockInspector = () => {
+    callCount++;
+    if (callCount === 1) return []; // Pre-launch check: 0 processes
+    return [
+      { pid: 88881, executable: stagedBinaryPath },
+      { pid: 88882, executable: stagedBinaryPath }
+    ]; // Post-readiness check: 2 processes
+  };
+
+  const supervisor = new ProductionHostSupervisor({
+    runtimeDir: testDir,
+    stagedAppDir: validAppDir,
+    processInspector: mockInspector
+  });
+
+  // Mock control server / checkNativeStatus to report ready
+  supervisor.checkNativeStatus = async () => ({ alive: true, data: { pid: 88881 } });
+  supervisor.startControlServer = async () => {};
+
+  await assert.rejects(
+    async () => { await supervisor.start({ binaryPath: path.join(validAppDir, 'Contents/MacOS/ComputerUseHost') }); },
+    (err) => {
+      assert.match(err.message, /ambiguous multiple \(2\) new running processes/);
+      return true;
+    },
+    'Must fail closed when multiple running processes appear post readiness'
+  );
 });
 
 test('M9-LAUNCHSERVICES-REJECT-MISMATCH: Rejects process termination if executable identity does not match staged binary', async (t) => {
@@ -1012,15 +1107,14 @@ test('M9-LAUNCHSERVICES-REJECT-MISMATCH: Rejects process termination if executab
   });
 
   supervisor.nativePid = process.pid;
-  supervisor.customOpenBinary = null;
+  supervisor.nativeProcIdentity = { pid: process.pid, executable: '/non/existent/path/ComputerUseHost', lstart: 'fake-time' };
 
   await assert.rejects(
     async () => { await supervisor.stop(); },
     (err) => {
-      assert.match(err.message, /executable identity/);
-      assert.match(err.message, /does not match expected staged binary/);
+      assert.match(err.message, /does not match captured birth identity/);
       return true;
     },
-    'Must fail closed when PID executable identity does not match staged app binary'
+    'Must fail closed when PID process identity does not match captured birth identity'
   );
 });
