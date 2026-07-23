@@ -157,24 +157,107 @@ export function validateStageTargetDir(targetDir, allowedRoot) {
     return rawTarget;
 }
 
-export async function stageHostApp(options = {}) {
-    const forbiddenKeys = ['projectRoot', 'targetDir', 'allowedTestRoot', 'testRoot', 'beforeRemovalHook'];
-    for (const key of forbiddenKeys) {
-        if (key in options) {
+const STANDARD_OBJECT_PROTOS = new Set([
+    'constructor',
+    'toString',
+    'valueOf',
+    'toLocaleString',
+    'hasOwnProperty',
+    'isPrototypeOf',
+    'propertyIsEnumerable',
+    '__defineGetter__',
+    '__defineSetter__',
+    '__lookupGetter__',
+    '__lookupSetter__',
+    '__proto__'
+]);
+
+function validateStageOptions(options) {
+    if (options === undefined) {
+        return { hasBuild: false, build: true, hasHarness: false, harness: undefined, hasRelativeTarget: false, relativeTarget: undefined };
+    }
+    if (options === null || typeof options !== 'object') {
+        throw new Error('Option must be an object');
+    }
+    if (Object.getPrototypeOf(options) !== Object.prototype) {
+        throw new Error('Options object must have Object.prototype');
+    }
+
+    const ownKeys = Reflect.ownKeys(options);
+    for (const key of ownKeys) {
+        if (typeof key === 'symbol') {
+            throw new Error('Options object cannot contain symbol keys');
+        }
+        if (key !== 'build' && key !== 'harness' && key !== 'relativeTarget') {
             throw new Error(`Option '${key}' is forbidden in stageHostApp`);
         }
     }
 
-    let harnessState = null;
-    if ('harness' in options) {
-        harnessState = harnessStateMap.get(options.harness);
-        if (!harnessState) {
+    for (const key in options) {
+        if (!Object.prototype.hasOwnProperty.call(options, key)) {
+            throw new Error(`Inherited option '${key}' is forbidden`);
+        }
+    }
+
+    for (const key of Reflect.ownKeys(Object.prototype)) {
+        if (typeof key === 'symbol') {
+            if (key in options && !Object.prototype.hasOwnProperty.call(options, key)) {
+                throw new Error('Inherited symbol option is forbidden');
+            }
+        } else if (!STANDARD_OBJECT_PROTOS.has(key)) {
+            if (key in options && !Object.prototype.hasOwnProperty.call(options, key)) {
+                throw new Error(`Inherited option '${key}' is forbidden`);
+            }
+        }
+    }
+
+    for (const allowedKey of ['build', 'harness', 'relativeTarget']) {
+        if (allowedKey in options && !Object.prototype.hasOwnProperty.call(options, allowedKey)) {
+            throw new Error(`Inherited option '${allowedKey}' is forbidden`);
+        }
+    }
+
+    const hasBuild = Object.prototype.hasOwnProperty.call(options, 'build');
+    const hasHarness = Object.prototype.hasOwnProperty.call(options, 'harness');
+    const hasRelativeTarget = Object.prototype.hasOwnProperty.call(options, 'relativeTarget');
+
+    let build;
+    if (hasBuild) {
+        if (typeof options.build !== 'boolean') {
+            throw new Error('Option build must be a boolean');
+        }
+        build = options.build;
+    }
+
+    let harness;
+    if (hasHarness) {
+        const state = harnessStateMap.get(options.harness);
+        if (!state) {
             throw new Error('Option harness must be an instance of TestStagingHarness');
         }
-    } else {
-        if ('relativeTarget' in options) {
+        harness = options.harness;
+    }
+
+    let relativeTarget;
+    if (hasRelativeTarget) {
+        if (!hasHarness) {
             throw new Error('Option relativeTarget is forbidden without a test harness');
         }
+        if (typeof options.relativeTarget !== 'string') {
+            throw new Error('Option relativeTarget must be a string');
+        }
+        relativeTarget = options.relativeTarget;
+    }
+
+    return { hasBuild, build, hasHarness, harness, hasRelativeTarget, relativeTarget };
+}
+
+export async function stageHostApp(options) {
+    const validated = validateStageOptions(options);
+
+    let harnessState = null;
+    if (validated.hasHarness) {
+        harnessState = harnessStateMap.get(validated.harness);
     }
 
     const hostPackageDir = path.join(REPO_ROOT, 'apps/computer-use-host');
@@ -194,7 +277,7 @@ export async function stageHostApp(options = {}) {
             throw new Error(`Allowed root ${stagingRoot} must have private 0700 permissions`);
         }
 
-        const relTarget = options.relativeTarget || 'ComputerUseHost.app';
+        const relTarget = validated.hasRelativeTarget ? validated.relativeTarget : 'ComputerUseHost.app';
         if (path.isAbsolute(relTarget)) {
             throw new Error(`relativeTarget ${relTarget} must be a relative path beneath harness root`);
         }
@@ -227,7 +310,7 @@ export async function stageHostApp(options = {}) {
     const binaryTarget = path.join(macOSDir, 'ComputerUseHost');
     const infoPlistTarget = path.join(contentsDir, 'Info.plist');
 
-    const shouldBuild = options.build !== false;
+    const shouldBuild = validated.hasBuild ? validated.build : true;
     if (shouldBuild) {
         await execFileAsync('swift', [
             'build',

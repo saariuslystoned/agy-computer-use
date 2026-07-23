@@ -947,16 +947,8 @@ test('ARP2-F2: Zero public fixed-production seam module-namespace assertion and 
         if ('_testValidationHook' in mod || '_setTestValidationHook' in mod) {
             process.exit(2);
         }
-        let callerCallbackCount = 0;
-        const options = {
-            build: false,
-            _testValidationHook: () => { callerCallbackCount++; },
-            _setTestValidationHook: () => { callerCallbackCount++; }
-        };
+        const options = { build: false };
         await mod.stageHostApp(options);
-        if (callerCallbackCount !== 0) {
-            process.exit(3);
-        }
         console.log(JSON.stringify({ staged: true, callerCallbackCount: 0 }));
         process.exit(0);
     `;
@@ -970,6 +962,19 @@ test('ARP2-F2: Zero public fixed-production seam module-namespace assertion and 
     } finally {
         fs.rmSync(tmpScript, { force: true });
     }
+
+    let callbackCount = 0;
+    await assert.rejects(
+        async () => await hostAppModule.stageHostApp({ build: false, _testValidationHook: () => { callbackCount++; } }),
+        /forbidden in stageHostApp/
+    );
+    assert.equal(callbackCount, 0, '_testValidationHook rejection must execute zero callbacks');
+
+    await assert.rejects(
+        async () => await hostAppModule.stageHostApp({ build: false, _setTestValidationHook: () => { callbackCount++; } }),
+        /forbidden in stageHostApp/
+    );
+    assert.equal(callbackCount, 0, '_setTestValidationHook rejection must execute zero callbacks');
 });
 
 test('ARP2-S3: Nonvacuous snapshotTree oracle direct test', async () => {
@@ -1410,5 +1415,75 @@ test('A-L3: Bounded supervisor unit tests for spawn error, early exit, timeout, 
         assert.equal(code1, 0);
         const code2 = await reapChild(mon, 1000);
         assert.equal(code2, 0);
+    });
+});
+
+test('ARP3-G1: Strict stageHostApp public option grammar and obsolete-hook rejection', async (t) => {
+    await t.test('1. Valid stageHostApp call variants resolve cleanly', async () => {
+        const harness = new TestStagingHarness();
+        try {
+            const res1 = await stageHostApp({ harness, build: false });
+            assert.equal(res1.success, true);
+
+            const res2 = await stageHostApp({ harness, build: false, relativeTarget: 'custom.app' });
+            assert.equal(res2.appPath, path.join(harness.rootDir, 'custom.app'));
+        } finally {
+            harness.cleanup();
+        }
+    });
+
+    await t.test('2. Option type and prototype rejections', async () => {
+        const harness = new TestStagingHarness();
+        try {
+            const invalidOptions = [
+                null,
+                123,
+                'invalid',
+                true,
+                Symbol('opt'),
+                () => {},
+                [],
+                Object.assign(Object.create(null), { harness, build: false }),
+                Object.assign(Object.create({ build: false }), { harness }),
+                Object.assign(Object.create({ relativeTarget: 'inherited.app' }), { harness, build: false })
+            ];
+            for (const opt of invalidOptions) {
+                await assert.rejects(
+                    async () => await stageHostApp(opt),
+                    /Option/
+                );
+            }
+        } finally {
+            harness.cleanup();
+        }
+    });
+
+    await t.test('3. Symbol, non-enumerable, and unknown key rejections', async () => {
+        const harness = new TestStagingHarness();
+        try {
+            const symOpt = { harness, build: false, [Symbol('key')]: true };
+            await assert.rejects(async () => await stageHostApp(symOpt), /symbol/i);
+
+            const nonEnumOpt = { harness, build: false };
+            Object.defineProperty(nonEnumOpt, 'nonEnumKey', { value: 1, enumerable: false });
+            await assert.rejects(async () => await stageHostApp(nonEnumOpt), /forbidden/i);
+
+            const unknownOpt = { harness, build: false, execFileAsync: () => {} };
+            await assert.rejects(async () => await stageHostApp(unknownOpt), /forbidden/i);
+        } finally {
+            harness.cleanup();
+        }
+    });
+
+    await t.test('4. Field type validation for build, harness, relativeTarget', async () => {
+        const harness = new TestStagingHarness();
+        try {
+            await assert.rejects(async () => await stageHostApp({ harness, build: 'false' }), /boolean/i);
+            await assert.rejects(async () => await stageHostApp({ harness: {} }), /instance of TestStagingHarness/i);
+            await assert.rejects(async () => await stageHostApp({ relativeTarget: 'foo.app' }), /without a test harness/i);
+            await assert.rejects(async () => await stageHostApp({ harness, relativeTarget: 123 }), /must be a string/i);
+        } finally {
+            harness.cleanup();
+        }
     });
 });
