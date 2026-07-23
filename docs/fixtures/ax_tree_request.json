@@ -1,0 +1,8 @@
+{
+  "id": "req-ax-001",
+  "method": "ax_tree",
+  "params": {
+    "app_id": "com.apple.calculator",
+    "max_depth": 5
+  }
+}

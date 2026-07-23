@@ -110,7 +110,7 @@ export class MockHostClient implements HostClient {
       };
     }
 
-    if (["click", "type", "shortcut"].includes(method)) {
+    if (["click", "move", "type", "shortcut", "scroll", "drag"].includes(method)) {
       if (this.inputMutationState === "disabled") {
         return {
           id: "mock-dis",
@@ -133,24 +133,30 @@ export class MockHostClient implements HostClient {
       };
     }
 
-    if (["move", "drag", "scroll"].includes(method)) {
-      return {
-        id: "mock-dis",
-        success: false,
-        error: {
-          code: "MUTATION_DISABLED",
-          message: "Input mutation action not supported in this slice"
-        }
-      };
-    }
-
     if (method === "ax_tree") {
+      const topVer = "top-sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
       return {
         id: "mock-ax",
-        success: false,
-        error: {
-          code: "TARGET_UNREACHABLE",
-          message: "AX tree inspection is unavailable in the current M9 bounded input slice"
+        success: true,
+        data: {
+          target_app: {
+            pid: 1234,
+            bundle_id: (params?.app_id as string) || "com.apple.calculator",
+            name: "Calculator"
+          },
+          topology_version: topVer,
+          node_count: 1,
+          max_depth_reached: 1,
+          truncated: false,
+          tree: {
+            id: "ax-AXApplication-1",
+            role: "AXApplication",
+            subrole: "AXStandard",
+            title: "Calculator",
+            enabled: true,
+            focused: true,
+            bounds: { x: 0, y: 0, width: 300, height: 400 }
+          }
         }
       };
     }

@@ -1,15 +1,20 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "ComputerUseIPCProtocol",
-  "description": "IPC request and response schemas for the D2 observation foundation and M9 bounded input slice",
+  "description": "IPC request and response schemas for the D2 observation foundation and M10 nine-tool surface",
   "oneOf": [
     { "$ref": "#/definitions/StatusRequest" },
     { "$ref": "#/definitions/ObserveRequest" },
+    { "$ref": "#/definitions/AxTreeRequest" },
     { "$ref": "#/definitions/ClickRequest" },
+    { "$ref": "#/definitions/MoveRequest" },
     { "$ref": "#/definitions/TypeRequest" },
     { "$ref": "#/definitions/ShortcutRequest" },
+    { "$ref": "#/definitions/ScrollRequest" },
+    { "$ref": "#/definitions/DragRequest" },
     { "$ref": "#/definitions/StatusResponse" },
     { "$ref": "#/definitions/ObserveResponse" },
+    { "$ref": "#/definitions/AxTreeResponse" },
     { "$ref": "#/definitions/ActionResultResponse" },
     { "$ref": "#/definitions/ErrorResponse" }
   ],
@@ -35,6 +40,23 @@
           "additionalProperties": false,
           "properties": {
             "display_id": { "type": "integer", "minimum": 1 }
+          }
+        }
+      }
+    },
+    "AxTreeRequest": {
+      "type": "object",
+      "required": ["id", "method"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "method": { "const": "ax_tree" },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "app_id": { "type": "string", "minLength": 1 },
+            "max_depth": { "type": "integer", "minimum": 1, "maximum": 10 }
           }
         }
       }
@@ -105,6 +127,8 @@
             "tcc_permission_state": { "enum": ["granted", "denied"] },
             "accessibility_available": { "type": "boolean" },
             "accessibility_trusted": { "type": "boolean" },
+            "ax_tree_inspection_available": { "type": "boolean" },
+            "pid": { "type": "integer", "minimum": 1 },
             "input_mutation_state": { "enum": ["enabled", "disabled"] },
             "topology_version": { "type": "string", "pattern": "^top-sha256-[0-9a-f]{64}$" },
             "primary_display_id": { "type": "integer", "minimum": 1 },
@@ -169,6 +193,66 @@
         }
       }
     },
+    "AxNode": {
+      "type": "object",
+      "required": ["id", "role", "bounds"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "role": { "type": "string", "minLength": 1 },
+        "subrole": { "type": "string" },
+        "title": { "type": "string" },
+        "value": { "type": "string" },
+        "enabled": { "type": "boolean" },
+        "focused": { "type": "boolean" },
+        "bounds": {
+          "type": "object",
+          "required": ["x", "y", "width", "height"],
+          "additionalProperties": false,
+          "properties": {
+            "x": { "type": "number" },
+            "y": { "type": "number" },
+            "width": { "type": "number" },
+            "height": { "type": "number" }
+          }
+        },
+        "children": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/AxNode" }
+        }
+      }
+    },
+    "AxTreeResponse": {
+      "type": "object",
+      "required": ["id", "success", "data"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "success": { "const": true },
+        "data": {
+          "type": "object",
+          "required": ["target_app", "topology_version", "node_count", "max_depth_reached", "truncated", "tree"],
+          "additionalProperties": false,
+          "properties": {
+            "target_app": {
+              "type": "object",
+              "required": ["pid"],
+              "additionalProperties": false,
+              "properties": {
+                "pid": { "type": "integer", "minimum": 1 },
+                "bundle_id": { "type": "string" },
+                "name": { "type": "string" }
+              }
+            },
+            "topology_version": { "type": "string", "pattern": "^top-sha256-[0-9a-f]{64}$" },
+            "node_count": { "type": "integer", "minimum": 0 },
+            "max_depth_reached": { "type": "integer", "minimum": 0 },
+            "truncated": { "type": "boolean" },
+            "tree": { "$ref": "#/definitions/AxNode" }
+          }
+        }
+      }
+    },
     "ClickRequest": {
       "type": "object",
       "required": ["id", "method", "params"],
@@ -187,6 +271,27 @@
             "y": { "type": "integer", "minimum": 0, "maximum": 999 },
             "button": { "enum": ["left", "right", "middle"] },
             "click_count": { "type": "integer", "minimum": 1, "maximum": 3 },
+            "intent": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "MoveRequest": {
+      "type": "object",
+      "required": ["id", "method", "params"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "method": { "const": "move" },
+        "params": {
+          "type": "object",
+          "required": ["capture_id", "topology_version", "x", "y", "intent"],
+          "additionalProperties": false,
+          "properties": {
+            "capture_id": { "type": "string", "minLength": 1 },
+            "topology_version": { "type": "string", "pattern": "^top-sha256-[0-9a-f]{64}$" },
+            "x": { "type": "integer", "minimum": 0, "maximum": 999 },
+            "y": { "type": "integer", "minimum": 0, "maximum": 999 },
             "intent": { "type": "string", "minLength": 1 }
           }
         }
@@ -233,6 +338,53 @@
               "maxItems": 5,
               "items": { "type": "string", "minLength": 1 }
             },
+            "intent": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "ScrollRequest": {
+      "type": "object",
+      "required": ["id", "method", "params"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "method": { "const": "scroll" },
+        "params": {
+          "type": "object",
+          "required": ["capture_id", "topology_version", "x", "y", "intent"],
+          "additionalProperties": false,
+          "properties": {
+            "capture_id": { "type": "string", "minLength": 1 },
+            "topology_version": { "type": "string", "pattern": "^top-sha256-[0-9a-f]{64}$" },
+            "x": { "type": "integer", "minimum": 0, "maximum": 999 },
+            "y": { "type": "integer", "minimum": 0, "maximum": 999 },
+            "delta_x": { "type": "integer", "minimum": -1000, "maximum": 1000 },
+            "delta_y": { "type": "integer", "minimum": -1000, "maximum": 1000 },
+            "intent": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "DragRequest": {
+      "type": "object",
+      "required": ["id", "method", "params"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "method": { "const": "drag" },
+        "params": {
+          "type": "object",
+          "required": ["capture_id", "topology_version", "start_x", "start_y", "end_x", "end_y", "intent"],
+          "additionalProperties": false,
+          "properties": {
+            "capture_id": { "type": "string", "minLength": 1 },
+            "topology_version": { "type": "string", "pattern": "^top-sha256-[0-9a-f]{64}$" },
+            "start_x": { "type": "integer", "minimum": 0, "maximum": 999 },
+            "start_y": { "type": "integer", "minimum": 0, "maximum": 999 },
+            "end_x": { "type": "integer", "minimum": 0, "maximum": 999 },
+            "end_y": { "type": "integer", "minimum": 0, "maximum": 999 },
+            "button": { "enum": ["left", "right", "middle"] },
             "intent": { "type": "string", "minLength": 1 }
           }
         }

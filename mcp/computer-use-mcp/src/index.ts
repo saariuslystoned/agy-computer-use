@@ -7,7 +7,21 @@ import {
   Tool
 } from "@modelcontextprotocol/sdk/types.js";
 import { HostClient, UnixSocketHostClient, getDefaultSocketPath } from "./host-client.js";
-import { StatusDataSchema, ObserveDataSchema, StatusInputSchema, ObserveInputSchema, ClickInputSchema, TypeInputSchema, ShortcutInputSchema, ActionResultDataSchema } from "./schemas.js";
+import {
+  StatusDataSchema,
+  ObserveDataSchema,
+  StatusInputSchema,
+  ObserveInputSchema,
+  AXTreeInputSchema,
+  AXTreeDataSchema,
+  ClickInputSchema,
+  MoveInputSchema,
+  ScrollInputSchema,
+  DragInputSchema,
+  TypeInputSchema,
+  ShortcutInputSchema,
+  ActionResultDataSchema
+} from "./schemas.js";
 
 export interface JPEGDimensions {
   width: number;
@@ -28,18 +42,15 @@ export function parseJPEGDimensions(buf: Buffer): JPEGDimensions | null {
   let eoiOffset = -1;
 
   while (offset < buf.length - 1) {
-    // Check if byte is marker start 0xFF
     if (buf[offset] !== 0xff) {
       if (foundSOS) {
-        // Inside entropy data scanning for 0xFF marker
         offset++;
         continue;
       } else {
-        return null; // Non-0xFF byte outside entropy data is invalid
+        return null;
       }
     }
 
-    // Skip consecutive 0xFF fill bytes
     while (offset < buf.length - 1 && buf[offset] === 0xff && buf[offset + 1] === 0xff) {
       offset++;
     }
@@ -60,23 +71,18 @@ export function parseJPEGDimensions(buf: Buffer): JPEGDimensions | null {
         eoiOffset = offset;
         break;
       }
-      // Inter-scan marker in progressive JPEG: transition out of entropy scan to parse next segment
       foundSOS = false;
     }
 
-    // Header / Segment state (before SOS)
     if (marker === 0xd8) {
-      // Second SOI invalid
       return null;
     }
 
     if (marker === 0xd9) {
-      // EOI before SOS is invalid
       return null;
     }
 
     if (marker === 0xda) {
-      // SOS: Start of Scan (SOF must precede SOS)
       if (!foundSOF) return null;
       if (offset + 4 >= buf.length) return null;
       const segLen = (buf[offset + 2] << 8) | buf[offset + 3];
@@ -94,13 +100,12 @@ export function parseJPEGDimensions(buf: Buffer): JPEGDimensions | null {
       continue;
     }
 
-    // SOF0 (0xC0) or SOF2 (0xC2) only (baseline or progressive DCT)
     if (marker === 0xc0 || marker === 0xc2) {
-      if (foundSOF) return null; // Duplicate SOF invalid
+      if (foundSOF) return null;
       if (offset + 9 >= buf.length) return null;
       const segLen = (buf[offset + 2] << 8) | buf[offset + 3];
       const precision = buf[offset + 4];
-      if (precision !== 8) return null; // 8-bit precision required
+      if (precision !== 8) return null;
 
       const height = (buf[offset + 5] << 8) | buf[offset + 6];
       const width = (buf[offset + 7] << 8) | buf[offset + 8];
@@ -123,7 +128,6 @@ export function parseJPEGDimensions(buf: Buffer): JPEGDimensions | null {
       continue;
     }
 
-    // Whitelist legal header/inter-scan segment markers: 0xC4 (DHT), 0xDB (DQT), 0xDD (DRI), 0xFE (COM), 0xE0..0xEF (APP0..APP15)
     const isWhitelisted = marker === 0xc4 || marker === 0xdb || marker === 0xdd || marker === 0xfe || (marker >= 0xe0 && marker <= 0xef);
     if (!isWhitelisted) return null;
 
@@ -135,7 +139,6 @@ export function parseJPEGDimensions(buf: Buffer): JPEGDimensions | null {
       continue;
     }
 
-    // Skip generic segment payload
     if (offset + 3 < buf.length) {
       const segLen = (buf[offset + 2] << 8) | buf[offset + 3];
       if (segLen < 2 || offset + 2 + segLen > buf.length) return null;
@@ -193,13 +196,11 @@ export function validateAndDecodeBase64JPEG(
     }
   }
 
-  // Exact byte length calculation before Buffer allocation
   const decodedLen = (base64Data.length / 4) * 3 - paddingCount;
   if (decodedLen > 10 * 1024 * 1024) {
     throw new Error(`Decoded byte size ${decodedLen} exceeds 10 MiB limit`);
   }
 
-  // Single canonical decoder invocation
   const imageBuffer = decoder(base64Data, "base64");
 
   if (imageBuffer.length === 0) {
@@ -348,7 +349,42 @@ function formatToolResponse(ipcResp: any, toolName: string) {
     };
   }
 
-  if (toolName === "computer_use_click" || toolName === "computer_use_type" || toolName === "computer_use_shortcut") {
+  if (toolName === "computer_use_ax_tree") {
+    const parsedData = AXTreeDataSchema.safeParse(ipcResp.data);
+    if (!parsedData.success) {
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              error: {
+                code: "INVALID_RESPONSE_DATA",
+                message: `AX tree response data failed Zod schema validation: ${parsedData.error.message}`
+              }
+            }, null, 2)
+          }
+        ]
+      };
+    }
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(parsedData.data, null, 2)
+        }
+      ]
+    };
+  }
+
+  if (
+    toolName === "computer_use_click" ||
+    toolName === "computer_use_move" ||
+    toolName === "computer_use_type" ||
+    toolName === "computer_use_shortcut" ||
+    toolName === "computer_use_scroll" ||
+    toolName === "computer_use_drag"
+  ) {
     const parsedData = ActionResultDataSchema.safeParse(ipcResp.data);
     if (!parsedData.success) {
       return {
@@ -425,6 +461,28 @@ export function createComputerUseServer(hostClient: HostClient): Server {
     }
   };
 
+  const AX_TREE_TOOL: Tool = {
+    name: "computer_use_ax_tree",
+    description: "Inspects accessibility UI element hierarchy (AXUIElement tree) of a specified running application or the frontmost active application. Enforces depth, node, string length caps, and secure text redaction.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        app_id: {
+          type: "string",
+          minLength: 1,
+          description: "Optional running application bundle identifier, localized process name, or PID. Defaults to frontmost application."
+        },
+        max_depth: {
+          type: "integer",
+          minimum: 1,
+          maximum: 10,
+          description: "Optional maximum inspection tree depth limit (1-10). Defaults to 10."
+        }
+      },
+      additionalProperties: false
+    }
+  };
+
   const CLICK_TOOL: Tool = {
     name: "computer_use_click",
     description: "Dispatches a single mouse click at normalized (x, y) coordinates [0...999] on the observed display geometry. Requires active capture_id and topology_version.",
@@ -437,6 +495,23 @@ export function createComputerUseServer(hostClient: HostClient): Server {
         y: { type: "integer", minimum: 0, maximum: 999, description: "Normalized vertical coordinate (0-999)." },
         button: { type: "string", enum: ["left", "right", "middle"], description: "Optional mouse button. Defaults to left." },
         click_count: { type: "integer", minimum: 1, maximum: 3, description: "Optional click count (1-3). Defaults to 1." },
+        intent: { type: "string", minLength: 1, description: "Clear explanation of the action's intent." }
+      },
+      required: ["capture_id", "topology_version", "x", "y", "intent"],
+      additionalProperties: false
+    }
+  };
+
+  const MOVE_TOOL: Tool = {
+    name: "computer_use_move",
+    description: "Dispatches a single mouse movement to normalized (x, y) coordinates [0...999] on the observed display geometry without clicking. Consumes active observation lease.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        capture_id: { type: "string", description: "Observation capture ID token from latest computer_use_observe." },
+        topology_version: { type: "string", description: "Active display topology version token." },
+        x: { type: "integer", minimum: 0, maximum: 999, description: "Normalized horizontal coordinate (0-999)." },
+        y: { type: "integer", minimum: 0, maximum: 999, description: "Normalized vertical coordinate (0-999)." },
         intent: { type: "string", minLength: 1, description: "Clear explanation of the action's intent." }
       },
       required: ["capture_id", "topology_version", "x", "y", "intent"],
@@ -483,15 +558,64 @@ export function createComputerUseServer(hostClient: HostClient): Server {
     }
   };
 
+  const SCROLL_TOOL: Tool = {
+    name: "computer_use_scroll",
+    description: "Dispatches a finite anchored scroll at normalized (x, y) coordinates with bounded nonzero scroll deltas. Consumes active observation lease.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        capture_id: { type: "string", description: "Observation capture ID token from latest computer_use_observe." },
+        topology_version: { type: "string", description: "Active display topology version token." },
+        x: { type: "integer", minimum: 0, maximum: 999, description: "Normalized horizontal coordinate (0-999)." },
+        y: { type: "integer", minimum: 0, maximum: 999, description: "Normalized vertical coordinate (0-999)." },
+        delta_x: { type: "integer", minimum: -1000, maximum: 1000, description: "Optional horizontal scroll delta (-1000..1000)." },
+        delta_y: { type: "integer", minimum: -1000, maximum: 1000, description: "Optional vertical scroll delta (-1000..1000)." },
+        intent: { type: "string", minLength: 1, description: "Clear explanation of the action's intent." }
+      },
+      required: ["capture_id", "topology_version", "x", "y", "intent"],
+      additionalProperties: false
+    }
+  };
+
+  const DRAG_TOOL: Tool = {
+    name: "computer_use_drag",
+    description: "Dispatches a bounded same-display mouse drag operation from (start_x, start_y) to (end_x, end_y) with minimum safe button scope. Consumes active observation lease and guarantees input release.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        capture_id: { type: "string", description: "Observation capture ID token from latest computer_use_observe." },
+        topology_version: { type: "string", description: "Active display topology version token." },
+        start_x: { type: "integer", minimum: 0, maximum: 999, description: "Normalized start horizontal coordinate (0-999)." },
+        start_y: { type: "integer", minimum: 0, maximum: 999, description: "Normalized start vertical coordinate (0-999)." },
+        end_x: { type: "integer", minimum: 0, maximum: 999, description: "Normalized end horizontal coordinate (0-999)." },
+        end_y: { type: "integer", minimum: 0, maximum: 999, description: "Normalized end vertical coordinate (0-999)." },
+        button: { type: "string", enum: ["left", "right", "middle"], description: "Optional mouse button. Defaults to left." },
+        intent: { type: "string", minLength: 1, description: "Clear explanation of the action's intent." }
+      },
+      required: ["capture_id", "topology_version", "start_x", "start_y", "end_x", "end_y", "intent"],
+      additionalProperties: false
+    }
+  };
+
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     return {
-      tools: [STATUS_TOOL, OBSERVE_TOOL, CLICK_TOOL, TYPE_TOOL, SHORTCUT_TOOL]
+      tools: [
+        STATUS_TOOL,
+        OBSERVE_TOOL,
+        AX_TREE_TOOL,
+        CLICK_TOOL,
+        MOVE_TOOL,
+        TYPE_TOOL,
+        SHORTCUT_TOOL,
+        SCROLL_TOOL,
+        DRAG_TOOL
+      ]
     };
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const { name, arguments: rawArgs } = request.params;
-    const args = rawArgs || {}; // Normalize omitted arguments to empty object
+    const args = rawArgs || {};
 
     if (name === "computer_use_status") {
       const parseRes = StatusInputSchema.safeParse(args);
@@ -539,6 +663,28 @@ export function createComputerUseServer(hostClient: HostClient): Server {
       return formatToolResponse(ipcResp, name);
     }
 
+    if (name === "computer_use_ax_tree") {
+      const parseRes = AXTreeInputSchema.safeParse(args);
+      if (!parseRes.success) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                error: {
+                  code: "INVALID_ARGUMENT",
+                  message: `Invalid arguments for computer_use_ax_tree: ${parseRes.error.message}`
+                }
+              }, null, 2)
+            }
+          ]
+        };
+      }
+      const ipcResp = await hostClient.request("ax_tree", parseRes.data, extra?.signal);
+      return formatToolResponse(ipcResp, name);
+    }
+
     if (name === "computer_use_click") {
       const parseRes = ClickInputSchema.safeParse(args);
       if (!parseRes.success) {
@@ -558,6 +704,28 @@ export function createComputerUseServer(hostClient: HostClient): Server {
         };
       }
       const ipcResp = await hostClient.request("click", parseRes.data, extra?.signal);
+      return formatToolResponse(ipcResp, name);
+    }
+
+    if (name === "computer_use_move") {
+      const parseRes = MoveInputSchema.safeParse(args);
+      if (!parseRes.success) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                error: {
+                  code: "INVALID_ARGUMENT",
+                  message: `Invalid arguments for computer_use_move: ${parseRes.error.message}`
+                }
+              }, null, 2)
+            }
+          ]
+        };
+      }
+      const ipcResp = await hostClient.request("move", parseRes.data, extra?.signal);
       return formatToolResponse(ipcResp, name);
     }
 
@@ -602,6 +770,50 @@ export function createComputerUseServer(hostClient: HostClient): Server {
         };
       }
       const ipcResp = await hostClient.request("shortcut", parseRes.data, extra?.signal);
+      return formatToolResponse(ipcResp, name);
+    }
+
+    if (name === "computer_use_scroll") {
+      const parseRes = ScrollInputSchema.safeParse(args);
+      if (!parseRes.success) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                error: {
+                  code: "INVALID_ARGUMENT",
+                  message: `Invalid arguments for computer_use_scroll: ${parseRes.error.message}`
+                }
+              }, null, 2)
+            }
+          ]
+        };
+      }
+      const ipcResp = await hostClient.request("scroll", parseRes.data, extra?.signal);
+      return formatToolResponse(ipcResp, name);
+    }
+
+    if (name === "computer_use_drag") {
+      const parseRes = DragInputSchema.safeParse(args);
+      if (!parseRes.success) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                error: {
+                  code: "INVALID_ARGUMENT",
+                  message: `Invalid arguments for computer_use_drag: ${parseRes.error.message}`
+                }
+              }, null, 2)
+            }
+          ]
+        };
+      }
+      const ipcResp = await hostClient.request("drag", parseRes.data, extra?.signal);
       return formatToolResponse(ipcResp, name);
     }
 

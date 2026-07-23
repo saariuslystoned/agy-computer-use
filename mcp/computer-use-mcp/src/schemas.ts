@@ -129,6 +129,45 @@ export const ObserveDataSchema = z.object({
   }).strict()
 }).strict();
 
+export const AXTreeInputSchema = z.object({
+  app_id: z.string().trim().min(1).optional(),
+  max_depth: z.number().int().min(1).max(10).optional()
+}).strict();
+
+export const AXNodeSchema: z.ZodType<any> = z.lazy(() =>
+  z.object({
+    id: z.string().min(1),
+    role: z.string().min(1),
+    subrole: z.string().optional(),
+    title: z.string().optional(),
+    value: z.string().optional(),
+    enabled: z.boolean().optional(),
+    focused: z.boolean().optional(),
+    bounds: z.object({
+      x: z.number().finite(),
+      y: z.number().finite(),
+      width: z.number().finite(),
+      height: z.number().finite()
+    }).strict(),
+    children: z.array(AXNodeSchema).optional()
+  }).strict()
+);
+
+export const AXTargetAppSchema = z.object({
+  pid: z.number().int().positive(),
+  bundle_id: z.string().optional(),
+  name: z.string().optional()
+}).strict();
+
+export const AXTreeDataSchema = z.object({
+  target_app: AXTargetAppSchema,
+  topology_version: TopologyVersionSchema,
+  node_count: z.number().int().nonnegative(),
+  max_depth_reached: z.number().int().nonnegative(),
+  truncated: z.boolean(),
+  tree: AXNodeSchema
+}).strict();
+
 export const ClickInputSchema = z.object({
   capture_id: z.string().min(1),
   topology_version: TopologyVersionSchema,
@@ -136,6 +175,38 @@ export const ClickInputSchema = z.object({
   y: z.number().int().min(0).max(999),
   button: z.enum(["left", "right", "middle"]).optional(),
   click_count: z.number().int().min(1).max(3).optional(),
+  intent: z.string().trim().min(1)
+}).strict();
+
+export const MoveInputSchema = z.object({
+  capture_id: z.string().min(1),
+  topology_version: TopologyVersionSchema,
+  x: z.number().int().min(0).max(999),
+  y: z.number().int().min(0).max(999),
+  intent: z.string().trim().min(1)
+}).strict();
+
+export const ScrollInputSchema = z.object({
+  capture_id: z.string().min(1),
+  topology_version: TopologyVersionSchema,
+  x: z.number().int().min(0).max(999),
+  y: z.number().int().min(0).max(999),
+  delta_x: z.number().int().min(-1000).max(1000).optional(),
+  delta_y: z.number().int().min(-1000).max(1000).optional(),
+  intent: z.string().trim().min(1)
+}).strict().refine(
+  (data) => (data.delta_x !== undefined && data.delta_x !== 0) || (data.delta_y !== undefined && data.delta_y !== 0),
+  { message: "At least one of delta_x or delta_y must be specified and non-zero" }
+);
+
+export const DragInputSchema = z.object({
+  capture_id: z.string().min(1),
+  topology_version: TopologyVersionSchema,
+  start_x: z.number().int().min(0).max(999),
+  start_y: z.number().int().min(0).max(999),
+  end_x: z.number().int().min(0).max(999),
+  end_y: z.number().int().min(0).max(999),
+  button: z.enum(["left", "right", "middle"]).optional(),
   intent: z.string().trim().min(1)
 }).strict();
 

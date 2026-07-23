@@ -56,10 +56,20 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
 
     const toolsResult = await client.listTools();
     assert.ok(toolsResult.tools);
-    assert.equal(toolsResult.tools.length, 5);
+    assert.equal(toolsResult.tools.length, 9);
 
     const toolNames = toolsResult.tools.map(t => t.name).sort();
-    assert.deepEqual(toolNames, ["computer_use_click", "computer_use_observe", "computer_use_shortcut", "computer_use_status", "computer_use_type"]);
+    assert.deepEqual(toolNames, [
+      "computer_use_ax_tree",
+      "computer_use_click",
+      "computer_use_drag",
+      "computer_use_move",
+      "computer_use_observe",
+      "computer_use_scroll",
+      "computer_use_shortcut",
+      "computer_use_status",
+      "computer_use_type"
+    ]);
 
     const statusCall = await client.callTool({ name: "computer_use_status", arguments: {} });
     assert.ok(statusCall.content);
@@ -449,6 +459,11 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
     const FIXTURE_MAPPINGS: Record<string, { expectedValid: boolean; schemaTarget?: string }> = {
       "status_request.json": { expectedValid: true, schemaTarget: "StatusRequest" },
       "observe_request.json": { expectedValid: true, schemaTarget: "ObserveRequest" },
+      "ax_tree_request.json": { expectedValid: true, schemaTarget: "AxTreeRequest" },
+      "ax_tree_response.json": { expectedValid: true, schemaTarget: "AxTreeResponse" },
+      "move_request.json": { expectedValid: true, schemaTarget: "MoveRequest" },
+      "scroll_request.json": { expectedValid: true, schemaTarget: "ScrollRequest" },
+      "drag_request.json": { expectedValid: true, schemaTarget: "DragRequest" },
       "status_response.json": { expectedValid: true, schemaTarget: "StatusResponse" },
       "observe_response.json": { expectedValid: true, schemaTarget: "ObserveResponse" },
       "permission_denied_response.json": { expectedValid: true, schemaTarget: "ErrorResponse" },
@@ -777,9 +792,19 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
 
     const toolsResult = await client.listTools();
     assert.ok(toolsResult.tools);
-    assert.equal(toolsResult.tools.length, 5);
+    assert.equal(toolsResult.tools.length, 9);
     const toolNames = toolsResult.tools.map(t => t.name).sort();
-    assert.deepEqual(toolNames, ["computer_use_click", "computer_use_observe", "computer_use_shortcut", "computer_use_status", "computer_use_type"]);
+    assert.deepEqual(toolNames, [
+      "computer_use_ax_tree",
+      "computer_use_click",
+      "computer_use_drag",
+      "computer_use_move",
+      "computer_use_observe",
+      "computer_use_scroll",
+      "computer_use_shortcut",
+      "computer_use_status",
+      "computer_use_type"
+    ]);
 
     await client.close();
 
@@ -909,5 +934,108 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
 
     await client2.close();
     await server2.close();
+  });
+
+  test("M10-TOOL-SURFACE: Tests computer_use_ax_tree, computer_use_move, computer_use_scroll, computer_use_drag validation and forwarding", async () => {
+    const mockHost = new MockHostClient();
+    mockHost.tccState = "granted";
+    mockHost.axTrusted = true;
+    mockHost.inputMutationState = "enabled";
+    const server = createComputerUseServer(mockHost);
+
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client(
+      { name: "m10-test-client", version: "1.0.0" },
+      { capabilities: {} }
+    );
+
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport)
+    ]);
+
+    // 1. computer_use_ax_tree
+    const axCall = await client.callTool({
+      name: "computer_use_ax_tree",
+      arguments: { app_id: "com.apple.calculator", max_depth: 5 }
+    });
+    assert.equal((axCall as any).isError, undefined);
+    const axData = JSON.parse(((axCall.content as any[])[0] as any).text);
+    assert.equal(axData.target_app.bundle_id, "com.apple.calculator");
+    assert.ok(axData.tree);
+
+    // Observe to get valid capture_id
+    const obsCall = await client.callTool({ name: "computer_use_observe", arguments: {} });
+    const obsMeta = JSON.parse(((obsCall.content as any[])[0] as any).text);
+    const capId = obsMeta.capture_id;
+    const topVer = obsMeta.topology_version;
+
+    // 2. computer_use_move
+    const moveCall = await client.callTool({
+      name: "computer_use_move",
+      arguments: {
+        capture_id: capId,
+        topology_version: topVer,
+        x: 500,
+        y: 500,
+        intent: "Move cursor to center"
+      }
+    });
+    assert.equal((moveCall as any).isError, undefined);
+
+    // 3. computer_use_scroll
+    const obsCall2 = await client.callTool({ name: "computer_use_observe", arguments: {} });
+    const obsMeta2 = JSON.parse(((obsCall2.content as any[])[0] as any).text);
+    const scrollCall = await client.callTool({
+      name: "computer_use_scroll",
+      arguments: {
+        capture_id: obsMeta2.capture_id,
+        topology_version: obsMeta2.topology_version,
+        x: 500,
+        y: 500,
+        delta_x: 0,
+        delta_y: -100,
+        intent: "Scroll down"
+      }
+    });
+    assert.equal((scrollCall as any).isError, undefined);
+
+    // 4. Invalid scroll with zero deltas
+    const obsCall3 = await client.callTool({ name: "computer_use_observe", arguments: {} });
+    const obsMeta3 = JSON.parse(((obsCall3.content as any[])[0] as any).text);
+    const invalidScrollCall = await client.callTool({
+      name: "computer_use_scroll",
+      arguments: {
+        capture_id: obsMeta3.capture_id,
+        topology_version: obsMeta3.topology_version,
+        x: 500,
+        y: 500,
+        delta_x: 0,
+        delta_y: 0,
+        intent: "Zero scroll"
+      }
+    });
+    assert.equal((invalidScrollCall as any).isError, true);
+
+    // 5. computer_use_drag
+    const obsCall4 = await client.callTool({ name: "computer_use_observe", arguments: {} });
+    const obsMeta4 = JSON.parse(((obsCall4.content as any[])[0] as any).text);
+    const dragCall = await client.callTool({
+      name: "computer_use_drag",
+      arguments: {
+        capture_id: obsMeta4.capture_id,
+        topology_version: obsMeta4.topology_version,
+        start_x: 100,
+        start_y: 100,
+        end_x: 400,
+        end_y: 400,
+        button: "left",
+        intent: "Drag window"
+      }
+    });
+    assert.equal((dragCall as any).isError, undefined);
+
+    await client.close();
+    await server.close();
   });
 });
