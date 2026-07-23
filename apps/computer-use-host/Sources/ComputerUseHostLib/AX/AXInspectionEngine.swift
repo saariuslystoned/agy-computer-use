@@ -196,6 +196,15 @@ public struct DefaultAXInspector: AXInspectionEngine {
         )
     }
 
+    package static func boundsRect(position: CGPoint, size: CGSize) -> AXRect {
+        AXRect(
+            x: Double(position.x),
+            y: Double(position.y),
+            width: max(0.0, Double(size.width)),
+            height: max(0.0, Double(size.height))
+        )
+    }
+
     private static func buildNode(
         axElement: AXUIElement,
         currentDepth: Int,
@@ -329,7 +338,7 @@ public struct DefaultAXInspector: AXInspectionEngine {
                 }
             }
         }
-        boundsRect = AXRect(x: max(0.0, Double(pt.x)), y: max(0.0, Double(pt.y)), width: max(0.0, Double(sz.width)), height: max(0.0, Double(sz.height)))
+        boundsRect = Self.boundsRect(position: pt, size: sz)
 
         // Redaction & Truncation of Strings (capped strictly at <= 256 chars including ellipsis)
         let isSecure = (subroleStr == "AXSecureTextField" || subroleStr == (kAXSecureTextFieldSubrole as String))

@@ -66,7 +66,7 @@ function runAGYAsync(args, env = {}, timeoutMs = 12000) {
 function getNativeProcessCount() {
   try {
     const out = execSync('ps -ax -o pid,command', { encoding: 'utf-8' });
-    const lines = out.split('\n').filter(line => (line.includes('/ComputerUseHost') || line.includes('ComputerUseHost.app')) && !line.includes('TestRunner') && !line.includes('grep') && !line.includes('swift'));
+    const lines = out.split('\n').filter(line => (line.includes('/ComputerUseHost') || line.includes('ComputerUseHost.app')) && !line.includes('/usr/bin/open') && !line.includes('TestRunner') && !line.includes('grep') && !line.includes('swift'));
     return lines.length;
   } catch {
     return 0;
@@ -648,7 +648,7 @@ test('D13: Discriminates invalid framed payload from early child process exit', 
       binaryArgs: ['-e', 'process.exit(42);'],
       readinessTimeoutMs: 500
     }),
-    /Host child process exited during startup/
+    /Host launcher process exited during startup/
   );
   assert.equal(supervisor2.state, 'stopped');
 });
@@ -793,7 +793,7 @@ test('Commit 2: Unclosed child retains authority and throws terminal failure', {
 
   await assert.rejects(
     supervisor.stop(50),
-    /Native child process failed to close/
+    /Launcher child process failed to close/
   );
   assert.equal(supervisor.child, mockChild, 'Child authority must be retained when close is not proved');
 });
@@ -1000,13 +1000,16 @@ for (let i = 0; i < args.length; i++) {
 
 if (socketPath) {
   const child = spawn(process.execPath, [${JSON.stringify(mockNativeBin)}, socketPath], {
-    detached: true,
+    detached: false,
     stdio: 'ignore'
   });
   fs.writeFileSync(${JSON.stringify(childPidFile)}, String(child.pid));
-  child.unref();
+  child.on('close', (code) => process.exit(code ?? 0));
+  process.on('SIGTERM', () => process.exit(0));
+  process.on('SIGINT', () => process.exit(0));
+} else {
+  process.exit(2);
 }
-process.exit(0);
 `;
   fs.writeFileSync(mockOpenBin, openScriptContent, { mode: 0o755 });
 
@@ -1050,14 +1053,86 @@ process.exit(0);
   assert.ok(loggedArgs[6].startsWith('AGY_SOCKET_PATH='), 'Flag 7 must be AGY_SOCKET_PATH');
   assert.equal(loggedArgs[7], validAppDir, 'Flag 8 (last arg) must be app path');
 
-  const stopRes = await supervisor.stop();
-  await supervisor.finalizeDaemonTeardown();
-  assert.equal(stopRes.status, 'stopped');
-  assert.equal(stopRes.native_closed, true);
-
-  if (spawnedChildPid) {
-    assert.equal(ownedMockChildIsAlive(), false, 'Fixture child process MUST be terminated by supervisor stop with zero leak');
+  process.kill(spawnedChildPid, 'SIGTERM');
+  const shutdownStarted = Date.now();
+  while (
+    (supervisor.state !== 'stopped' || supervisor.controlServer !== null) &&
+    Date.now() - shutdownStarted < 3000
+  ) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
   }
+  assert.equal(supervisor.state, 'stopped', 'Staged app termination must stop the supervisor');
+  assert.equal(supervisor.child, null, 'Staged app termination must close and release launcher authority');
+  assert.equal(supervisor.controlServer, null, 'Staged app termination must close the control server');
+  assert.equal(ownedMockChildIsAlive(), false, 'Fixture child process MUST be terminal with zero leak');
+});
+
+test('M9-LAUNCHSERVICES-STARTUP-CLEANUP: Readiness failure terminates the exact staged native and launcher', { timeout: 15000 }, async (t) => {
+  const testDir = createTestHarnessDir();
+  const validAppDir = path.join(REPO_ROOT, 'apps/computer-use-host/.build/staged/ComputerUseHost.app');
+  const stagedBinaryPath = path.resolve(path.join(validAppDir, 'Contents/MacOS/ComputerUseHost'));
+  const childPidFile = path.join(testDir, 'child-pid.json');
+  const mockNativeBin = path.join(testDir, 'mock-never-ready-native.js');
+  const mockOpenBin = path.join(testDir, 'mock-waiting-open.js');
+  let nativePid = null;
+
+  if (!fs.existsSync(stagedBinaryPath)) {
+    execSync('./bin/agy-computer-use stage-host-app', { cwd: REPO_ROOT, encoding: 'utf-8' });
+  }
+
+  fs.writeFileSync(mockNativeBin, `#!/usr/bin/env node
+process.on('SIGTERM', () => process.exit(0));
+process.on('SIGINT', () => process.exit(0));
+setTimeout(() => {}, 20000);
+`, { mode: 0o755 });
+
+  fs.writeFileSync(mockOpenBin, `#!/usr/bin/env node
+import fs from 'node:fs';
+import { spawn } from 'node:child_process';
+const child = spawn(process.execPath, [${JSON.stringify(mockNativeBin)}], {
+  detached: false,
+  stdio: 'ignore'
+});
+fs.writeFileSync(${JSON.stringify(childPidFile)}, String(child.pid));
+child.on('close', (code) => process.exit(code ?? 0));
+process.on('SIGTERM', () => process.exit(0));
+process.on('SIGINT', () => process.exit(0));
+`, { mode: 0o755 });
+
+  const ownedNativeIsAlive = () => {
+    if (!nativePid) return false;
+    try { process.kill(nativePid, 0); return true; } catch { return false; }
+  };
+
+  t.after(async () => {
+    if (ownedNativeIsAlive()) {
+      try { process.kill(nativePid, 'SIGKILL'); } catch {}
+    }
+    cleanupTestDir(testDir);
+  });
+
+  const supervisor = new ProductionHostSupervisor({
+    runtimeDir: testDir,
+    stagedAppDir: validAppDir,
+    processInspector: () => {
+      if (!fs.existsSync(childPidFile)) return [];
+      nativePid = Number.parseInt(fs.readFileSync(childPidFile, 'utf8'), 10);
+      return ownedNativeIsAlive()
+        ? [{ pid: nativePid, executable: stagedBinaryPath, lstart: 'mock-start-time' }]
+        : [];
+    }
+  });
+
+  await assert.rejects(
+    supervisor.start({ openBinary: mockOpenBin, readinessTimeoutMs: 150 }),
+    /Readiness check timed out/,
+    'A staged native that never serves status must fail readiness'
+  );
+
+  assert.ok(nativePid > 0, 'The test must observe the launched native PID');
+  assert.equal(ownedNativeIsAlive(), false, 'Readiness failure must terminate the exact staged native');
+  assert.equal(supervisor.child, null, 'Readiness failure must close and release launcher authority');
+  assert.equal(supervisor.controlServer, null, 'Readiness failure must close the control server');
 });
 
 test('M9-LAUNCHSERVICES-TEST-GUARD: Unit-test supervisor refuses real LaunchServices', async (t) => {

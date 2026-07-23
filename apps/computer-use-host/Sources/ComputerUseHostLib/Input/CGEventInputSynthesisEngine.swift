@@ -10,6 +10,34 @@ public final class CGEventInputSynthesisEngine: InputSynthesisEngine, @unchecked
 
     public init() {}
 
+    package static func durationMilliseconds(_ duration: Duration) -> Double {
+        let (seconds, attoseconds) = duration.components
+        return Double(seconds) * 1_000.0 + Double(attoseconds) / 1_000_000_000_000_000.0
+    }
+
+    package static func utf16Chunks(for text: String, maxCodeUnits: Int = 20) -> [[UniChar]] {
+        precondition(maxCodeUnits >= 2, "UTF-16 chunks must allow a complete surrogate pair")
+
+        let codeUnits = Array(text.utf16)
+        var chunks: [[UniChar]] = []
+        var offset = 0
+
+        while offset < codeUnits.count {
+            var end = min(offset + maxCodeUnits, codeUnits.count)
+            if end < codeUnits.count {
+                let last = codeUnits[end - 1]
+                let next = codeUnits[end]
+                if (0xD800...0xDBFF).contains(last) && (0xDC00...0xDFFF).contains(next) {
+                    end -= 1
+                }
+            }
+            chunks.append(Array(codeUnits[offset..<end]))
+            offset = end
+        }
+
+        return chunks
+    }
+
     public var isMutationEnabled: Bool {
         return AXIsProcessTrusted()
     }
@@ -116,9 +144,7 @@ public final class CGEventInputSynthesisEngine: InputSynthesisEngine, @unchecked
             lock.unlock()
         }
 
-        let elapsed = ContinuousClock().now - startClock
-        let (sec, attosec) = elapsed.components
-        let durationMs = Double(sec) * 1000.0 + Double(attosec) / 1_000_000.0
+        let durationMs = Self.durationMilliseconds(ContinuousClock().now - startClock)
 
         return ActionResultDTO(
             actionId: "act-\(UUID().uuidString.lowercased())",
@@ -145,18 +171,12 @@ public final class CGEventInputSynthesisEngine: InputSynthesisEngine, @unchecked
 
         let startClock = ContinuousClock().now
 
-        let utf16Array = Array(text.utf16)
-        let chunkSize = 20
-        var offset = 0
-        while offset < utf16Array.count {
-            let count = min(chunkSize, utf16Array.count - offset)
-            let chunk = Array(utf16Array[offset..<(offset + count)])
+        for chunk in Self.utf16Chunks(for: text) {
             guard let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true) else {
                 throw ComputerUseError.ipcError(reason: "Failed to create unicode CGEvent")
             }
             event.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: chunk)
             event.post(tap: .cghidEventTap)
-            offset += count
         }
 
         if pressEnter {
@@ -180,9 +200,7 @@ public final class CGEventInputSynthesisEngine: InputSynthesisEngine, @unchecked
             lock.unlock()
         }
 
-        let elapsed = ContinuousClock().now - startClock
-        let (sec, attosec) = elapsed.components
-        let durationMs = Double(sec) * 1000.0 + Double(attosec) / 1_000_000.0
+        let durationMs = Self.durationMilliseconds(ContinuousClock().now - startClock)
 
         return ActionResultDTO(
             actionId: "act-\(UUID().uuidString.lowercased())",
@@ -294,9 +312,7 @@ public final class CGEventInputSynthesisEngine: InputSynthesisEngine, @unchecked
             lock.unlock()
         }
 
-        let elapsed = ContinuousClock().now - startClock
-        let (sec, attosec) = elapsed.components
-        let durationMs = Double(sec) * 1000.0 + Double(attosec) / 1_000_000.0
+        let durationMs = Self.durationMilliseconds(ContinuousClock().now - startClock)
 
         return ActionResultDTO(
             actionId: "act-\(UUID().uuidString.lowercased())",
@@ -327,9 +343,7 @@ public final class CGEventInputSynthesisEngine: InputSynthesisEngine, @unchecked
         }
         moveEvent.post(tap: .cghidEventTap)
 
-        let elapsed = ContinuousClock().now - startClock
-        let (sec, attosec) = elapsed.components
-        let durationMs = Double(sec) * 1000.0 + Double(attosec) / 1_000_000.0
+        let durationMs = Self.durationMilliseconds(ContinuousClock().now - startClock)
 
         return ActionResultDTO(
             actionId: "act-\(UUID().uuidString.lowercased())",
@@ -412,9 +426,7 @@ public final class CGEventInputSynthesisEngine: InputSynthesisEngine, @unchecked
         heldMouseButton = nil
         lock.unlock()
 
-        let elapsed = ContinuousClock().now - startClock
-        let (sec, attosec) = elapsed.components
-        let durationMs = Double(sec) * 1000.0 + Double(attosec) / 1_000_000.0
+        let durationMs = Self.durationMilliseconds(ContinuousClock().now - startClock)
 
         return ActionResultDTO(
             actionId: "act-\(UUID().uuidString.lowercased())",
@@ -454,9 +466,7 @@ public final class CGEventInputSynthesisEngine: InputSynthesisEngine, @unchecked
         }
         scrollEvent.post(tap: .cghidEventTap)
 
-        let elapsed = ContinuousClock().now - startClock
-        let (sec, attosec) = elapsed.components
-        let durationMs = Double(sec) * 1000.0 + Double(attosec) / 1_000_000.0
+        let durationMs = Self.durationMilliseconds(ContinuousClock().now - startClock)
 
         return ActionResultDTO(
             actionId: "act-\(UUID().uuidString.lowercased())",

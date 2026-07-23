@@ -414,6 +414,7 @@ export class ProductionHostSupervisor {
     this.hostSocketDev = null;
     this.childClosedPromise = null;
     this.childClosedResolver = null;
+    this.childClosed = false;
     this.cleanupPromise = null;
     this.stoppingFromSignal = false;
     this.killEscalated = false;
@@ -423,11 +424,87 @@ export class ProductionHostSupervisor {
     this.processInspector = options.processInspector || defaultProcessInspector;
     this.forbidRealLaunchServices = options.forbidRealLaunchServices ?? false;
     this.nativePid = null;
+    this.nativeProcIdentity = null;
     this.state = 'stopped';
   }
 
   getProcessIdentity(pid) {
     return getExactProcessIdentity(pid, this.processInspector);
+  }
+
+  getNewStagedProcesses(stagedAppDir) {
+    const beforePids = new Set((this.beforeLaunchInventory || []).map((proc) => proc.pid));
+    return getExactStagedProcessInventory(stagedAppDir, this.processInspector)
+      .filter((proc) => !beforePids.has(proc.pid));
+  }
+
+  async waitForNewStagedProcesses(stagedAppDir, timeoutMs = 500) {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      const processes = this.getNewStagedProcesses(stagedAppDir);
+      if (processes.length > 0) return processes;
+      if (this.childClosed) return [];
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    return this.getNewStagedProcesses(stagedAppDir);
+  }
+
+  async terminateCapturedProcess(identity, stopTimeoutMs = 3000) {
+    if (!identity || !Number.isInteger(identity.pid) || identity.pid <= 0) {
+      throw new Error(`Cannot terminate invalid process identity '${JSON.stringify(identity)}'`);
+    }
+
+    const pid = identity.pid;
+    let alive = true;
+    try { process.kill(pid, 0); } catch { alive = false; }
+    if (!alive) {
+      return { closed: true, killEscalated: false };
+    }
+
+    const assertSameIdentity = (signal) => {
+      const current = this.getProcessIdentity(pid);
+      if (
+        !current ||
+        current.executable !== identity.executable ||
+        current.lstart !== identity.lstart
+      ) {
+        throw new Error(`Refusing to send ${signal} to PID ${pid}: current process identity '${JSON.stringify(current)}' does not match captured birth identity '${JSON.stringify(identity)}'`);
+      }
+    };
+
+    assertSameIdentity('SIGTERM');
+    try { process.kill(pid, 'SIGTERM'); } catch {}
+
+    const termWaitBegin = Date.now();
+    const graceTimeout = Math.min(stopTimeoutMs, 2000);
+    while (Date.now() - termWaitBegin < graceTimeout) {
+      try { process.kill(pid, 0); } catch { alive = false; break; }
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    }
+
+    let killEscalated = false;
+    if (alive) {
+      killEscalated = true;
+      assertSameIdentity('SIGKILL');
+      try { process.kill(pid, 'SIGKILL'); } catch {}
+
+      const killWaitBegin = Date.now();
+      while (Date.now() - killWaitBegin < 500) {
+        try { process.kill(pid, 0); } catch { alive = false; break; }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    }
+
+    return { closed: !alive, killEscalated };
+  }
+
+  async waitForChildClosure(timeoutMs) {
+    if (this.childClosed) return true;
+    if (!this.childClosedPromise) return false;
+    return Promise.race([
+      this.childClosedPromise.then(() => true),
+      new Promise((resolve) => setTimeout(() => resolve(false), timeoutMs))
+    ]);
   }
 
   ensureLockFile() {
@@ -842,6 +919,8 @@ export class ProductionHostSupervisor {
     const binaryPath = options.binaryPath || this.binaryPath || (stagedAppDir ? path.join(stagedAppDir, 'Contents/MacOS/ComputerUseHost') : null);
 
     await this.validateStagedHostApp(stagedAppDir, binaryPath);
+    this.stagedAppDir = stagedAppDir;
+    this.binaryPath = binaryPath;
 
     if (stagedAppDir) {
       this.beforeLaunchInventory = getExactStagedProcessInventory(stagedAppDir, this.processInspector);
@@ -870,6 +949,7 @@ export class ProductionHostSupervisor {
 
     try {
       let childClosed = false;
+      this.childClosed = false;
       this.childClosedPromise = new Promise((resolve) => {
         this.childClosedResolver = resolve;
       });
@@ -908,14 +988,13 @@ export class ProductionHostSupervisor {
       if (proc.stderr) proc.stderr.resume();
 
       proc.on('close', (code, signal) => {
-        if (!stagedAppDir) {
-          childClosed = true;
-          if (this.childClosedResolver) {
-            this.childClosedResolver({ code, signal });
-          }
-          if (this.state === 'running' && !this.cleanupPromise) {
-            this.stop().then(() => this.finalizeDaemonTeardown()).catch(() => this.finalizeDaemonTeardown());
-          }
+        childClosed = true;
+        this.childClosed = true;
+        if (this.childClosedResolver) {
+          this.childClosedResolver({ code, signal });
+        }
+        if (this.state === 'running' && !this.cleanupPromise) {
+          this.stop().then(() => this.finalizeDaemonTeardown()).catch(() => this.finalizeDaemonTeardown());
         }
       });
 
@@ -930,7 +1009,7 @@ export class ProductionHostSupervisor {
       let discoveredNativePid = null;
 
       while (Date.now() - startTime < readinessTimeoutMs) {
-        if (!stagedAppDir && childClosed) break;
+        if (childClosed) break;
         const probe = await this.checkNativeStatus(500);
         if (probe.alive && probe.data) {
           ready = true;
@@ -943,14 +1022,12 @@ export class ProductionHostSupervisor {
         await new Promise((r) => setTimeout(r, 100));
       }
 
-      if (!ready || (!stagedAppDir && childClosed)) {
-        throw new Error((!stagedAppDir && childClosed) ? 'Host child process exited during startup' : `Readiness check timed out after ${readinessTimeoutMs}ms`);
+      if (!ready || childClosed) {
+        throw new Error(childClosed ? 'Host launcher process exited during startup' : `Readiness check timed out after ${readinessTimeoutMs}ms`);
       }
 
       if (stagedAppDir) {
-        const afterReadinessInventory = getExactStagedProcessInventory(stagedAppDir, this.processInspector);
-        const beforePids = new Set((this.beforeLaunchInventory || []).map((p) => p.pid));
-        const diffProcs = afterReadinessInventory.filter((p) => !beforePids.has(p.pid));
+        const diffProcs = this.getNewStagedProcesses(stagedAppDir);
 
         if (diffProcs.length === 0) {
           throw new Error(`Host passed status probe but zero new running processes found for exact staged binary '${stagedAppDir}'`);
@@ -999,8 +1076,26 @@ export class ProductionHostSupervisor {
         tcc_permission_state: lastNativeData.tcc_permission_state
       };
     } catch (err) {
-      try { await this.stop(); } catch {}
+      let cleanupError = null;
+      if (stagedAppDir && !this.nativePid && this.child) {
+        const spawnedProcesses = await this.waitForNewStagedProcesses(stagedAppDir);
+        for (const identity of spawnedProcesses) {
+          try {
+            const result = await this.terminateCapturedProcess(identity);
+            this.killEscalated ||= result.killEscalated;
+            if (!result.closed) {
+              throw new Error(`Staged native process ${identity.pid} failed to close after bounded TERM/KILL waits`);
+            }
+          } catch (candidateError) {
+            cleanupError ||= candidateError;
+          }
+        }
+      }
+      try { await this.stop(); } catch (stopError) { cleanupError ||= stopError; }
       try { await this.finalizeDaemonTeardown(); } catch {}
+      if (cleanupError) {
+        throw new Error(`${err.message}; startup cleanup failed: ${cleanupError.message}`, { cause: err });
+      }
       throw err;
     }
   }
@@ -1017,7 +1112,7 @@ export class ProductionHostSupervisor {
     this.removeSignalListeners();
     this.state = 'stopping';
 
-    const targetNativePid = this.nativePid || (this.child?.pid || null);
+    const targetNativePid = this.nativePid || (!this.stagedAppDir ? (this.child?.pid || null) : null);
     let nativeClosed = false;
     let killEscalated = false;
 
@@ -1074,18 +1169,24 @@ export class ProductionHostSupervisor {
     }
 
     if (this.child) {
+      const child = this.child;
       try { this.child.kill('SIGTERM'); } catch {}
-      if (this.childClosedPromise) {
-        await Promise.race([
-          this.childClosedPromise,
-          new Promise((r) => setTimeout(r, 200))
-        ]);
+      let launcherClosed = await this.waitForChildClosure(Math.min(200, stopTimeoutMs));
+      if (!launcherClosed) {
+        try { this.child.kill('SIGKILL'); } catch {}
+        launcherClosed = await this.waitForChildClosure(Math.min(500, Math.max(50, stopTimeoutMs)));
       }
-      try { this.child.kill('SIGKILL'); } catch {}
-      this.child = null;
+      if (!launcherClosed) {
+        this.cleanupPromise = null;
+        throw new Error('Launcher child process failed to close after bounded TERM/KILL waits');
+      }
+      if (this.child === child) {
+        this.child = null;
+      }
     }
 
     this.nativePid = null;
+    this.nativeProcIdentity = null;
 
     if (!nativeClosed) {
       this.cleanupPromise = null;
