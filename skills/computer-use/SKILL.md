@@ -18,7 +18,7 @@ This skill teaches Google Antigravity agents (and Gemini models) how to reliably
 - **Host Lifecycle & TCC Staging Workflow**:
   1. **Stage Once**: `./bin/agy-computer-use stage-host-app` builds and stages the canonical `ComputerUseHost.app` bundle.
   2. **Grant TCC Authority**: Grant Screen Recording and Accessibility permissions to the exact staged app bundle.
-  3. **Restart Without Restaging**: `./bin/agy-computer-use host-stop && ./bin/agy-computer-use host-start`. Cold starts launch the already-staged app without rebuilding, replacing, or resigning it, preserving stable code-signing identity (CDHash / inode / mtime).
+  3. **Restart Without Restaging**: `./bin/agy-computer-use host-stop && ./bin/agy-computer-use host-start`. Cold starts launch the already-staged app without rebuilding, replacing, or resigning it, preserving both filesystem bundle identity (inodes, mtime) and code-signing identity (CDHash, SHA-256).
   4. **Verify MCP Operations**: Call `computer_use_status` and `computer_use_observe` over MCP.
 - **Host Lifecycle Management**:
   - `./bin/agy-computer-use stage-host-app`: Builds and stages the canonical `ComputerUseHost.app` bundle.
