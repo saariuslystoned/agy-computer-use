@@ -17,7 +17,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const REPO_ROOT = path.resolve(__dirname, '..');
 
-function fail(msg, status = 'error', code = 'ERROR', exitCode = 1) {
+export function fail(msg, status = 'error', code = 'ERROR', exitCode = 1) {
   const errOutput = { success: false, status, code, error: msg };
   console.log(JSON.stringify(errOutput, null, 2));
   process.exit(exitCode);
@@ -49,6 +49,7 @@ export async function executeHostStart(customSupervisor) {
           idempotent: true,
           generation: ctrlProbe.data.generation,
           daemonPid: ctrlProbe.data.daemonPid,
+          nativePid: ctrlProbe.data.nativePid || ctrlProbe.data.pid || null,
           pid: ctrlProbe.data.nativePid || ctrlProbe.data.pid || null,
           socketPath: paths.hostSocketPath,
           tcc_permission_state: nativeProbe.data.tcc_permission_state
@@ -91,6 +92,7 @@ export async function executeHostStart(customSupervisor) {
           idempotent: true,
           generation: finalCtrlData.generation,
           daemonPid: finalCtrlData.daemonPid,
+          nativePid: finalCtrlData.nativePid || finalCtrlData.pid || null,
           pid: finalCtrlData.nativePid || finalCtrlData.pid || null,
           socketPath: paths.hostSocketPath,
           tcc_permission_state: finalNativeData.tcc_permission_state
@@ -113,7 +115,7 @@ export async function executeHostStart(customSupervisor) {
   if (hostSocketExists) {
     const nativeProbe = await supervisor.checkNativeStatus(500);
     if (nativeProbe.alive) {
-      fail('Native host process is running without an owner control server. Refusing to alter unmanaged host.', 'running_unmanaged', 'UNMANAGED_HOST', 1);
+      fail('Native host process is running without an owner control server. Refusing to alter unmanaged host.', 'RUNNING_UNMANAGED', 'RUNNING_UNMANAGED', 1);
     }
   }
 
@@ -188,6 +190,7 @@ export async function executeHostStart(customSupervisor) {
     idempotent: !isWinningOwner,
     generation: finalCtrlData?.generation,
     daemonPid: finalCtrlData?.daemonPid,
+    nativePid: finalCtrlData?.nativePid || finalCtrlData?.pid || null,
     pid: finalCtrlData?.nativePid || finalCtrlData?.pid || null,
     socketPath: paths.hostSocketPath,
     tcc_permission_state: nativeData?.tcc_permission_state || 'unknown'
@@ -210,6 +213,7 @@ export async function executeHostStatus(customSupervisor) {
           status: 'running',
           generation: ctrlProbe.data.generation,
           daemonPid: ctrlProbe.data.daemonPid,
+          nativePid: ctrlProbe.data.nativePid || ctrlProbe.data.pid || null,
           pid: ctrlProbe.data.nativePid || ctrlProbe.data.pid || null,
           data: nativeProbe.data
         }, null, 2));
@@ -222,6 +226,7 @@ export async function executeHostStatus(customSupervisor) {
         status: 'starting',
         generation: ctrlProbe.data.generation,
         daemonPid: ctrlProbe.data.daemonPid,
+        nativePid: ctrlProbe.data.nativePid || ctrlProbe.data.pid || null,
         pid: ctrlProbe.data.nativePid || ctrlProbe.data.pid || null,
         data: ctrlProbe.data
       }, null, 2));
@@ -256,15 +261,15 @@ export async function executeHostStatus(customSupervisor) {
   if (hostSocketExists && !ctrlSocketExists) {
     const nativeProbe = await supervisor.checkNativeStatus(500);
     if (nativeProbe.alive) {
-      fail('Native host socket is active but supervisor control process is absent (running_unmanaged)', 'running_unmanaged', 'UNMANAGED_HOST', 1);
+      fail('Native host socket is active but supervisor control process is absent (RUNNING_UNMANAGED)', 'RUNNING_UNMANAGED', 'RUNNING_UNMANAGED', 1);
     }
   }
 
   if (ctrlSocketExists && !hostSocketExists) {
-    fail('Supervisor control server is active but native host process is absent (stale_or_ambiguous)', 'stale_or_ambiguous', 'STALE_OR_AMBIGUOUS', 1);
+    fail('Supervisor control server is active but native host process is absent (STALE_OR_AMBIGUOUS)', 'STALE_OR_AMBIGUOUS', 'STALE_OR_AMBIGUOUS', 1);
   }
 
-  fail('Socket files exist but host and control endpoints are unresponsive (stale)', 'stale_or_ambiguous', 'STALE_OR_AMBIGUOUS', 1);
+  fail('Socket files exist but host and control endpoints are unresponsive (stale)', 'STALE_OR_AMBIGUOUS', 'STALE_OR_AMBIGUOUS', 1);
 }
 
 export async function executeHostStop(customSupervisor) {
@@ -276,6 +281,7 @@ export async function executeHostStop(customSupervisor) {
   if (ctrlProbe.alive) {
     const ownerGen = ctrlProbe.data.generation;
     const ownerDaemonPid = ctrlProbe.data.daemonPid;
+    const ownerNativePid = ctrlProbe.data.nativePid || ctrlProbe.data.pid || null;
 
     try {
       const res = await sendFramedIPCRequest(
@@ -286,7 +292,7 @@ export async function executeHostStop(customSupervisor) {
       if (res && res.success && res.data && res.data.status === 'stopped') {
         const receipt = res.data;
         if (receipt.generation !== ownerGen || receipt.daemonPid !== ownerDaemonPid) {
-          fail('Stop receipt identity mismatch', 'stale_or_ambiguous', 'STOP_FAILED', 1);
+          fail('Stop receipt identity mismatch', 'STALE_OR_AMBIGUOUS', 'STOP_FAILED', 1);
         }
 
         // Bounded wait for daemon process termination and socket absence
@@ -307,8 +313,26 @@ export async function executeHostStop(customSupervisor) {
         let ctrlSocketPresent = false;
         try { fs.lstatSync(paths.controlSocketPath); ctrlSocketPresent = true; } catch {}
 
+        let hostSocketPresent = false;
+        try { fs.lstatSync(paths.hostSocketPath); hostSocketPresent = true; } catch {}
+
         if (daemonDead && !ctrlSocketPresent) {
-          console.log(JSON.stringify({ success: true, status: 'stopped', idempotent: false }, null, 2));
+          const finalReceipt = {
+            success: true,
+            status: 'stopped',
+            idempotent: false,
+            generation: receipt.generation,
+            daemonPid: receipt.daemonPid,
+            nativePid: receipt.nativePid ?? ownerNativePid,
+            native_closed: receipt.native_closed ?? true,
+            killEscalated: receipt.killEscalated ?? false,
+            residueState: {
+              hostSocketClean: !hostSocketPresent,
+              controlSocketClean: !ctrlSocketPresent,
+              lockFilePreserved: receipt.residueState?.lockFilePreserved ?? true
+            }
+          };
+          console.log(JSON.stringify(finalReceipt, null, 2));
           process.exit(0);
           return;
         }
@@ -334,7 +358,21 @@ export async function executeHostStop(customSupervisor) {
   } catch {}
 
   if (!ctrlSocketExists && !hostSocketExists) {
-    console.log(JSON.stringify({ success: true, status: 'stopped', idempotent: true }, null, 2));
+    console.log(JSON.stringify({
+      success: true,
+      status: 'stopped',
+      idempotent: true,
+      generation: null,
+      daemonPid: null,
+      nativePid: null,
+      native_closed: true,
+      killEscalated: false,
+      residueState: {
+        hostSocketClean: true,
+        controlSocketClean: true,
+        lockFilePreserved: true
+      }
+    }, null, 2));
     process.exit(0);
     return;
   }
@@ -342,11 +380,11 @@ export async function executeHostStop(customSupervisor) {
   if (hostSocketExists) {
     const nativeProbe = await supervisor.checkNativeStatus(500);
     if (nativeProbe.alive) {
-      fail('Refusing to stop host: native host process exists without an active supervisor owner', 'running_unmanaged', 'UNMANAGED_HOST', 1);
+      fail('Refusing to stop host: native host process exists without an active supervisor owner', 'RUNNING_UNMANAGED', 'UNMANAGED_HOST', 1);
     }
   }
 
-  fail('Socket files exist but supervisor control server is not active', 'stale_or_ambiguous', 'NO_OWNER', 1);
+  fail('Socket files exist but supervisor control server is not active', 'STALE_OR_AMBIGUOUS', 'NO_OWNER', 1);
 }
 
 async function runDaemon() {
