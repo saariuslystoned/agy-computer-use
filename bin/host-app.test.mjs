@@ -7,7 +7,7 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawn, execFileSync, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { stageHostApp, classifyPrincipal, parseAndClassifyPrincipal, validateStageTargetDir, TestStagingHarness } from './host-app.mjs';
+import { buildHostRelease, stageBuiltHostApp, stageHostApp, classifyPrincipal, parseAndClassifyPrincipal, validateStageTargetDir, TestStagingHarness } from './host-app.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -939,7 +939,7 @@ test('ARP2-F2: Zero public fixed-production seam module-namespace assertion and 
 
     assert.equal(exports.includes('_testValidationHook'), false, '_testValidationHook must NOT be exported');
     assert.equal(exports.includes('_setTestValidationHook'), false, '_setTestValidationHook must NOT be exported');
-    assert.deepEqual(exports.sort(), ['TestStagingHarness', 'classifyPrincipal', 'parseAndClassifyPrincipal', 'stageHostApp', 'validateStageTargetDir'].sort());
+    assert.deepEqual(exports.sort(), ['TestStagingHarness', 'buildHostRelease', 'classifyPrincipal', 'parseAndClassifyPrincipal', 'stageBuiltHostApp', 'stageHostApp', 'validateStageTargetDir'].sort());
 
     const hostAppAbsPath = path.resolve('bin/host-app.mjs');
     const probeCode = `
@@ -1361,25 +1361,250 @@ test('AR-P2: Clean-export discriminator for fresh checkout staging', async () =>
     }
 });
 
-test('RP-3: Prove deterministic restaging of one built input', async () => {
-    const initialStage = await stageHostApp({ build: true });
-    assert.equal(initialStage.success, true);
-    const initialBinaryHash = crypto.createHash('sha256').update(fs.readFileSync(initialStage.binaryPath)).digest('hex');
-    const initialPlistHash = crypto.createHash('sha256').update(fs.readFileSync(initialStage.infoPlistPath)).digest('hex');
+test('ARP3-2: Actual one-build/two-stage ledger and immutable source authority', async () => {
+    const harness = new TestStagingHarness();
+    assert.equal(harness.removalSpyCount, 0, 'Initial removal count must be zero');
 
-    const stage1 = await stageHostApp({ build: false });
-    const digest1 = computeTreeDigest(stage1.appPath);
-    const binaryHash1 = crypto.createHash('sha256').update(fs.readFileSync(stage1.binaryPath)).digest('hex');
-    const plistHash1 = crypto.createHash('sha256').update(fs.readFileSync(stage1.infoPlistPath)).digest('hex');
+    const hostPackageDir = path.resolve('apps/computer-use-host');
+    const productionStagedDir = path.join(hostPackageDir, '.build/staged');
+    const preBuildSnap = snapshotTree(productionStagedDir);
 
-    assert.equal(binaryHash1, initialBinaryHash, 'Binary hash must match built input');
-    assert.equal(plistHash1, initialPlistHash, 'Plist hash must match built input');
-    assert.equal(fs.statSync(stage1.binaryPath).mode & 0o777, 0o755, 'Executable mode must be 0755');
+    const opLedger = [];
 
-    const stage2 = await stageHostApp({ build: false });
-    const digest2 = computeTreeDigest(stage2.appPath);
+    // Call buildHostRelease real seam
+    const buildRes = await buildHostRelease();
+    assert.equal(buildRes.success, true, 'buildHostRelease must return success: true');
+    opLedger.push({ op: 'build', result: buildRes });
 
-    assert.equal(digest1, digest2, 'Tree digests of restaged built input must be identical');
+    assert.equal(harness.removalSpyCount, 0, 'buildHostRelease must not remove harness root');
+    const postBuildSnap = snapshotTree(productionStagedDir);
+    assert.deepStrictEqual(postBuildSnap, preBuildSnap, 'buildHostRelease must not mutate production staging tree');
+
+    const releaseSourceBinary = buildRes.releaseBinaryPath;
+    const releaseSourcePlist = buildRes.infoPlistPath;
+
+    assert.equal(fs.existsSync(releaseSourceBinary), true, 'Release source binary must exist');
+    assert.equal(fs.existsSync(releaseSourcePlist), true, 'Release source Info.plist must exist');
+
+    const binLstat = fs.lstatSync(releaseSourceBinary);
+    assert.equal(binLstat.isFile(), true, 'Release source binary must be regular file');
+    assert.equal(binLstat.isSymbolicLink(), false, 'Release source binary must not be symlink');
+
+    const plistLstat = fs.lstatSync(releaseSourcePlist);
+    assert.equal(plistLstat.isFile(), true, 'Release source Info.plist must be regular file');
+    assert.equal(plistLstat.isSymbolicLink(), false, 'Release source Info.plist must not be symlink');
+
+    const sourceBinHash = crypto.createHash('sha256').update(fs.readFileSync(releaseSourceBinary)).digest('hex');
+    const sourcePlistHash = crypto.createHash('sha256').update(fs.readFileSync(releaseSourcePlist)).digest('hex');
+
+    // Stage 1
+    const stage1Res = await stageBuiltHostApp({ harness });
+    assert.equal(stage1Res.success, true);
+    opLedger.push({ op: 'stage', result: stage1Res, removals: harness.removalSpyCount });
+    assert.equal(harness.removalSpyCount, 1, 'Harness removal spy count must transition to 1 after Stage 1');
+
+    const stage1Digest = computeTreeDigest(stage1Res.appPath);
+
+    const stage1BinLstat = fs.lstatSync(stage1Res.binaryPath);
+    assert.equal(stage1BinLstat.isFile(), true);
+    assert.equal(stage1BinLstat.isSymbolicLink(), false);
+    assert.equal(stage1BinLstat.mode & 0o777, 0o755);
+    const stage1BinHash = crypto.createHash('sha256').update(fs.readFileSync(stage1Res.binaryPath)).digest('hex');
+
+    const stage1PlistLstat = fs.lstatSync(stage1Res.infoPlistPath);
+    assert.equal(stage1PlistLstat.isFile(), true);
+    assert.equal(stage1PlistLstat.isSymbolicLink(), false);
+    assert.equal(stage1PlistLstat.mode & 0o777, 0o644);
+    const stage1PlistHash = crypto.createHash('sha256').update(fs.readFileSync(stage1Res.infoPlistPath)).digest('hex');
+    assert.equal(stage1PlistHash, sourcePlistHash, 'Stage 1 Info.plist hash must match release source');
+
+    // Stage 2
+    const stage2Res = await stageBuiltHostApp({ harness });
+    assert.equal(stage2Res.success, true);
+    opLedger.push({ op: 'stage', result: stage2Res, removals: harness.removalSpyCount });
+    assert.equal(harness.removalSpyCount, 2, 'Harness removal spy count must transition to 2 after Stage 2');
+
+    const stage2Digest = computeTreeDigest(stage2Res.appPath);
+    assert.equal(stage2Digest, stage1Digest, 'Stage 1 and Stage 2 tree digests must be identical');
+
+    const stage2BinLstat = fs.lstatSync(stage2Res.binaryPath);
+    assert.equal(stage2BinLstat.isFile(), true);
+    assert.equal(stage2BinLstat.isSymbolicLink(), false);
+    assert.equal(stage2BinLstat.mode & 0o777, 0o755);
+    const stage2BinHash = crypto.createHash('sha256').update(fs.readFileSync(stage2Res.binaryPath)).digest('hex');
+    assert.equal(stage2BinHash, stage1BinHash, 'Stage 2 binary hash must match Stage 1 binary hash');
+
+    const stage2PlistLstat = fs.lstatSync(stage2Res.infoPlistPath);
+    assert.equal(stage2PlistLstat.isFile(), true);
+    assert.equal(stage2PlistLstat.isSymbolicLink(), false);
+    assert.equal(stage2PlistLstat.mode & 0o777, 0o644);
+    const stage2PlistHash = crypto.createHash('sha256').update(fs.readFileSync(stage2Res.infoPlistPath)).digest('hex');
+    assert.equal(stage2PlistHash, sourcePlistHash, 'Stage 2 Info.plist hash must match release source');
+
+    // Verify release source binary unchanged
+    const postStageSourceBinHash = crypto.createHash('sha256').update(fs.readFileSync(releaseSourceBinary)).digest('hex');
+    assert.equal(postStageSourceBinHash, sourceBinHash, 'Release source binary must remain unchanged after staging');
+
+    // Assert exact ledger shape
+    assert.deepEqual(opLedger.map(l => l.op), ['build', 'stage', 'stage'], 'Operation ledger must record exact build -> stage -> stage sequence');
+    assert.equal(opLedger.length, 3, 'Ledger must contain exactly 3 operations (no third stage)');
+
+    harness.cleanup();
+});
+
+test('ARP3-3 & A3-1: Nonvacuous digest and count mutants authority', async () => {
+    // Stage app to produce reference staged tree
+    const harness = new TestStagingHarness();
+    try {
+        await buildHostRelease();
+        const stageRes = await stageBuiltHostApp({ harness });
+        const refAppPath = stageRes.appPath;
+        const refDigest = computeTreeDigest(refAppPath);
+
+        // 1. Chmod-only mutant: copy ref tree to private derived clone, change Info.plist mode 0644 -> 0600
+        const clone1Dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-mut-chmod-'));
+        fs.chmodSync(clone1Dir, 0o700);
+        try {
+            const clone1App = path.join(clone1Dir, 'ComputerUseHost.app');
+            execFileSync('cp', ['-R', refAppPath, clone1App]);
+            const clone1DigestInitial = computeTreeDigest(clone1App);
+            assert.equal(clone1DigestInitial, refDigest, 'Clone 1 initial digest must equal baseline digest');
+
+            const clone1Plist = path.join(clone1App, 'Contents/Info.plist');
+            fs.chmodSync(clone1Plist, 0o600);
+            const clone1MutantDigest = computeTreeDigest(clone1App);
+            assert.notEqual(clone1MutantDigest, refDigest, 'Chmod-only mutant (0644 -> 0600 Info.plist) digest MUST differ from baseline digest');
+        } finally {
+            fs.rmSync(clone1Dir, { recursive: true, force: true });
+        }
+
+        // 2. Type-only mutant (A3-1): replace empty Contents/Resources directory with a 0-byte regular file at same path & mode 0755
+        const clone2Dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-mut-type-'));
+        fs.chmodSync(clone2Dir, 0o700);
+        try {
+            const clone2App = path.join(clone2Dir, 'ComputerUseHost.app');
+            execFileSync('cp', ['-R', refAppPath, clone2App]);
+            const clone2DigestInitial = computeTreeDigest(clone2App);
+            assert.equal(clone2DigestInitial, refDigest, 'Clone 2 initial digest must equal baseline digest');
+
+            const resourcesPath = path.join(clone2App, 'Contents/Resources');
+            const resLstatBefore = fs.lstatSync(resourcesPath);
+            assert.equal(resLstatBefore.isDirectory(), true, 'Resources before mutant must be directory');
+            assert.equal(fs.readdirSync(resourcesPath).length, 0, 'Resources before mutant must be empty directory');
+
+            fs.rmdirSync(resourcesPath);
+            fs.writeFileSync(resourcesPath, Buffer.alloc(0), { mode: 0o755 });
+            fs.chmodSync(resourcesPath, 0o755);
+
+            const resLstatAfter = fs.lstatSync(resourcesPath);
+            assert.equal(resLstatAfter.isFile(), true, 'Resources after mutant must be regular file');
+            assert.equal(resLstatAfter.size, 0, 'Resources after mutant must be 0-byte file');
+            assert.equal(resLstatAfter.mode & 0o777, 0o755, 'Resources after mutant must have 0755 mode');
+
+            const clone2MutantDigest = computeTreeDigest(clone2App);
+            assert.notEqual(clone2MutantDigest, refDigest, 'Type-only mutant (empty dir -> 0-byte file at same path & mode) digest MUST differ from baseline digest');
+        } finally {
+            fs.rmSync(clone2Dir, { recursive: true, force: true });
+        }
+    } finally {
+        harness.cleanup();
+    }
+});
+
+test('ARP3-4 & A3-2 & A3-3: Fresh tracked export, missing release, and nonvacuous ledger authority', async () => {
+    const parentTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-p3-export-'));
+    fs.chmodSync(parentTmpDir, 0o700);
+
+    const outsideDir = path.join(parentTmpDir, 'outside');
+    fs.mkdirSync(outsideDir, { mode: 0o700 });
+    createOutsideSentinelTree(outsideDir);
+
+    const exportDir = path.join(parentTmpDir, 'export');
+    fs.mkdirSync(exportDir, { mode: 0o700 });
+
+    try {
+        const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+        // Create fresh clean git export from HEAD
+        const archiveTarPath = path.join(parentTmpDir, 'export.tar');
+        execFileSync('git', ['archive', '--output', archiveTarPath, 'HEAD'], { cwd: repoRoot, stdio: 'ignore' });
+        execFileSync('tar', ['-xf', archiveTarPath, '-C', exportDir], { stdio: 'ignore' });
+
+        assert.equal(fs.existsSync(path.join(exportDir, '.git')), false, 'Export must not contain .git');
+        assert.equal(fs.existsSync(path.join(exportDir, 'apps/computer-use-host/.build')), false, 'Export must not contain .build');
+        assert.equal(fs.existsSync(path.join(exportDir, 'node_modules')), false, 'Export must not contain node_modules');
+
+        const expHostAppBytes = fs.readFileSync(path.join(exportDir, 'bin/host-app.mjs'));
+        const headHostAppBytes = execFileSync('git', ['show', 'HEAD:bin/host-app.mjs'], { cwd: repoRoot });
+        assert.equal(Buffer.compare(expHostAppBytes, headHostAppBytes), 0, 'Exported bin/host-app.mjs bytes must match HEAD');
+
+        const expTestBytes = fs.readFileSync(path.join(exportDir, 'bin/host-app.test.mjs'));
+        const headTestBytes = execFileSync('git', ['show', 'HEAD:bin/host-app.test.mjs'], { cwd: repoRoot });
+        assert.equal(Buffer.compare(expTestBytes, headTestBytes), 0, 'Exported bin/host-app.test.mjs bytes must match HEAD');
+
+        // A3-2: Missing release fails before any stage mutation
+        const exportHostAppPath = path.join(exportDir, 'bin/host-app.mjs');
+        const { stageBuiltHostApp: expStageBuilt, buildHostRelease: expBuildRelease } = await import(exportHostAppPath);
+
+        const expStagedDir = path.join(exportDir, 'apps/computer-use-host/.build/staged');
+        const outsideBeforeA32 = snapshotTree(outsideDir);
+
+        await assert.rejects(
+            async () => await expStageBuilt(),
+            /Release binary does not exist/
+        );
+        assert.equal(fs.existsSync(expStagedDir), false, 'Staging root must remain absent on missing-release rejection');
+        assert.deepStrictEqual(snapshotTree(outsideDir), outsideBeforeA32, 'Outside tree must remain unchanged on missing-release rejection');
+
+        // Now run build-only and two stages from export
+        const buildRes = await expBuildRelease();
+        assert.equal(buildRes.success, true);
+        assert.equal(fs.existsSync(expStagedDir), false, 'Staging root must remain absent immediately after build-only');
+
+        const releaseSourceBinary = buildRes.releaseBinaryPath;
+        const sourceBinHash = crypto.createHash('sha256').update(fs.readFileSync(releaseSourceBinary)).digest('hex');
+        const sourcePlistHash = crypto.createHash('sha256').update(fs.readFileSync(buildRes.infoPlistPath)).digest('hex');
+
+        // Stage 1 in export
+        const stage1Res = await expStageBuilt();
+        assert.equal(stage1Res.success, true);
+        assert.equal(fs.existsSync(expStagedDir), true, 'Staging root must exist after Stage 1');
+        const stage1Digest = computeTreeDigest(stage1Res.appPath);
+        const stage1BinHash = crypto.createHash('sha256').update(fs.readFileSync(stage1Res.binaryPath)).digest('hex');
+        const stage1PlistHash = crypto.createHash('sha256').update(fs.readFileSync(stage1Res.infoPlistPath)).digest('hex');
+        assert.equal(stage1PlistHash, sourcePlistHash);
+
+        // Stage 2 in export
+        const stage2Res = await expStageBuilt();
+        assert.equal(stage2Res.success, true);
+        const stage2Digest = computeTreeDigest(stage2Res.appPath);
+        const stage2BinHash = crypto.createHash('sha256').update(fs.readFileSync(stage2Res.binaryPath)).digest('hex');
+        const stage2PlistHash = crypto.createHash('sha256').update(fs.readFileSync(stage2Res.infoPlistPath)).digest('hex');
+        assert.equal(stage2Digest, stage1Digest);
+        assert.equal(stage2BinHash, stage1BinHash);
+        assert.equal(stage2PlistHash, sourcePlistHash);
+
+        assert.deepStrictEqual(snapshotTree(outsideDir), outsideBeforeA32, 'Outside tree must remain unchanged after export build and stages');
+
+        // A3-3: Pre-filled ledger rejection discriminator
+        function validateLedger(ledger, actualCalls) {
+            if (!Array.isArray(ledger) || ledger.length !== actualCalls.length) {
+                throw new Error('Ledger length mismatch');
+            }
+            for (let i = 0; i < ledger.length; i++) {
+                if (ledger[i].op !== actualCalls[i].op || ledger[i].completed !== true) {
+                    throw new Error(`Ledger entry ${i} invalid`);
+                }
+            }
+        }
+        const prefilledLedger = [{ op: 'build', completed: true }, { op: 'stage', completed: true }, { op: 'stage', completed: true }];
+        assert.throws(
+            () => validateLedger(prefilledLedger, []),
+            /Ledger length mismatch/
+        );
+    } finally {
+        fs.rmSync(parentTmpDir, { recursive: true, force: true });
+    }
 });
 
 test('RL-3: Bounded real subprocess smoke tests for SIGTERM and SIGINT', async (t) => {

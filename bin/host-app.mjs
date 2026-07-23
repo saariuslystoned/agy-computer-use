@@ -174,7 +174,7 @@ const STANDARD_OBJECT_PROTOS = new Set([
 
 const safeHasOwn = Object.hasOwn;
 
-function validateStageOptions(options) {
+function validateStageOptions(options, allowedKeys = ['build', 'harness', 'relativeTarget'], fnName = 'stageHostApp') {
     if (options === undefined) {
         return { hasBuild: false, build: true, hasHarness: false, harness: undefined, hasRelativeTarget: false, relativeTarget: undefined };
     }
@@ -185,13 +185,15 @@ function validateStageOptions(options) {
         throw new Error('Options object must have Object.prototype');
     }
 
+    const allowedSet = new Set(allowedKeys);
+
     const ownKeys = Reflect.ownKeys(options);
     for (const key of ownKeys) {
         if (typeof key === 'symbol') {
             throw new Error('Options object cannot contain symbol keys');
         }
-        if (key !== 'build' && key !== 'harness' && key !== 'relativeTarget') {
-            throw new Error(`Option '${key}' is forbidden in stageHostApp`);
+        if (!allowedSet.has(key)) {
+            throw new Error(`Option '${key}' is forbidden in ${fnName}`);
         }
     }
 
@@ -225,6 +227,9 @@ function validateStageOptions(options) {
 
     let build;
     if (hasBuild) {
+        if (!allowedSet.has('build')) {
+            throw new Error(`Option 'build' is forbidden in ${fnName}`);
+        }
         if (typeof options.build !== 'boolean') {
             throw new Error('Option build must be a boolean');
         }
@@ -254,8 +259,29 @@ function validateStageOptions(options) {
     return { hasBuild, build, hasHarness, harness, hasRelativeTarget, relativeTarget };
 }
 
-export async function stageHostApp(options) {
-    const validated = validateStageOptions(options);
+export async function buildHostRelease() {
+    const hostPackageDir = path.join(REPO_ROOT, 'apps/computer-use-host');
+    const releaseBinarySource = path.join(hostPackageDir, '.build/release/ComputerUseHost');
+    const infoPlistSource = path.join(hostPackageDir, 'Info.plist');
+
+    await execFileAsync('swift', [
+        'build',
+        '--package-path', hostPackageDir,
+        '--configuration', 'release',
+        '--product', 'ComputerUseHost',
+        '-Xswiftc', '-strict-concurrency=complete',
+        '-Xswiftc', '-warnings-as-errors'
+    ], { cwd: REPO_ROOT });
+
+    return {
+        releaseBinaryPath: releaseBinarySource,
+        infoPlistPath: infoPlistSource,
+        success: true
+    };
+}
+
+export async function stageBuiltHostApp(options) {
+    const validated = validateStageOptions(options, ['harness', 'relativeTarget'], 'stageBuiltHostApp');
 
     let harnessState = null;
     if (validated.hasHarness) {
@@ -263,6 +289,13 @@ export async function stageHostApp(options) {
     }
 
     const hostPackageDir = path.join(REPO_ROOT, 'apps/computer-use-host');
+    const infoPlistSource = path.join(hostPackageDir, 'Info.plist');
+    const releaseBinarySource = path.join(hostPackageDir, '.build/release/ComputerUseHost');
+
+    if (!fs.existsSync(releaseBinarySource)) {
+        throw new Error(`Release binary does not exist at ${releaseBinarySource}; cannot stage without build.`);
+    }
+
     let stagingRoot;
     let stagedAppDir;
 
@@ -307,26 +340,8 @@ export async function stageHostApp(options) {
     const contentsDir = path.join(stagedAppDir, 'Contents');
     const macOSDir = path.join(contentsDir, 'MacOS');
     const resourcesDir = path.join(contentsDir, 'Resources');
-    const infoPlistSource = path.join(hostPackageDir, 'Info.plist');
-    const releaseBinarySource = path.join(hostPackageDir, '.build/release/ComputerUseHost');
     const binaryTarget = path.join(macOSDir, 'ComputerUseHost');
     const infoPlistTarget = path.join(contentsDir, 'Info.plist');
-
-    const shouldBuild = validated.hasBuild ? validated.build : true;
-    if (shouldBuild) {
-        await execFileAsync('swift', [
-            'build',
-            '--package-path', hostPackageDir,
-            '--configuration', 'release',
-            '--product', 'ComputerUseHost',
-            '-Xswiftc', '-strict-concurrency=complete',
-            '-Xswiftc', '-warnings-as-errors'
-        ], { cwd: REPO_ROOT });
-    } else {
-        if (!fs.existsSync(releaseBinarySource)) {
-            throw new Error(`Release binary does not exist at ${releaseBinarySource}; cannot stage without build.`);
-        }
-    }
 
     if (harnessState && typeof harnessState.beforeRemovalHook === 'function') {
         await harnessState.beforeRemovalHook();
@@ -362,6 +377,18 @@ export async function stageHostApp(options) {
         infoPlistPath: infoPlistTarget,
         success: true
     };
+}
+
+export async function stageHostApp(options) {
+    const validated = validateStageOptions(options, ['build', 'harness', 'relativeTarget'], 'stageHostApp');
+    const shouldBuild = validated.hasBuild ? validated.build : true;
+    if (shouldBuild) {
+        await buildHostRelease();
+    }
+    const stageOpts = {};
+    if (validated.hasHarness) stageOpts.harness = validated.harness;
+    if (validated.hasRelativeTarget) stageOpts.relativeTarget = validated.relativeTarget;
+    return stageBuiltHostApp(stageOpts);
 }
 
 export function parseAndClassifyPrincipal(codesignInfo, reqInfo, verificationPassed, options = {}) {
