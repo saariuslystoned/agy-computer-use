@@ -3851,7 +3851,8 @@ public struct ComputerUseHostTestRunner {
         try await runWithWatchdog(name: "test37_ManualSleeperSevenDeterministicScenarios") { try await run37_ManualSleeperSevenDeterministicScenarios() }
         try await runWithWatchdog(name: "test38_HostServerDeadlineCaptureAuthority") { try await run38_HostServerDeadlineCaptureAuthority() }
         try await runWithWatchdog(name: "test39_HostLifecycleAndSubprocessShutdown") { try await run39_HostLifecycleAndSubprocessShutdown() }
-        fputs("[ComputerUseHostTestRunner] Executed 39 native test cases successfully. ALL PASSED.\n", stderr)
+        try await runWithWatchdog(name: "test40_ActionRoutingFreshnessLeaseAndInputSynthesis") { try await run40_ActionRoutingFreshnessLeaseAndInputSynthesis() }
+        fputs("[ComputerUseHostTestRunner] Executed 40 native test cases successfully. ALL PASSED.\n", stderr)
     }
 
     public enum BudgetWaitResult: Equatable, Sendable {
@@ -5407,5 +5408,205 @@ public struct ComputerUseHostTestRunner {
             assertEqual(trackingFactory.intSource.cancelCounter.value, 1, "Failing listener start must cancel SIGINT source exactly once")
             assertEqual(trackingFactory.termSource.cancelCounter.value, 1, "Failing listener start must cancel SIGTERM source exactly once")
         }
+    }
+
+    public static func run40_ActionRoutingFreshnessLeaseAndInputSynthesis() async throws {
+        final class TestTrackInputSynthesisEngine: InputSynthesisEngine, @unchecked Sendable {
+            let enabled: Bool
+            let lock = NSLock()
+            var clickCalls: [(x: Int, y: Int, button: MouseButton, clickCount: Int)] = []
+            var typeCalls: [(text: String, pressEnter: Bool)] = []
+            var shortcutCalls: [[String]] = []
+            var releaseCount: Int = 0
+
+            init(enabled: Bool = true) { self.enabled = enabled }
+
+            var isMutationEnabled: Bool { enabled }
+
+            func releaseHeldInputs() {
+                lock.lock()
+                releaseCount += 1
+                lock.unlock()
+            }
+
+            func performClick(gridX: Int, gridY: Int, button: MouseButton, clickCount: Int, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO {
+                defer { releaseHeldInputs() }
+                guard isMutationEnabled else { throw ComputerUseError.mutationDisabled }
+                guard captureId == currentCaptureId && !captureId.isEmpty else {
+                    throw ComputerUseError.staleCapture(current: currentCaptureId, received: captureId)
+                }
+                lock.lock()
+                clickCalls.append((gridX, gridY, button, clickCount))
+                lock.unlock()
+                return ActionResultDTO(actionId: "act-click-1", status: "dispatched", captureId: captureId, durationMs: 5.0)
+            }
+
+            func performType(text: String, pressEnter: Bool, captureId: String, currentCaptureId: String) throws -> ActionResultDTO {
+                defer { releaseHeldInputs() }
+                guard isMutationEnabled else { throw ComputerUseError.mutationDisabled }
+                guard captureId == currentCaptureId && !captureId.isEmpty else {
+                    throw ComputerUseError.staleCapture(current: currentCaptureId, received: captureId)
+                }
+                lock.lock()
+                typeCalls.append((text, pressEnter))
+                lock.unlock()
+                return ActionResultDTO(actionId: "act-type-1", status: "dispatched", captureId: captureId, durationMs: 3.0)
+            }
+
+            func performShortcut(keys: [String], captureId: String, currentCaptureId: String) throws -> ActionResultDTO {
+                defer { releaseHeldInputs() }
+                guard isMutationEnabled else { throw ComputerUseError.mutationDisabled }
+                guard captureId == currentCaptureId && !captureId.isEmpty else {
+                    throw ComputerUseError.staleCapture(current: currentCaptureId, received: captureId)
+                }
+                lock.lock()
+                shortcutCalls.append(keys)
+                lock.unlock()
+                return ActionResultDTO(actionId: "act-shortcut-1", status: "dispatched", captureId: captureId, durationMs: 2.0)
+            }
+
+            func performMove(gridX: Int, gridY: Int, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO {
+                throw ComputerUseError.mutationDisabled
+            }
+            func performDrag(startX: Int, startY: Int, endX: Int, endY: Int, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO {
+                throw ComputerUseError.mutationDisabled
+            }
+            func performScroll(gridX: Int, gridY: Int, deltaX: Int, deltaY: Int, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO {
+                throw ComputerUseError.mutationDisabled
+            }
+        }
+
+        // 1. Untrusted / Disabled State Dispatches Nothing
+        let disabledEngine = TestTrackInputSynthesisEngine(enabled: false)
+        let serverDisabled = HostServer(
+            authorizer: FakeScreenRecordingAuthorizer(granted: true),
+            topologyProvider: FakeDisplayTopologyProvider(),
+            captureEngine: FakeCaptureEngine(),
+            axEngine: DisabledAXInspector(),
+            inputEngine: disabledEngine
+        )
+        let obsDisabled = await serverDisabled.handleRequest(IPCRequest(id: "obs-0", method: "observe"))
+        assertTrue(obsDisabled.success)
+        let capId0 = obsDisabled.data?["capture_id"]?.rawValue as? String ?? ""
+        let topVer0 = obsDisabled.data?["topology_version"]?.rawValue as? String ?? ""
+
+        let clickDis = await serverDisabled.handleRequest(IPCRequest(id: "dis-1", method: "click", params: [
+            "capture_id": .string(capId0),
+            "topology_version": .string(topVer0),
+            "intent": .string("test"),
+            "x": .int(100),
+            "y": .int(100)
+        ]))
+        assertTrue(!clickDis.success)
+        assertEqual(clickDis.error?.code, "MUTATION_DISABLED")
+        assertEqual(disabledEngine.clickCalls.count, 0, "Disabled engine must dispatch zero click calls")
+
+        // 2. Freshness, Atomic Lease Consumption, and Replay Rejection
+        let activeEngine = TestTrackInputSynthesisEngine(enabled: true)
+        let serverActive = HostServer(
+            authorizer: FakeScreenRecordingAuthorizer(granted: true),
+            topologyProvider: FakeDisplayTopologyProvider(),
+            captureEngine: FakeCaptureEngine(),
+            axEngine: DisabledAXInspector(),
+            inputEngine: activeEngine
+        )
+
+        // Observe 1
+        let obs1 = await serverActive.handleRequest(IPCRequest(id: "obs-1", method: "observe"))
+        assertTrue(obs1.success)
+        let capId1 = obs1.data?["capture_id"]?.rawValue as? String ?? ""
+        let topVer1 = obs1.data?["topology_version"]?.rawValue as? String ?? ""
+
+        // Malformed intent (blank) -> fails IPC_ERROR
+        let badIntent = await serverActive.handleRequest(IPCRequest(id: "bad-intent", method: "click", params: [
+            "capture_id": .string(capId1),
+            "topology_version": .string(topVer1),
+            "intent": .string("   "),
+            "x": .int(500),
+            "y": .int(500)
+        ]))
+        assertTrue(!badIntent.success)
+        assertEqual(badIntent.error?.code, "IPC_ERROR")
+
+        // Stale topology -> fails STALE_TOPOLOGY
+        let badTop = await serverActive.handleRequest(IPCRequest(id: "bad-top", method: "click", params: [
+            "capture_id": .string(capId1),
+            "topology_version": .string("top-sha256-0000000000000000000000000000000000000000000000000000000000000000"),
+            "intent": .string("test click"),
+            "x": .int(500),
+            "y": .int(500)
+        ]))
+        assertTrue(!badTop.success)
+        assertEqual(badTop.error?.code, "STALE_TOPOLOGY")
+
+        // Valid click with capId1 -> succeeds
+        let validClick = await serverActive.handleRequest(IPCRequest(id: "valid-click", method: "click", params: [
+            "capture_id": .string(capId1),
+            "topology_version": .string(topVer1),
+            "intent": .string("click target button"),
+            "x": .int(500),
+            "y": .int(300),
+            "button": .string("left"),
+            "click_count": .int(1)
+        ]))
+        assertTrue(validClick.success)
+        assertEqual(validClick.data?["action_id"]?.rawValue as? String, "act-click-1")
+        assertEqual(validClick.data?["status"]?.rawValue as? String, "dispatched")
+        assertEqual(activeEngine.clickCalls.count, 1)
+        assertEqual(activeEngine.clickCalls[0].x, 500)
+        assertEqual(activeEngine.clickCalls[0].y, 300)
+
+        // Replay attempt with same capId1 -> FAILS STALE_CAPTURE (lease consumed!)
+        let replayClick = await serverActive.handleRequest(IPCRequest(id: "replay-click", method: "click", params: [
+            "capture_id": .string(capId1),
+            "topology_version": .string(topVer1),
+            "intent": .string("replay click"),
+            "x": .int(500),
+            "y": .int(300)
+        ]))
+        assertTrue(!replayClick.success)
+        assertEqual(replayClick.error?.code, "STALE_CAPTURE")
+
+        // Observe 2 -> new lease capId2
+        let obs2 = await serverActive.handleRequest(IPCRequest(id: "obs-2", method: "observe"))
+        assertTrue(obs2.success)
+        let capId2 = obs2.data?["capture_id"]?.rawValue as? String ?? ""
+
+        // Perform type action
+        let typeAction = await serverActive.handleRequest(IPCRequest(id: "type-1", method: "type", params: [
+            "capture_id": .string(capId2),
+            "topology_version": .string(topVer1),
+            "intent": .string("type hello"),
+            "text": .string("Hello World"),
+            "press_enter": .bool(true)
+        ]))
+        assertTrue(typeAction.success)
+        assertEqual(typeAction.data?["action_id"]?.rawValue as? String, "act-type-1")
+        assertEqual(activeEngine.typeCalls.count, 1)
+        assertEqual(activeEngine.typeCalls[0].text, "Hello World")
+        assertTrue(activeEngine.typeCalls[0].pressEnter)
+
+        // Observe 3 -> new lease capId3
+        let obs3 = await serverActive.handleRequest(IPCRequest(id: "obs-3", method: "observe"))
+        assertTrue(obs3.success)
+        let capId3 = obs3.data?["capture_id"]?.rawValue as? String ?? ""
+
+        // Perform shortcut action
+        let shortcutAction = await serverActive.handleRequest(IPCRequest(id: "sc-1", method: "shortcut", params: [
+            "capture_id": .string(capId3),
+            "topology_version": .string(topVer1),
+            "intent": .string("navigate tab"),
+            "keys": .array([.string("cmd"), .string("tab")])
+        ]))
+        assertTrue(shortcutAction.success)
+        assertEqual(shortcutAction.data?["action_id"]?.rawValue as? String, "act-shortcut-1")
+        assertEqual(activeEngine.shortcutCalls.count, 1)
+        assertEqual(activeEngine.shortcutCalls[0], ["cmd", "tab"])
+
+        assertTrue(activeEngine.releaseCount >= 3, "releaseHeldInputs must be called on every completed action")
+
+        // CGEventInputSynthesisEngine sanity check
+        let cgeEngine = CGEventInputSynthesisEngine()
+        cgeEngine.releaseHeldInputs()
     }
 }

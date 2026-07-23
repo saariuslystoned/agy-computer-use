@@ -196,6 +196,10 @@ public final class ComputerUseHostTests: XCTestCase {
         try runSync { try await ComputerUseHostTestRunner.run39_HostLifecycleAndSubprocessShutdown() }
     }
 
+    public func test40_ActionRoutingFreshnessLeaseAndInputSynthesis() throws {
+        try runSync { try await ComputerUseHostTestRunner.run40_ActionRoutingFreshnessLeaseAndInputSynthesis() }
+    }
+
     nonisolated(unsafe) public static let __allTests = [
         ("test01_LengthPrefixedFraming", test01_LengthPrefixedFraming),
         ("test02_OversizedFramingHeaderRejection", test02_OversizedFramingHeaderRejection),
@@ -236,6 +240,7 @@ public final class ComputerUseHostTests: XCTestCase {
         ("test37_ManualSleeperSevenDeterministicScenarios", test37_ManualSleeperSevenDeterministicScenarios),
         ("test38_HostServerDeadlineCaptureAuthority", test38_HostServerDeadlineCaptureAuthority),
         ("test39_HostLifecycleAndSubprocessShutdown", test39_HostLifecycleAndSubprocessShutdown),
+        ("test40_ActionRoutingFreshnessLeaseAndInputSynthesis", test40_ActionRoutingFreshnessLeaseAndInputSynthesis),
     ]
 }
 #endif

@@ -12,6 +12,13 @@ public struct ActionResultDTO: Codable, Equatable, Sendable {
     public let captureId: String
     public let durationMs: Double
 
+    enum CodingKeys: String, CodingKey {
+        case actionId = "action_id"
+        case status
+        case captureId = "capture_id"
+        case durationMs = "duration_ms"
+    }
+
     public init(actionId: String, status: String, captureId: String, durationMs: Double) {
         self.actionId = actionId
         self.status = status
