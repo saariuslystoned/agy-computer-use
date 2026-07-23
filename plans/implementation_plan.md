@@ -20,8 +20,8 @@ Work is partitioned into dependency-ordered milestones (M0–M9 & Dogfood D1–D
 | **M7** | Antigravity Skill Definition & Safety Guardrails | `IMPLEMENTED & TESTED` | `.agents/skills/computer-use/SKILL.md` |
 | **M8** | Continuous Integration & End-to-End Verification Suite | `IMPLEMENTED & TESTED` | `./bin/agy-computer-use test-native`, `pnpm test`, `.github/workflows/ci.yml` |
 | **D1** | Dogfood Harness Canary & Read-Only Vision Verification | `IMPLEMENTED & TESTED` | `computer_use_canary_screenshot`, `proof/v0.1_verification.md` |
-| **D2** | Production-Bounded Native Observation Slice (Source Hardening) | `IN_PROGRESS (Source Hardening / Awaiting Exact-Head Acceptance)` | `ComputerUseHostTestRunner` (authoritative native tests), `SCScreenshotCaptureEngine`, `SystemDisplayTopologyProvider`, `HostServer` generation gate, `proof/d2_verification.md` (REJECTED / NON-TERMINAL placeholder) |
-| **M9** | Production Input Synthesis (CGEvent) & Signed App Bundle | `GATED / FUTURE` | Requires signed `ComputerUseHost.app` bundle and active TCC authorization |
+| **D2** | Production-Bounded Native Observation Slice (Source Hardening) | `IMPLEMENTED & TESTED` | `ComputerUseHostTestRunner` (authoritative native tests), `SCScreenshotCaptureEngine`, `SystemDisplayTopologyProvider`, `HostServer` generation gate, `proof/d2_verification.md` |
+| **M9** | Production Bounded Input Synthesis & Physical Dogfooding | `IMPLEMENTED & PHYSICALLY DOGFOODED` | Five-tool surface (`status`, `observe`, `click`, `type`, `shortcut`), local ad-hoc staged app TCC proof, `proof/m9_physical_dogfood.md`. Stable team signing/notarization remain future work. |
 
 ---
 
@@ -59,8 +59,8 @@ Work is partitioned into dependency-ordered milestones (M0–M9 & Dogfood D1–D
 - Read-only Calculator capture proof via Peekaboo bridge and `computer_use_canary_screenshot`.
 
 ### D2: Production-Bounded Native Observation Slice (Test Authority Closure)
-- **Status**: In Progress (Source Hardening / Awaiting Exact-Head Acceptance; previous candidate 35cde9 failed independent exact-head review due to invalid skeptic/push chronology and open C1–C6 clauses; proof placeholder `proof/d2_verification.md` is REJECTED / NON-TERMINAL)
-- **Key Deliverables & Repairs**:
+- **Status**: Implemented & Tested
+- **Key Deliverables**:
   - Authoritative native test runner (`./bin/agy-computer-use test-native`) executing required named native test cases.
   - Strict-concurrency compilation with warnings as errors (`swift build -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors`).
   - Pure test target isolation under `Tests/ComputerUseHostTestRunner`. Demangled release executable contains zero test-double family symbols (`Fake`, `Spy`, `Scripted`, `Mock`, `TestDouble`, `TestRunner`, `TestHelper`).
@@ -70,9 +70,13 @@ Work is partitioned into dependency-ordered milestones (M0–M9 & Dogfood D1–D
   - `SCScreenshotCaptureEngine` actor with strict `CGImage` dimension verification and 10 MiB raw JPEG bounds guard.
   - Lossless IEEE-754 bitPattern UInt64 hex formatting (`top-sha256-...`) with golden vector assertion and single-field float/integer mutation checks.
   - Raw JPEG SOF marker byte parser (`parseJPEGDimensions`) matching embedded JPEG dimensions with declared DTO dimensions.
-  - D2 observation-only MCP tool inventory (`computer_use_status` and `computer_use_observe`).
   - 100% skill package recursive sync between `.agents/skills` and `skills/`.
 
-### M9: Real OS Driver Integration & Signed Production App (Future / Gated)
-- **Status**: Gated & Future Work
-- **Dependencies**: Requires Xcode app bundle signing, notarization, and user TCC authorization for input synthesis.
+### M9: Bounded Input Synthesis & Physical Dogfooding Slice
+- **Status**: Implemented & Physically Dogfooded
+- **Key Deliverables & Behavior**:
+  - Five-tool active MCP surface (`computer_use_status`, `computer_use_observe`, `computer_use_click`, `computer_use_type`, `computer_use_shortcut`) driven live through Google Antigravity.
+  - Proven local ad-hoc staged-app/TCC operation (`ComputerUseHost.app`).
+  - Authoritative visual proof packet (`proof/m9_physical_dogfood.md`) and media artifacts (`m9_proof2_before.jpg`, `m9_proof2_after.jpg`, `m9_proof2_recording.mp4`).
+  - Stable team signing, distribution, and notarization remain un-gated / future work.
+  - AX-tree inspection (`ax_tree`) and unbounded input actions (`move`, `drag`, `scroll`) remain disabled/deferred.

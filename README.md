@@ -3,17 +3,19 @@
 [![macOS](https://img.shields.io/badge/OS-macOS%2014%2B-blue.svg)](https://apple.com)
 [![Gemini](https://img.shields.io/badge/Model-Gemini%203.6%20Flash-orange.svg)](https://deepmind.google/technologies/gemini/)
 [![Antigravity](https://img.shields.io/badge/Platform-Google%20Antigravity-green.svg)](https://antigravity.google)
-[![Build Status](https://img.shields.io/badge/v0.1-D2%20Observation--Only-blue.svg)](#)
+[![Build Status](https://img.shields.io/badge/v0.1-M9%20Dogfood-blue.svg)](#)
 
-> Architecture specification and production-bounded D2 observation slice for Google Antigravity & Gemini 3.6 Flash on macOS.
+> Architecture specification and production-bounded M9 computer use surface for Google Antigravity & Gemini 3.6 Flash on macOS.
 
 ---
 
 ## Technical Overview
 
-`agy-computer-use` defines an enterprise-grade Computer Use platform for macOS. It combines native macOS screen perception, display topology management, and Unix domain socket IPC via a native host application and an MCP server bridge.
+`agy-computer-use` defines an enterprise-grade Computer Use platform for macOS. It combines native macOS screen perception, display topology management, bounded input synthesis, and Unix domain socket IPC via a native host application and an MCP server bridge.
 
-In this **Milestone D2 observation slice**, the system provides nonprompting screen recording preflight access (`CGPreflightScreenCaptureAccess`), native ScreenCaptureKit display capture (`SCScreenshotCaptureEngine`), IEEE-754 bitPattern topology SHA-256 tokens (`top-sha256-...`), actor-isolated JPEG encoding, monotonic generation fences, per-frame UDS deadlines, and strict Zod DTO schema validation. Input synthesis and accessibility tree inspection are disabled in D2 and reserved for subsequent milestones.
+Building on the completed **Milestone D2 observation & source-hardening foundation**, Milestone M9 implements and physically dogfoods the five-tool MCP surface (`computer_use_status`, `computer_use_observe`, `computer_use_click`, `computer_use_type`, `computer_use_shortcut`) for macOS desktop interactions.
+
+Local ad-hoc staged-app/TCC operation is proven via `ComputerUseHost.app`. Stable team code signing, distribution, and notarization remain un-gated / future work. AX-tree inspection (`ax_tree`) and unbounded input actions (`move`, `drag`, `scroll`) remain disabled and deferred.
 
 ### Core Architecture
 
@@ -31,9 +33,9 @@ flowchart TD
 
     subgraph Native ["Staged Background Host (ComputerUseHost)"]
         SocketServer["Unix Domain Socket Listener (0700)"]
-        AXEngine["AXUIElement Inspector (Disabled in D2)"]
+        AXEngine["AXUIElement Inspector (Disabled / Deferred)"]
         CapEngine["Screen Capture Engine (macOS 14+ SCScreenshotManager)"]
-        InputEngine["Input Synthesis Engine (Disabled in D2)"]
+        InputEngine["Input Synthesis Engine (Active M9 Bounded)"]
         CoordMapper["Coordinate & Display Scaler"]
     end
 
@@ -49,16 +51,19 @@ flowchart TD
 
 ---
 
-## Tool API Specifications (Milestone D2 Observation-Only Slice)
+## Tool API Specifications (Milestone M9 Active Bounded Surface)
 
-The MCP server exposes the following active tools to Gemini 3.6 Flash / Antigravity in D2:
+The MCP server exposes the following active tools to Gemini 3.6 Flash / Antigravity:
 
 | Tool Name | Required Parameters | Description |
 |---|---|---|
 | `computer_use_status` | None | Returns host connectivity, active display topology, TCC permission state, and mutation lockout state. |
 | `computer_use_observe` | `display_id?` | Captures primary or target display screenshot, returning `capture_id`, `topology_version` (`top-sha256-...`), and JPEG image payload. |
+| `computer_use_click` | `x`, `y`, `intent`, `capture_id`, `topology_version`, `button?`, `click_count?` | Dispatches single mouse click at normalized (0..999) coordinates on active display topology. |
+| `computer_use_type` | `text`, `intent`, `capture_id`, `topology_version`, `press_enter?` | Synthesizes Unicode text entry into focused window/element. |
+| `computer_use_shortcut` | `keys`, `intent`, `capture_id`, `topology_version` | Dispatches bounded keyboard shortcut sequence (e.g. `['cmd', 'tab']`). |
 
-*Note: Action tools (`click`, `move`, `drag`, `type`, `shortcut`, `scroll`) and `ax_tree` are disabled in D2 and fail closed with `MUTATION_DISABLED` or `TARGET_UNREACHABLE`.*
+*Note: Unbounded continuous actions (`move`, `drag`, `scroll`) and `ax_tree` remain disabled/deferred and fail closed with `MUTATION_DISABLED` or `TARGET_UNREACHABLE`.*
 
 ---
 
@@ -91,7 +96,7 @@ The MCP server exposes the following active tools to Gemini 3.6 Flash / Antigrav
   - **Non-Override Runtime Directory Policy**: Public CLI host commands operate strictly on the canonical runtime directory (`/tmp/agy-computer-use-<uid>`), enforcing single-owner Unix domain socket permissions (`0700`) and inode identity validation to prevent socket hijacking or symlink attacks. Custom runtime directory overrides (`COMPUTER_USE_RUNTIME_DIR`) are restricted to isolated test harnesses and rejected or fail-closed in public production CLI operations.
 
 > [!NOTE]
-> This milestone is **observation-only**. Input mutation remains disabled, the principal remains `ad_hoc_ephemeral`, and a denied Screen Recording state is a human TCC gate rather than permission to change TCC. Live screenshot proof is not claimed in this milestone.
+> Milestone D2 established the completed native observation and source-hardening foundation. Milestone M9 implements and physically dogfoods bounded input synthesis (`click`, `type`, `shortcut`) driven live via Google Antigravity. Local ad-hoc staged-app/TCC operation is proven; team signing/notarization remains future work. A denied Screen Recording or Accessibility state remains a human TCC gate.
 
 - **Authoritative Native Swift Test Authority**:
   ```bash
