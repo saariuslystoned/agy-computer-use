@@ -72,9 +72,30 @@ The MCP server exposes the following active tools to Gemini 3.6 Flash / Antigrav
 
 ### Running Tests & Readiness Checks
 
+- **Production Host Lifecycle Commands**:
+  - Start Native Host:
+    ```bash
+    ./bin/agy-computer-use host-start
+    ```
+  - Check Host Status (read-only):
+    ```bash
+    ./bin/agy-computer-use host-status
+    ```
+  - Stop Native Host:
+    ```bash
+    ./bin/agy-computer-use host-stop
+    ```
+
+> [!NOTE]
+> This milestone is **observation-only**. Input mutation remains disabled, the principal remains `ad_hoc_ephemeral`, and a denied Screen Recording state is a human TCC gate rather than permission to change TCC. Live screenshot proof is not claimed in this milestone.
+
 - **Authoritative Native Swift Test Authority**:
   ```bash
   ./bin/agy-computer-use test-native
+  ```
+- **Focused Production Host Lifecycle Test Authority**:
+  ```bash
+  node --test bin/host-lifecycle.test.mjs
   ```
 - **TypeScript MCP Server Tests & TypeScript Check**:
   ```bash
