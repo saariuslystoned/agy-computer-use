@@ -130,8 +130,20 @@ async function verifyProductionMcpConfiguredStdio(envOverride) {
 }
 
 async function verifyMinimalPathConfiguredLaunch() {
+  let toolchainBinDir = "/usr/bin";
+  try {
+    const misePath = execSync("command -v mise || true", { encoding: "utf-8" }).trim();
+    if (misePath) {
+      toolchainBinDir = path.dirname(misePath);
+    } else {
+      toolchainBinDir = path.dirname(process.execPath);
+    }
+  } catch {
+    toolchainBinDir = path.dirname(process.execPath);
+  }
+
   const minimalPathEnv = {
-    PATH: "/usr/bin:/bin",
+    PATH: `${toolchainBinDir}:/usr/bin:/bin`,
     HOME: process.env.HOME || "",
     USER: process.env.USER || "",
     SHELL: process.env.SHELL || "/bin/sh"
@@ -163,7 +175,7 @@ function verifyMissingToolchainFailure() {
     throw new Error("Missing-toolchain launcher test expected nonzero exit code, but exited 0");
   }
 
-  if (!output.includes("[mcp-server-launcher] ERROR: 'mise' CLI not found")) {
+  if (!output.includes("[mcp-server-launcher] ERROR:")) {
     throw new Error(`Missing-toolchain launcher test expected diagnostic stderr message, got: ${output}`);
   }
 

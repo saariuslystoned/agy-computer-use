@@ -1,8 +1,6 @@
 #!/bin/sh
 set -eu
 
-export PATH="${PATH:-}:/usr/bin:/bin"
-
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
@@ -24,10 +22,15 @@ elif [ -n "${HOME:-}" ] && [ -x "$HOME/.cargo/bin/mise" ]; then
   MISE_BIN="$HOME/.cargo/bin/mise"
 fi
 
-if [ -z "$MISE_BIN" ]; then
-  echo "[mcp-server-launcher] ERROR: 'mise' CLI not found on PATH or standard install paths (~/.local/bin, /opt/homebrew/bin, /usr/local/bin). Please install mise (https://mise.jdx.dev) and run 'mise install'." >&2
-  exit 1
+if [ -n "$MISE_BIN" ]; then
+  cd "$REPO_ROOT"
+  exec "$MISE_BIN" exec -- node "$SCRIPT_DIR/mcp-server.mjs" "$@"
 fi
 
-cd "$REPO_ROOT"
-exec "$MISE_BIN" exec -- node "$SCRIPT_DIR/mcp-server.mjs" "$@"
+if [ "${TEST_FORCE_MISSING_MISE:-0}" != "1" ] && command -v node >/dev/null 2>&1; then
+  cd "$REPO_ROOT"
+  exec node "$SCRIPT_DIR/mcp-server.mjs" "$@"
+fi
+
+echo "[mcp-server-launcher] ERROR: Neither 'mise' CLI nor 'node' executable found on PATH or standard install paths (~/.local/bin, /opt/homebrew/bin, /usr/local/bin). Please install mise (https://mise.jdx.dev) and run 'mise install'." >&2
+exit 1

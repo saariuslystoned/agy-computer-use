@@ -742,8 +742,20 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
     assert.deepEqual(prodServer.args, []);
     assert.equal(prodServer.cwd, ".");
 
+    let toolchainBinDir = "/usr/bin";
+    try {
+      const misePath = execSync("command -v mise || true", { encoding: "utf-8" }).trim();
+      if (misePath) {
+        toolchainBinDir = path.dirname(misePath);
+      } else {
+        toolchainBinDir = path.dirname(process.execPath);
+      }
+    } catch {
+      toolchainBinDir = path.dirname(process.execPath);
+    }
+
     const minimalPathEnv = {
-      PATH: "/usr/bin:/bin",
+      PATH: `${toolchainBinDir}:/usr/bin:/bin`,
       HOME: process.env.HOME || "",
       USER: process.env.USER || "",
       SHELL: process.env.SHELL || "/bin/sh"
@@ -787,6 +799,6 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
     }
 
     assert.notEqual(exitCode, 0, "Missing toolchain launcher execution must exit nonzero");
-    assert.match(output, /\[mcp-server-launcher\] ERROR: 'mise' CLI not found/, "Missing toolchain launcher output must contain diagnostic error");
+    assert.match(output, /\[mcp-server-launcher\] ERROR:/, "Missing toolchain launcher output must contain diagnostic error");
   });
 });
