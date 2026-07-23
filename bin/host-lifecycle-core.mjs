@@ -438,6 +438,13 @@ export class ProductionHostSupervisor {
       .filter((proc) => !beforePids.has(proc.pid));
   }
 
+  processMatchesLaunchGeneration(proc) {
+    if (!proc || typeof proc.command !== 'string') return false;
+    const tokens = proc.command.trim().split(/\s+/);
+    const flagIndex = tokens.lastIndexOf('--agy-launch-generation');
+    return flagIndex >= 0 && tokens[flagIndex + 1] === this.generation;
+  }
+
   async waitForNewStagedProcesses(stagedAppDir, timeoutMs = 500) {
     const startedAt = Date.now();
     while (Date.now() - startedAt < timeoutMs) {
@@ -954,7 +961,12 @@ export class ProductionHostSupervisor {
         this.childClosedResolver = resolve;
       });
 
-      const childEnv = { ...process.env, COMPUTER_USE_SOCKET_PATH: this.hostSocketPath, AGY_SOCKET_PATH: this.hostSocketPath };
+      const childEnv = {
+        ...process.env,
+        COMPUTER_USE_SOCKET_PATH: this.hostSocketPath,
+        AGY_SOCKET_PATH: this.hostSocketPath,
+        AGY_LAUNCH_GENERATION: this.generation
+      };
       let proc;
 
       if (stagedAppDir) {
@@ -966,7 +978,8 @@ export class ProductionHostSupervisor {
           '-n', '-g', '-W',
           '--env', `COMPUTER_USE_SOCKET_PATH=${this.hostSocketPath}`,
           '--env', `AGY_SOCKET_PATH=${this.hostSocketPath}`,
-          stagedAppDir
+          stagedAppDir,
+          '--args', '--agy-launch-generation', this.generation
         ];
         proc = spawn(openBin, openArgs, {
           cwd: REPO_ROOT,
@@ -1032,6 +1045,13 @@ export class ProductionHostSupervisor {
         if (diffProcs.length === 0) {
           throw new Error(`Host passed status probe but zero new running processes found for exact staged binary '${stagedAppDir}'`);
         }
+        const reportedProcess = discoveredNativePid
+          ? diffProcs.find((proc) => proc.pid === discoveredNativePid)
+          : null;
+        if (reportedProcess) {
+          this.nativePid = reportedProcess.pid;
+          this.nativeProcIdentity = reportedProcess;
+        }
         if (diffProcs.length > 1) {
           throw new Error(`Host passed status probe but found ambiguous multiple (${diffProcs.length}) new running processes for exact staged binary '${stagedAppDir}': PIDs [${diffProcs.map((p) => p.pid).join(', ')}]`);
         }
@@ -1039,6 +1059,9 @@ export class ProductionHostSupervisor {
         const exactProc = diffProcs[0];
         if (discoveredNativePid && discoveredNativePid !== exactProc.pid) {
           throw new Error(`Discovered status probe PID ${discoveredNativePid} does not match exact process inventory PID ${exactProc.pid}`);
+        }
+        if (!reportedProcess && !this.processMatchesLaunchGeneration(exactProc)) {
+          throw new Error(`Exact staged process PID ${exactProc.pid} lacks both status-PID and launch-generation ownership proof`);
         }
 
         this.nativePid = exactProc.pid;
@@ -1079,7 +1102,8 @@ export class ProductionHostSupervisor {
       let cleanupError = null;
       if (stagedAppDir && !this.nativePid && this.child) {
         const spawnedProcesses = await this.waitForNewStagedProcesses(stagedAppDir);
-        for (const identity of spawnedProcesses) {
+        const ownedProcesses = spawnedProcesses.filter((proc) => this.processMatchesLaunchGeneration(proc));
+        for (const identity of ownedProcesses) {
           try {
             const result = await this.terminateCapturedProcess(identity);
             this.killEscalated ||= result.killEscalated;

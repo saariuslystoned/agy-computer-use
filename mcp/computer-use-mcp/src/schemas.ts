@@ -144,8 +144,8 @@ export const AXNodeSchema: z.ZodType<any> = z.lazy(() =>
     enabled: z.boolean().optional(),
     focused: z.boolean().optional(),
     bounds: z.object({
-      x: z.number().nonnegative().finite(),
-      y: z.number().nonnegative().finite(),
+      x: z.number().finite(),
+      y: z.number().finite(),
       width: z.number().nonnegative().finite(),
       height: z.number().nonnegative().finite()
     }).strict(),

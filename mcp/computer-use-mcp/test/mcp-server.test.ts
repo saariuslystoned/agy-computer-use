@@ -1085,14 +1085,21 @@ describe("Defect 4 & 5 Hardened Validation Tests", () => {
     };
     assert.equal(AXTreeDataSchema.safeParse(duplicateIdData).success, false);
 
-    // Negative: negative bounds
-    const negBoundsData = {
+    // Positive: global AX coordinates may be negative on displays left of or above primary.
+    const negativeOriginData = {
       ...validTreeData,
       node_count: 1,
       max_depth_reached: 1,
-      tree: { id: "ax-1", role: "AXWindow", bounds: { x: -5, y: 0, width: 10, height: 10 } }
+      tree: { id: "ax-1", role: "AXWindow", bounds: { x: -1440, y: -143, width: 10, height: 10 } }
     };
-    assert.equal(AXTreeDataSchema.safeParse(negBoundsData).success, false);
+    assert.equal(AXTreeDataSchema.safeParse(negativeOriginData).success, true);
+
+    // Negative: dimensions cannot be negative.
+    const negativeSizeData = {
+      ...negativeOriginData,
+      tree: { id: "ax-1", role: "AXWindow", bounds: { x: -1440, y: -143, width: -1, height: 10 } }
+    };
+    assert.equal(AXTreeDataSchema.safeParse(negativeSizeData).success, false);
 
     // Negative: string exceeding 256 chars
     const longStringData = {

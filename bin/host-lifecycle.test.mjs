@@ -907,8 +907,8 @@ test('M9-LAUNCHSERVICES: Staged app launch uses LaunchServices open with exact f
   let supervisor = null;
   let spawnedChildPid = null;
   const expectedMockCommand = () => (
-    spawnedChildPid
-      ? `${process.execPath} ${mockNativeBin} ${paths.hostSocketPath}`
+    spawnedChildPid && supervisor
+      ? `${process.execPath} ${mockNativeBin} ${paths.hostSocketPath} --agy-launch-generation ${supervisor.generation}`
       : null
   );
   const ownedMockChildIsAlive = () => {
@@ -992,14 +992,19 @@ fs.writeFileSync(${JSON.stringify(openLogFile)}, JSON.stringify(args));
 fs.writeFileSync(${JSON.stringify(launcherPidFile)}, String(process.pid));
 
 let socketPath = null;
+let forwardedArgs = [];
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--env' && args[i+1] && args[i+1].startsWith('COMPUTER_USE_SOCKET_PATH=')) {
     socketPath = args[i+1].split('=')[1];
   }
+  if (args[i] === '--args') {
+    forwardedArgs = args.slice(i + 1);
+    break;
+  }
 }
 
 if (socketPath) {
-  const child = spawn(process.execPath, [${JSON.stringify(mockNativeBin)}, socketPath], {
+  const child = spawn(process.execPath, [${JSON.stringify(mockNativeBin)}, socketPath, ...forwardedArgs], {
     detached: false,
     stdio: 'ignore'
   });
@@ -1017,7 +1022,7 @@ if (socketPath) {
     if (fs.existsSync(childPidFile)) {
       spawnedChildPid = parseInt(fs.readFileSync(childPidFile, 'utf8'), 10);
       if (spawnedChildPid > 0) {
-        return [{ pid: spawnedChildPid, executable: stagedBinaryPath, lstart: 'mock-start-time' }];
+        return [{ pid: spawnedChildPid, executable: stagedBinaryPath, lstart: 'mock-start-time', command: expectedMockCommand() }];
       }
     }
     return [];
@@ -1051,7 +1056,10 @@ if (socketPath) {
   assert.ok(loggedArgs[4].startsWith('COMPUTER_USE_SOCKET_PATH='), 'Flag 5 must be COMPUTER_USE_SOCKET_PATH');
   assert.equal(loggedArgs[5], '--env', 'Flag 6 must be --env');
   assert.ok(loggedArgs[6].startsWith('AGY_SOCKET_PATH='), 'Flag 7 must be AGY_SOCKET_PATH');
-  assert.equal(loggedArgs[7], validAppDir, 'Flag 8 (last arg) must be app path');
+  assert.equal(loggedArgs[7], validAppDir, 'Flag 8 must be app path');
+  assert.equal(loggedArgs[8], '--args', 'Flag 9 must begin native app arguments');
+  assert.equal(loggedArgs[9], '--agy-launch-generation', 'Flag 10 must identify the launch-generation argument');
+  assert.equal(loggedArgs[10], supervisor.generation, 'Flag 11 must bind the native process to this supervisor generation');
 
   process.kill(spawnedChildPid, 'SIGTERM');
   const shutdownStarted = Date.now();
@@ -1089,7 +1097,10 @@ setTimeout(() => {}, 20000);
   fs.writeFileSync(mockOpenBin, `#!/usr/bin/env node
 import fs from 'node:fs';
 import { spawn } from 'node:child_process';
-const child = spawn(process.execPath, [${JSON.stringify(mockNativeBin)}], {
+const args = process.argv.slice(2);
+const argsIndex = args.indexOf('--args');
+const forwardedArgs = argsIndex >= 0 ? args.slice(argsIndex + 1) : [];
+const child = spawn(process.execPath, [${JSON.stringify(mockNativeBin)}, ...forwardedArgs], {
   detached: false,
   stdio: 'ignore'
 });
@@ -1118,7 +1129,12 @@ process.on('SIGINT', () => process.exit(0));
       if (!fs.existsSync(childPidFile)) return [];
       nativePid = Number.parseInt(fs.readFileSync(childPidFile, 'utf8'), 10);
       return ownedNativeIsAlive()
-        ? [{ pid: nativePid, executable: stagedBinaryPath, lstart: 'mock-start-time' }]
+        ? [{
+            pid: nativePid,
+            executable: stagedBinaryPath,
+            lstart: 'mock-start-time',
+            command: `${stagedBinaryPath} --agy-launch-generation ${supervisor.generation}`
+          }]
         : [];
     }
   });
@@ -1216,6 +1232,89 @@ test('M9-LAUNCHSERVICES-REJECT-MULTIPLE: Rejects launch if ambiguous multiple pr
     },
     'Must fail closed when multiple running processes appear post readiness'
   );
+});
+
+test('M9-LAUNCHSERVICES-PRESERVE-CONCURRENT: Ambiguous launch terminates only the status-owned native', { timeout: 10000 }, async (t) => {
+  const testDir = createTestHarnessDir();
+  const validAppDir = path.join(REPO_ROOT, 'apps/computer-use-host/.build/staged/ComputerUseHost.app');
+  const stagedBinaryPath = path.resolve(path.join(validAppDir, 'Contents/MacOS/ComputerUseHost'));
+  const mockOpenBin = path.join(testDir, 'mock-open-wait.js');
+  fs.writeFileSync(mockOpenBin, `#!/usr/bin/env node
+process.on('SIGTERM', () => process.exit(0));
+process.on('SIGINT', () => process.exit(0));
+setTimeout(() => {}, 20000);
+`, { mode: 0o755 });
+
+  const spawnCandidate = async () => {
+    const proc = spawn(process.execPath, ['-e', "console.log('READY'); setInterval(() => {}, 1000);"], {
+      stdio: ['ignore', 'pipe', 'ignore']
+    });
+    await new Promise((resolve) => proc.stdout.once('data', resolve));
+    return proc;
+  };
+  const owned = await spawnCandidate();
+  const concurrent = await spawnCandidate();
+  const isAlive = (pid) => {
+    try { process.kill(pid, 0); return true; } catch { return false; }
+  };
+
+  t.after(async () => {
+    for (const proc of [owned, concurrent]) {
+      if (isAlive(proc.pid)) {
+        try { proc.kill('SIGKILL'); } catch {}
+      }
+    }
+    cleanupTestDir(testDir);
+  });
+
+  let inspectorCalls = 0;
+  let supervisor;
+  const processInspector = () => {
+    inspectorCalls += 1;
+    if (inspectorCalls === 1) return [];
+    return [
+      {
+        pid: owned.pid,
+        executable: stagedBinaryPath,
+        lstart: 'owned-start',
+        command: `${stagedBinaryPath} --agy-launch-generation ${supervisor.generation}`
+      },
+      {
+        pid: concurrent.pid,
+        executable: stagedBinaryPath,
+        lstart: 'concurrent-start',
+        command: stagedBinaryPath
+      }
+    ].filter((identity) => isAlive(identity.pid));
+  };
+
+  supervisor = new ProductionHostSupervisor({
+    runtimeDir: testDir,
+    stagedAppDir: validAppDir,
+    processInspector
+  });
+  supervisor.ensureLockFile();
+  supervisor.startControlServer = async () => {};
+  supervisor.checkNativeStatus = async () => ({
+    alive: true,
+    data: {
+      pid: owned.pid,
+      connected: true,
+      tcc_permission_state: 'granted',
+      accessibility_available: true,
+      accessibility_trusted: true,
+      input_mutation_state: 'enabled'
+    }
+  });
+
+  await assert.rejects(
+    supervisor.start({ openBinary: mockOpenBin, readinessTimeoutMs: 500 }),
+    /ambiguous multiple \(2\) new running processes/,
+    'Multiple exact staged candidates must fail closed'
+  );
+
+  assert.equal(isAlive(owned.pid), false, 'The status-owned native must be terminated on rejected startup');
+  assert.equal(isAlive(concurrent.pid), true, 'A concurrent same-bundle process without ownership proof must be preserved');
 });
 
 test('M9-LAUNCHSERVICES-REJECT-MISMATCH: Rejects process termination if executable identity does not match staged binary', async (t) => {
