@@ -47,17 +47,19 @@ function validateMcpConfigStruct() {
     }
   }
 
-  if (prodServer.command !== "node") {
-    throw new Error(`computer-use server command must be 'node'`);
+  if (prodServer.command !== "mise") {
+    throw new Error(`computer-use server command must be 'mise'`);
   }
-  if (!Array.isArray(prodServer.args) || prodServer.args.length !== 1 || prodServer.args[0] !== "./mcp/computer-use-mcp/dist/src/index.js") {
-    throw new Error(`computer-use server args must be strictly ['./mcp/computer-use-mcp/dist/src/index.js']`);
+  const expectedArgs = ["exec", "--", "node", "./mcp/computer-use-mcp/dist/src/index.js"];
+  if (!Array.isArray(prodServer.args) || prodServer.args.length !== 4 || !expectedArgs.every((a, idx) => prodServer.args[idx] === a)) {
+    throw new Error(`computer-use server args must be strictly ${JSON.stringify(expectedArgs)}`);
   }
   if (prodServer.cwd !== ".") {
     throw new Error(`computer-use server cwd must be '.'`);
   }
-  if (!fs.existsSync(path.join(rootDir, prodServer.args[0]))) {
-    throw new Error(`Target dist file for computer-use does not exist at ${prodServer.args[0]}`);
+  const distFile = prodServer.args[3];
+  if (!fs.existsSync(path.join(rootDir, distFile))) {
+    throw new Error(`Target dist file for computer-use does not exist at ${distFile}`);
   }
 }
 
@@ -109,13 +111,14 @@ async function verifyProductionMcpConfiguredStdio() {
     );
     const toolsResult = await Promise.race([listPromise, listTimeoutPromise]);
 
-    if (!toolsResult || !toolsResult.tools || toolsResult.tools.length !== 2) {
-      throw new Error(`Public production MCP tool inventory count must be EXACTLY 2, got ${toolsResult?.tools?.length ?? 0}`);
+    if (!toolsResult || !toolsResult.tools || toolsResult.tools.length !== 5) {
+      throw new Error(`Public production MCP tool inventory count must be EXACTLY 5, got ${toolsResult?.tools?.length ?? 0}`);
     }
 
     const toolNames = toolsResult.tools.map(t => t.name).sort();
-    if (toolNames[0] !== "computer_use_observe" || toolNames[1] !== "computer_use_status") {
-      throw new Error(`Production tool names must be ['computer_use_observe', 'computer_use_status'], got ${JSON.stringify(toolNames)}`);
+    const expectedToolNames = ["computer_use_click", "computer_use_observe", "computer_use_shortcut", "computer_use_status", "computer_use_type"];
+    if (JSON.stringify(toolNames) !== JSON.stringify(expectedToolNames)) {
+      throw new Error(`Production tool names must be ${JSON.stringify(expectedToolNames)}, got ${JSON.stringify(toolNames)}`);
     }
 
     return toolNames;
@@ -246,7 +249,7 @@ async function main() {
 
     try {
       const toolNames = await verifyProductionMcpConfiguredStdio();
-      log(`Verified production configured stdio MCP tool inventory: Exactly 2 tools (${toolNames.join(", ")})`);
+      log(`Verified production configured stdio MCP tool inventory: Exactly ${toolNames.length} tools (${toolNames.join(", ")})`);
     } catch (err) {
       fail(`Configured stdio MCP tool inventory check failed: ${err.message}`);
     }

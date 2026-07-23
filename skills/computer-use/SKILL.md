@@ -1,14 +1,14 @@
 ---
 name: computer-use
-description: Provides observation-only desktop screen perception (computer_use_status and computer_use_observe) for macOS desktop interactions. Contract Version v0.1.0-dogfood-d2.
+description: Provides desktop screen perception and bounded input synthesis (computer_use_status, computer_use_observe, computer_use_click, computer_use_type, computer_use_shortcut) for macOS desktop interactions. Contract Version v0.1.0-dogfood-m9.
 ---
 
-# Antigravity Computer Use Skill (`v0.1.0-dogfood-d2`)
+# Antigravity Computer Use Skill (`v0.1.0-dogfood-m9`)
 
 This skill teaches Google Antigravity agents (and Gemini models) how to reliably and safely interact with macOS graphical user interfaces using the `computer-use-mcp` tool suite.
 
 > [!NOTE]
-> **Observation-Only Slice (D2 Procedure)**: In Milestone D2, native host screen observation via `computer_use_observe` and status reporting via `computer_use_status` are active. Input mutation actions (`computer_use_click`, `computer_use_move`, etc.) and AX tree inspection (`computer_use_ax_tree`) are disabled in this build phase. Agents MUST NOT attempt disabled input or AX tools during D2.
+> **Action Synthesis Slice (M9 Procedure)**: In Milestone M9, native host screen observation via `computer_use_observe`, status reporting via `computer_use_status`, and bounded input synthesis tools (`computer_use_click`, `computer_use_type`, `computer_use_shortcut`) are active. Every input action requires active `capture_id`, `topology_version`, and `intent`. Every action consumes the active capture lease, requiring a fresh `computer_use_observe` before any subsequent input action.
 
 ---
 
@@ -20,15 +20,17 @@ This skill teaches Google Antigravity agents (and Gemini models) how to reliably
   - `./bin/agy-computer-use host-status`: Checks if native host is `running`, `stopped`, or `stale`.
   - `./bin/agy-computer-use host-stop`: Stops the native host process cleanly, awaiting exact native child close and terminal owner receipt (`native_closed: true`).
   - *Process Authority & Security*: Host lifecycle commands communicate with the owner control server on `control.sock` (terminal owner correlation) and strictly enforce the non-override canonical runtime directory policy (`/tmp/agy-computer-use-<uid>`).
-- **ALWAYS** call `computer_use_status` to verify host connection, TCC permission state (`granted`), and display topology.
+- **ALWAYS** call `computer_use_status` to verify host connection, TCC permission state (`granted`), accessibility trust, and display topology.
 - Call `computer_use_observe` to capture current desktop screen state and receive a valid `capture_id` and `topology_version`.
 - Dynamic topology versions (`topology_version`) are required tokens returned from observation.
 
-> [!NOTE]
-> Observation-only milestone: input mutation remains disabled, host principal is `ad_hoc_ephemeral`, and denied Screen Recording state is a human TCC gate. Live screenshot proof is not claimed in this milestone.
+### 2. Bounded Input Synthesis Actions
+- **Observe-Action-Observe Loop**: Input actions (`computer_use_click`, `computer_use_type`, `computer_use_shortcut`) atomically consume the observation lease token (`capture_id`).
+- Replay or sequential input actions without an intervening `computer_use_observe` fail closed with `STALE_CAPTURE`.
+- All actions require nonblank `intent` explaining the target purpose.
 
-### 2. Coordinate System (`0...999`)
-- All coordinates in visual layout analysis are normalized to an integer grid from `0` to `999`.
+### 3. Coordinate System (`0...999`)
+- All coordinates in visual layout analysis and `computer_use_click` are normalized to an integer grid from `0` to `999`.
 - `x = 0, y = 0` is Top-Left; `x = 999, y = 999` is Bottom-Right of the active display.
 
 ---

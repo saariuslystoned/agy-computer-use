@@ -50,10 +50,10 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
 
     const toolsResult = await client.listTools();
     assert.ok(toolsResult.tools);
-    assert.equal(toolsResult.tools.length, 2);
+    assert.equal(toolsResult.tools.length, 5);
 
     const toolNames = toolsResult.tools.map(t => t.name).sort();
-    assert.deepEqual(toolNames, ["computer_use_observe", "computer_use_status"]);
+    assert.deepEqual(toolNames, ["computer_use_click", "computer_use_observe", "computer_use_shortcut", "computer_use_status", "computer_use_type"]);
 
     const statusCall = await client.callTool({ name: "computer_use_status", arguments: {} });
     assert.ok(statusCall.content);
@@ -93,6 +93,77 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
     assert.ok(dims);
     assert.equal(dims.width, textMeta.pixel_width);
     assert.equal(dims.height, textMeta.pixel_height);
+
+    await client.close();
+    await server.close();
+  });
+
+  test("Executes observe -> click -> observe -> type -> observe -> shortcut -> observe lease chain", async () => {
+    const mockHost = new MockHostClient();
+    mockHost.inputMutationState = "enabled";
+    const server = createComputerUseServer(mockHost);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "chain-client", version: "1.0.0" }, { capabilities: {} });
+
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+    const obs1 = await client.callTool({ name: "computer_use_observe", arguments: {} });
+    const meta1 = JSON.parse((obs1.content as any[])[0].text);
+    assert.ok(meta1.capture_id);
+    assert.ok(meta1.topology_version);
+
+    const clickRes = await client.callTool({
+      name: "computer_use_click",
+      arguments: {
+        capture_id: meta1.capture_id,
+        topology_version: meta1.topology_version,
+        x: 500,
+        y: 300,
+        button: "left",
+        click_count: 1,
+        intent: "Click target button"
+      }
+    });
+    assert.equal(clickRes.isError, undefined);
+    const clickData = JSON.parse((clickRes.content as any[])[0].text);
+    assert.equal(clickData.status, "dispatched");
+
+    const obs2 = await client.callTool({ name: "computer_use_observe", arguments: {} });
+    const meta2 = JSON.parse((obs2.content as any[])[0].text);
+
+    const typeRes = await client.callTool({
+      name: "computer_use_type",
+      arguments: {
+        capture_id: meta2.capture_id,
+        topology_version: meta2.topology_version,
+        text: "Hello World",
+        press_enter: true,
+        intent: "Type hello text"
+      }
+    });
+    assert.equal(typeRes.isError, undefined);
+    const typeData = JSON.parse((typeRes.content as any[])[0].text);
+    assert.equal(typeData.status, "dispatched");
+
+    const obs3 = await client.callTool({ name: "computer_use_observe", arguments: {} });
+    const meta3 = JSON.parse((obs3.content as any[])[0].text);
+
+    const scRes = await client.callTool({
+      name: "computer_use_shortcut",
+      arguments: {
+        capture_id: meta3.capture_id,
+        topology_version: meta3.topology_version,
+        keys: ["cmd", "tab"],
+        intent: "Switch app window"
+      }
+    });
+    assert.equal(scRes.isError, undefined);
+    const scData = JSON.parse((scRes.content as any[])[0].text);
+    assert.equal(scData.status, "dispatched");
+
+    const obs4 = await client.callTool({ name: "computer_use_observe", arguments: {} });
+    const meta4 = JSON.parse((obs4.content as any[])[0].text);
+    assert.ok(meta4.capture_id);
 
     await client.close();
     await server.close();
@@ -378,7 +449,7 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
       "stale_topology_response.json": { expectedValid: true, schemaTarget: "ErrorResponse" },
       "timeout_response.json": { expectedValid: true, schemaTarget: "ErrorResponse" },
       "ax_tree_unreachable_response.json": { expectedValid: true, schemaTarget: "ErrorResponse" },
-      "click_request_disabled.json": { expectedValid: false },
+      "click_request_disabled.json": { expectedValid: true, schemaTarget: "ClickRequest" },
       "invalid_click_request_negative.json": { expectedValid: false },
       "invalid_method_request_negative.json": { expectedValid: false },
       "canonical_jpeg_mutations.json": { expectedValid: false }

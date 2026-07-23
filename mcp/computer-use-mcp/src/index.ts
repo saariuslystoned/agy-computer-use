@@ -7,7 +7,7 @@ import {
   Tool
 } from "@modelcontextprotocol/sdk/types.js";
 import { HostClient, UnixSocketHostClient, getDefaultSocketPath } from "./host-client.js";
-import { StatusDataSchema, ObserveDataSchema, StatusInputSchema, ObserveInputSchema } from "./schemas.js";
+import { StatusDataSchema, ObserveDataSchema, StatusInputSchema, ObserveInputSchema, ClickInputSchema, TypeInputSchema, ShortcutInputSchema, ActionResultDataSchema } from "./schemas.js";
 
 export interface JPEGDimensions {
   width: number;
@@ -341,6 +341,34 @@ function formatToolResponse(ipcResp: any, toolName: string) {
     };
   }
 
+  if (toolName === "computer_use_click" || toolName === "computer_use_type" || toolName === "computer_use_shortcut") {
+    const parsedData = ActionResultDataSchema.safeParse(ipcResp.data);
+    if (!parsedData.success) {
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              error: {
+                code: "INVALID_RESPONSE_DATA",
+                message: `Action response data failed Zod schema validation: ${parsedData.error.message}`
+              }
+            }, null, 2)
+          }
+        ]
+      };
+    }
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(parsedData.data, null, 2)
+        }
+      ]
+    };
+  }
+
   return {
     content: [
       {
@@ -390,9 +418,67 @@ export function createComputerUseServer(hostClient: HostClient): Server {
     }
   };
 
+  const CLICK_TOOL: Tool = {
+    name: "computer_use_click",
+    description: "Dispatches a single mouse click at normalized (x, y) coordinates [0...999] on the observed display geometry. Requires active capture_id and topology_version.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        capture_id: { type: "string", description: "Observation capture ID token from latest computer_use_observe." },
+        topology_version: { type: "string", description: "Active display topology version token." },
+        x: { type: "integer", minimum: 0, maximum: 999, description: "Normalized horizontal coordinate (0-999)." },
+        y: { type: "integer", minimum: 0, maximum: 999, description: "Normalized vertical coordinate (0-999)." },
+        button: { type: "string", enum: ["left", "right", "middle"], description: "Optional mouse button. Defaults to left." },
+        click_count: { type: "integer", minimum: 1, maximum: 3, description: "Optional click count (1-3). Defaults to 1." },
+        intent: { type: "string", minLength: 1, description: "Clear explanation of the action's intent." }
+      },
+      required: ["capture_id", "topology_version", "x", "y", "intent"],
+      additionalProperties: false
+    }
+  };
+
+  const TYPE_TOOL: Tool = {
+    name: "computer_use_type",
+    description: "Synthesizes Unicode text entry into the focused window/element, with optional Enter key press. Requires active capture_id and topology_version.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        capture_id: { type: "string", description: "Observation capture ID token from latest computer_use_observe." },
+        topology_version: { type: "string", description: "Active display topology version token." },
+        text: { type: "string", minLength: 1, maxLength: 1000, description: "Unicode text payload to type (1-1000 characters)." },
+        press_enter: { type: "boolean", description: "Optional boolean to press Enter after text. Defaults to false." },
+        intent: { type: "string", minLength: 1, description: "Clear explanation of the action's intent." }
+      },
+      required: ["capture_id", "topology_version", "text", "intent"],
+      additionalProperties: false
+    }
+  };
+
+  const SHORTCUT_TOOL: Tool = {
+    name: "computer_use_shortcut",
+    description: "Dispatches a bounded keyboard shortcut sequence (modifiers + navigation keys like Tab, Enter, Escape, Arrow keys, Home, End, PageUp/Down). Requires active capture_id and topology_version.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        capture_id: { type: "string", description: "Observation capture ID token from latest computer_use_observe." },
+        topology_version: { type: "string", description: "Active display topology version token." },
+        keys: {
+          type: "array",
+          items: { type: "string" },
+          minItems: 1,
+          maxItems: 5,
+          description: "Array of 1 to 5 keys/modifiers to press in sequence (e.g. ['cmd', 'tab'])."
+        },
+        intent: { type: "string", minLength: 1, description: "Clear explanation of the action's intent." }
+      },
+      required: ["capture_id", "topology_version", "keys", "intent"],
+      additionalProperties: false
+    }
+  };
+
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     return {
-      tools: [STATUS_TOOL, OBSERVE_TOOL]
+      tools: [STATUS_TOOL, OBSERVE_TOOL, CLICK_TOOL, TYPE_TOOL, SHORTCUT_TOOL]
     };
   });
 
@@ -443,6 +529,72 @@ export function createComputerUseServer(hostClient: HostClient): Server {
       const displayId = parseRes.data.display_id;
       const params = displayId !== undefined ? { display_id: displayId } : undefined;
       const ipcResp = await hostClient.request("observe", params, extra?.signal);
+      return formatToolResponse(ipcResp, name);
+    }
+
+    if (name === "computer_use_click") {
+      const parseRes = ClickInputSchema.safeParse(args);
+      if (!parseRes.success) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                error: {
+                  code: "INVALID_ARGUMENT",
+                  message: `Invalid arguments for computer_use_click: ${parseRes.error.message}`
+                }
+              }, null, 2)
+            }
+          ]
+        };
+      }
+      const ipcResp = await hostClient.request("click", parseRes.data, extra?.signal);
+      return formatToolResponse(ipcResp, name);
+    }
+
+    if (name === "computer_use_type") {
+      const parseRes = TypeInputSchema.safeParse(args);
+      if (!parseRes.success) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                error: {
+                  code: "INVALID_ARGUMENT",
+                  message: `Invalid arguments for computer_use_type: ${parseRes.error.message}`
+                }
+              }, null, 2)
+            }
+          ]
+        };
+      }
+      const ipcResp = await hostClient.request("type", parseRes.data, extra?.signal);
+      return formatToolResponse(ipcResp, name);
+    }
+
+    if (name === "computer_use_shortcut") {
+      const parseRes = ShortcutInputSchema.safeParse(args);
+      if (!parseRes.success) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                error: {
+                  code: "INVALID_ARGUMENT",
+                  message: `Invalid arguments for computer_use_shortcut: ${parseRes.error.message}`
+                }
+              }, null, 2)
+            }
+          ]
+        };
+      }
+      const ipcResp = await hostClient.request("shortcut", parseRes.data, extra?.signal);
       return formatToolResponse(ipcResp, name);
     }
 

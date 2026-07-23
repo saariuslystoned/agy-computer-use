@@ -126,3 +126,35 @@ export const ObserveDataSchema = z.object({
     max_y: z.literal(999)
   }).strict()
 }).strict();
+
+export const ClickInputSchema = z.object({
+  capture_id: z.string().min(1),
+  topology_version: TopologyVersionSchema,
+  x: z.number().int().min(0).max(999),
+  y: z.number().int().min(0).max(999),
+  button: z.enum(["left", "right", "middle"]).optional(),
+  click_count: z.number().int().min(1).max(3).optional(),
+  intent: z.string().trim().min(1)
+}).strict();
+
+export const TypeInputSchema = z.object({
+  capture_id: z.string().min(1),
+  topology_version: TopologyVersionSchema,
+  text: z.string().min(1).max(1000),
+  press_enter: z.boolean().optional(),
+  intent: z.string().trim().min(1)
+}).strict();
+
+export const ShortcutInputSchema = z.object({
+  capture_id: z.string().min(1),
+  topology_version: TopologyVersionSchema,
+  keys: z.array(z.string().trim().min(1)).min(1).max(5),
+  intent: z.string().trim().min(1)
+}).strict();
+
+export const ActionResultDataSchema = z.object({
+  action_id: z.string().min(1),
+  status: z.enum(["dispatched", "indeterminate"]),
+  capture_id: z.string().min(1),
+  duration_ms: z.number().nonnegative().finite()
+}).strict();

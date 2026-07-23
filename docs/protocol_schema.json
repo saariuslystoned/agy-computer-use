@@ -5,8 +5,12 @@
   "oneOf": [
     { "$ref": "#/definitions/StatusRequest" },
     { "$ref": "#/definitions/ObserveRequest" },
+    { "$ref": "#/definitions/ClickRequest" },
+    { "$ref": "#/definitions/TypeRequest" },
+    { "$ref": "#/definitions/ShortcutRequest" },
     { "$ref": "#/definitions/StatusResponse" },
     { "$ref": "#/definitions/ObserveResponse" },
+    { "$ref": "#/definitions/ActionResultResponse" },
     { "$ref": "#/definitions/ErrorResponse" }
   ],
   "definitions": {
@@ -161,6 +165,95 @@
                 "max_y": { "const": 999 }
               }
             }
+          }
+        }
+      }
+    },
+    "ClickRequest": {
+      "type": "object",
+      "required": ["id", "method", "params"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "method": { "const": "click" },
+        "params": {
+          "type": "object",
+          "required": ["capture_id", "topology_version", "x", "y", "intent"],
+          "additionalProperties": false,
+          "properties": {
+            "capture_id": { "type": "string", "minLength": 1 },
+            "topology_version": { "type": "string", "pattern": "^top-sha256-[0-9a-f]{64}$" },
+            "x": { "type": "integer", "minimum": 0, "maximum": 999 },
+            "y": { "type": "integer", "minimum": 0, "maximum": 999 },
+            "button": { "enum": ["left", "right", "middle"] },
+            "click_count": { "type": "integer", "minimum": 1, "maximum": 3 },
+            "intent": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "TypeRequest": {
+      "type": "object",
+      "required": ["id", "method", "params"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "method": { "const": "type" },
+        "params": {
+          "type": "object",
+          "required": ["capture_id", "topology_version", "text", "intent"],
+          "additionalProperties": false,
+          "properties": {
+            "capture_id": { "type": "string", "minLength": 1 },
+            "topology_version": { "type": "string", "pattern": "^top-sha256-[0-9a-f]{64}$" },
+            "text": { "type": "string", "minLength": 1, "maxLength": 1000 },
+            "press_enter": { "type": "boolean" },
+            "intent": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "ShortcutRequest": {
+      "type": "object",
+      "required": ["id", "method", "params"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "method": { "const": "shortcut" },
+        "params": {
+          "type": "object",
+          "required": ["capture_id", "topology_version", "keys", "intent"],
+          "additionalProperties": false,
+          "properties": {
+            "capture_id": { "type": "string", "minLength": 1 },
+            "topology_version": { "type": "string", "pattern": "^top-sha256-[0-9a-f]{64}$" },
+            "keys": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 5,
+              "items": { "type": "string", "minLength": 1 }
+            },
+            "intent": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "ActionResultResponse": {
+      "type": "object",
+      "required": ["id", "success", "data"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "success": { "const": true },
+        "data": {
+          "type": "object",
+          "required": ["action_id", "status", "capture_id", "duration_ms"],
+          "additionalProperties": false,
+          "properties": {
+            "action_id": { "type": "string", "minLength": 1 },
+            "status": { "enum": ["dispatched", "indeterminate"] },
+            "capture_id": { "type": "string", "minLength": 1 },
+            "duration_ms": { "type": "number", "minimum": 0 }
           }
         }
       }

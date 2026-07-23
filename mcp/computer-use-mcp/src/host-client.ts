@@ -109,17 +109,38 @@ export class MockHostClient implements HostClient {
       };
     }
 
-    if (["click", "move", "drag", "type", "shortcut", "scroll"].includes(method)) {
+    if (["click", "type", "shortcut"].includes(method)) {
       if (this.inputMutationState === "disabled") {
         return {
           id: "mock-dis",
           success: false,
           error: {
             code: "MUTATION_DISABLED",
-            message: "Input mutation is disabled in Milestone D2"
+            message: "Input mutation is disabled"
           }
         };
       }
+      return {
+        id: `mock-${method}`,
+        success: true,
+        data: {
+          action_id: `act-${method}-001`,
+          status: "dispatched",
+          capture_id: (params?.capture_id as string) || "cap-mock-001",
+          duration_ms: 12.34
+        }
+      };
+    }
+
+    if (["move", "drag", "scroll"].includes(method)) {
+      return {
+        id: "mock-dis",
+        success: false,
+        error: {
+          code: "MUTATION_DISABLED",
+          message: "Input mutation action not supported in this slice"
+        }
+      };
     }
 
     if (method === "ax_tree") {
