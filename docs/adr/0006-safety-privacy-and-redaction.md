@@ -14,4 +14,4 @@ Automated desktop interaction poses security and privacy risks if credentials, p
 3. **App Entitlements & TCC Checks**:
    - Accessibility trust is checked asynchronously via `AXIsProcessTrustedWithOptions`. `NSAccessibilityUsageDescription` is not a valid macOS Info.plist key. Screen recording entitlement requires `NSScreenCaptureUsageDescription`.
 4. **Human Approval Gate (`WAITING_FOR_HUMAN`)**:
-   - Destructive file operations, external communications (email/SMS/chat to non-test contacts), or payment/financial actions require explicit user confirmation (`CODEX_TEAMWORK_ACTION_REQUIRED`).
+   - Destructive file operations, external communications (email/SMS/chat to non-test contacts), or payment/financial actions require explicit concise human confirmation.

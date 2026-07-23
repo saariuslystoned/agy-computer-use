@@ -58,11 +58,14 @@ This skill teaches Google Antigravity agents (and Gemini models) how to reliably
 
 > [!IMPORTANT]
 > **Human Approval Gate (`WAITING_FOR_HUMAN`)**:
-> You MUST pause execution and ask for explicit human confirmation (`CODEX_TEAMWORK_ACTION_REQUIRED`) before performing:
+> You MUST pause execution and ask for concise explicit human confirmation before performing:
 > 1. Financial or wallet transactions.
 > 2. Sending emails, RCS, SMS, or external chat messages to real contacts.
 > 3. Deleting system files or executing `sudo` / destructive terminal commands.
 > 4. Modifying macOS System Settings or security permissions.
+>
+> *Note on Teamwork Tools*: `/teamwork-preview` is reserved strictly for explicitly requested multi-agent fanout tasks.
+
 
 ---
 

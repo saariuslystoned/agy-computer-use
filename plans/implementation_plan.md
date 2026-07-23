@@ -21,7 +21,8 @@ Work is partitioned into dependency-ordered milestones (M0–M9 & Dogfood D1–D
 | **M8** | Continuous Integration & End-to-End Verification Suite | `IMPLEMENTED & TESTED` | `./bin/agy-computer-use test-native`, `pnpm test`, `.github/workflows/ci.yml` |
 | **D1** | Dogfood Harness Canary & Read-Only Vision Verification | `IMPLEMENTED & TESTED` | `computer_use_canary_screenshot`, `proof/v0.1_verification.md` |
 | **D2** | Production-Bounded Native Observation Slice (Source Hardening) | `IMPLEMENTED & TESTED` | `ComputerUseHostTestRunner` (authoritative native tests), `SCScreenshotCaptureEngine`, `SystemDisplayTopologyProvider`, `HostServer` generation gate, `proof/d2_verification.md` |
-| **M9** | Production Bounded Input Synthesis & Physical Dogfooding | `IMPLEMENTED & PHYSICALLY DOGFOODED` | Five-tool surface (`status`, `observe`, `click`, `type`, `shortcut`), local ad-hoc staged app TCC proof, `proof/m9_physical_dogfood.md`. Stable team signing/notarization remain future work. |
+| **M9** | Production Bounded Input Synthesis & Physical Dogfooding | `IMPLEMENTED & PHYSICALLY DOGFOODED` | Five-tool surface (`status`, `observe`, `click`, `type`, `shortcut`), local ad-hoc staged app TCC proof, `proof/m9_physical_dogfood.md`. |
+| **M10** | Expanded AX Inspection & Continuous Pointer Actions (M10/D3) | `IMPLEMENTED & PHYSICALLY DOGFOODED` | Nine-tool surface (`status`, `observe`, `ax_tree`, `click`, `move`, `type`, `shortcut`, `scroll`, `drag`), `proof/m10_d3_physical_dogfood.md`. |
 
 ---
 
@@ -79,4 +80,12 @@ Work is partitioned into dependency-ordered milestones (M0–M9 & Dogfood D1–D
   - Proven local ad-hoc staged-app/TCC operation (`ComputerUseHost.app`).
   - Authoritative visual proof packet (`proof/m9_physical_dogfood.md`) and media artifacts (`m9_proof2_before.jpg`, `m9_proof2_after.jpg`, `m9_proof2_recording.mp4`).
   - Stable team signing, distribution, and notarization remain human-gated future work.
-  - AX-tree inspection (`ax_tree`) and unbounded input actions (`move`, `drag`, `scroll`) remain disabled/deferred.
+  - AX-tree inspection (`ax_tree`) and continuous input actions (`move`, `drag`, `scroll`) were deferred in M9 and activated in M10.
+
+### M10: Expanded AX Inspection & Continuous Pointer Actions (M10/D3)
+- **Status**: Implemented & Physically Dogfooded
+- **Key Deliverables & Behavior**:
+  - Nine-tool active MCP surface (`computer_use_status`, `computer_use_observe`, `computer_use_ax_tree`, `computer_use_click`, `computer_use_move`, `computer_use_type`, `computer_use_shortcut`, `computer_use_scroll`, `computer_use_drag`) driven live through Google Antigravity.
+  - Active AX inspection with automatic secure text field subrole redaction (`[REDACTED]`).
+  - Active continuous pointer movement (`move`), anchored relative scrolling (`scroll`), and button drag synthesis (`drag`).
+  - Authoritative visual proof packet (`proof/m10_d3_physical_dogfood.md`) and media artifacts (`m10_proof_before.jpg`, `m10_proof_after.jpg`, `m10_hover_active.jpg`, `m10_ax_tree_redacted.json`, `m10_d3_end_to_end.mp4`).
