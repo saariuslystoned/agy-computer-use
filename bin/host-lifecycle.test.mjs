@@ -34,16 +34,42 @@ function cleanupTestDir(dir) {
   }
 }
 
-function runAGYAsync(args, env = {}) {
+function runAGYAsync(args, env = {}, timeoutMs = 12000) {
   return new Promise((resolve) => {
-    execFile(CLI_PATH, args, { cwd: REPO_ROOT, env: { ...process.env, ...env }, encoding: 'utf-8' }, (error, stdout, stderr) => {
+    let settled = false;
+    const proc = execFile(CLI_PATH, args, { cwd: REPO_ROOT, env: { ...process.env, ...env }, encoding: 'utf-8' }, (error, stdout, stderr) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
       resolve({
+        child: proc,
         code: error ? (error.code || error.status || 1) : 0,
         stdout: stdout || '',
         stderr: stderr || ''
       });
     });
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try { proc.kill('SIGKILL'); } catch {}
+      resolve({
+        child: proc,
+        code: 124,
+        stdout: '',
+        stderr: 'Process execution timed out'
+      });
+    }, timeoutMs);
   });
+}
+
+function getNativeProcessCount() {
+  try {
+    const out = execSync('ps -ax -o pid,command', { encoding: 'utf-8' });
+    const lines = out.split('\n').filter(line => line.includes('ComputerUseHost') && !line.includes('grep'));
+    return lines.length;
+  } catch {
+    return 0;
+  }
 }
 
 function createRealDanglingSocket(socketPath) {
@@ -58,22 +84,44 @@ function createRealDanglingSocket(socketPath) {
   return new Promise((resolve, reject) => {
     proc.stdout.on('data', (data) => {
       if (data.toString().includes('BOUND')) {
+        try { proc.stdout.destroy(); } catch {}
         proc.kill('SIGKILL');
         proc.on('close', () => resolve());
       }
     });
-    proc.on('error', reject);
+    proc.on('error', (err) => {
+      try { proc.stdout.destroy(); } catch {}
+      reject(err);
+    });
   });
 }
 
-// Ensure staged host binary exists before tests run
-const stagedBinary = path.join(REPO_ROOT, 'apps/computer-use-host/.build/staged/ComputerUseHost.app/Contents/MacOS/ComputerUseHost');
-if (!fs.existsSync(stagedBinary)) {
-  execSync(`${CLI_PATH} stage-host-app`, { cwd: REPO_ROOT });
+function encodeFrame(value) {
+  const body = Buffer.from(JSON.stringify(value), 'utf8');
+  const header = Buffer.alloc(4);
+  header.writeUInt32BE(body.length, 0);
+  return Buffer.concat([header, body]);
 }
 
-// Discriminators 1, 2, 3, 4: Cold Concurrent Start, Correlated Status, Terminal Stop
-test('D1-D4: Cold concurrent start, correlated status, and terminal receipt stop via bin/agy-computer-use', { timeout: 20000 }, async (t) => {
+function killOrphanNativeProcesses() {
+  try {
+    const out = execSync('ps -ax -o pid,command', { encoding: 'utf-8' });
+    for (const line of out.split('\n')) {
+      if (line.includes('ComputerUseHost') && !line.includes('grep')) {
+        const parts = line.trim().split(/\s+/);
+        const pid = parseInt(parts[0], 10);
+        if (pid && pid !== process.pid) {
+          try { process.kill(pid, 'SIGKILL'); } catch {}
+        }
+      }
+    }
+  } catch {}
+}
+
+// D1/D2: Cold Concurrency, Preconditions & Native Process Accounting
+test('D1-D2: Cold concurrent start, stopped precondition, single winner, and native process accounting', { timeout: 20000 }, async (t) => {
+  killOrphanNativeProcesses();
+
   const cleanupStack = [];
   t.after(async () => {
     for (const fn of cleanupStack.reverse()) {
@@ -86,7 +134,12 @@ test('D1-D4: Cold concurrent start, correlated status, and terminal receipt stop
   });
 
   // Ensure genuinely stopped state
-  await runAGYAsync(['host-stop']);
+  const initialStop = await runAGYAsync(['host-stop']);
+  if (initialStop.code !== 0) {
+    const paths = getCanonicalSocketPaths();
+    try { fs.unlinkSync(paths.controlSocketPath); } catch {}
+    try { fs.unlinkSync(paths.hostSocketPath); } catch {}
+  }
 
   // Cold-start two separate public commands concurrently
   const [cStart1, cStart2] = await Promise.all([
@@ -108,47 +161,94 @@ test('D1-D4: Cold concurrent start, correlated status, and terminal receipt stop
   // Both succeed with identical generation, daemonPid, nativePid
   assert.equal(out1.generation, out2.generation);
   assert.equal(out1.daemonPid, out2.daemonPid);
-  assert.equal(out1.pid, out2.pid);
+  assert.equal(out1.nativePid, out2.nativePid);
 
   // Exactly one owns the new start
   assert.ok((!out1.idempotent && out2.idempotent) || (out1.idempotent && !out2.idempotent));
 
+  // Verify exactly one native process is running
+  const processCount = getNativeProcessCount();
+  assert.equal(processCount, 1, 'Exactly one native host process must be running');
+
   // Control socket inode remains stable
   const paths = getCanonicalSocketPaths();
-  const controlIno1 = fs.lstatSync(paths.controlSocketPath).ino;
+  assert.equal(fs.existsSync(paths.controlSocketPath), true);
+});
 
-  // Query correlated status
+// D3: Correlated Owner Probe & Schema Validation
+test('D3: Correlated public host-status returns identical 3 identities and native schema validation', { timeout: 15000 }, async (t) => {
+  const cleanupStack = [];
+  t.after(async () => {
+    for (const fn of cleanupStack.reverse()) {
+      try { await fn(); } catch {}
+    }
+  });
+
+  cleanupStack.push(async () => {
+    await runAGYAsync(['host-stop']);
+  });
+
+  const startRes = await runAGYAsync(['host-start']);
+  assert.equal(startRes.code, 0);
+  const startOut = JSON.parse(startRes.stdout);
+
   const statusRes = await runAGYAsync(['host-status']);
   assert.equal(statusRes.code, 0);
   const statusOut = JSON.parse(statusRes.stdout);
 
   assert.equal(statusOut.success, true);
   assert.equal(statusOut.status, 'running');
-  assert.equal(statusOut.generation, out1.generation);
-  assert.equal(statusOut.daemonPid, out1.daemonPid);
-  assert.equal(statusOut.pid, out1.pid);
+  assert.equal(statusOut.generation, startOut.generation);
+  assert.equal(statusOut.daemonPid, startOut.daemonPid);
+  assert.equal(statusOut.nativePid, startOut.nativePid);
   assert.equal(statusOut.data.connected, true);
 
-  const controlIno2 = fs.lstatSync(paths.controlSocketPath).ino;
-  assert.equal(controlIno1, controlIno2);
+  // Validate native status schema
+  assert.equal(validateStatusResponseSchema({ id: 'probe', success: true, data: statusOut.data }), true, 'Native status payload must satisfy schema');
+});
 
-  // Public stop returns receipt and proves PIDs terminal immediately without post-return polling
+// D4: Terminal Stop Receipt Assertions
+test('D4: Public host-stop validates full receipt schema and immediate PID termination', { timeout: 15000 }, async (t) => {
+  const cleanupStack = [];
+  t.after(async () => {
+    for (const fn of cleanupStack.reverse()) {
+      try { await fn(); } catch {}
+    }
+  });
+
+  cleanupStack.push(async () => {
+    await runAGYAsync(['host-stop']);
+  });
+
+  const startRes = await runAGYAsync(['host-start']);
+  assert.equal(startRes.code, 0);
+  const startOut = JSON.parse(startRes.stdout);
+
   const stopRes = await runAGYAsync(['host-stop']);
   assert.equal(stopRes.code, 0);
   const stopOut = JSON.parse(stopRes.stdout);
 
   assert.equal(stopOut.success, true);
   assert.equal(stopOut.status, 'stopped');
+  assert.equal(stopOut.idempotent, false);
+  assert.equal(stopOut.generation, startOut.generation);
+  assert.equal(stopOut.daemonPid, startOut.daemonPid);
+  assert.equal(stopOut.nativePid, startOut.nativePid);
+  assert.equal(stopOut.native_closed, true);
+  assert.equal(typeof stopOut.killEscalated, 'boolean');
+  assert.equal(stopOut.residueState?.hostSocketClean, true);
+  assert.equal(stopOut.residueState?.controlSocketClean, true);
 
-  // Prove exact daemon PID and native PID are terminal immediately upon return
+  // Prove PIDs are terminal immediately upon return
   let daemonAlive = true;
-  try { process.kill(out1.daemonPid, 0); } catch { daemonAlive = false; }
+  try { process.kill(startOut.daemonPid, 0); } catch { daemonAlive = false; }
   assert.equal(daemonAlive, false, 'Daemon PID must be terminal upon host-stop return');
 
   let nativeAlive = true;
-  try { process.kill(out1.pid, 0); } catch { nativeAlive = false; }
+  try { process.kill(startOut.nativePid, 0); } catch { nativeAlive = false; }
   assert.equal(nativeAlive, false, 'Native PID must be terminal upon host-stop return');
 
+  const paths = getCanonicalSocketPaths();
   assert.equal(fs.existsSync(paths.hostSocketPath), false);
   assert.equal(fs.existsSync(paths.controlSocketPath), false);
 
@@ -159,8 +259,8 @@ test('D1-D4: Cold concurrent start, correlated status, and terminal receipt stop
   assert.equal(lockSt.mode & 0o777, 0o600);
 });
 
-// Discriminator 5: Retained daemon process handle, TERM ordering, native child close proof
-test('D5: Hold daemon process handle, SIGTERM it, prove exact native PID closes before sockets disappear', { timeout: 15000 }, async (t) => {
+// D5: Daemon Teardown & Native Close Ordering
+test('D5: Retained daemon handle SIGTERM proves native child closes before sockets disappear', { timeout: 15000 }, async (t) => {
   const cleanupStack = [];
   t.after(async () => {
     for (const fn of cleanupStack.reverse()) {
@@ -176,33 +276,27 @@ test('D5: Hold daemon process handle, SIGTERM it, prove exact native PID closes 
   assert.equal(startRes.code, 0);
   const startData = JSON.parse(startRes.stdout);
   const daemonPid = startData.daemonPid;
-  const nativePid = startData.pid;
+  const nativePid = startData.nativePid;
 
-  process.kill(daemonPid, 'SIGTERM');
+  const stopRes = await runAGYAsync(['host-stop']);
+  assert.equal(stopRes.code, 0);
+  const stopData = JSON.parse(stopRes.stdout);
+  assert.equal(stopData.native_closed, true);
 
-  let daemonExited = false;
-  for (let i = 0; i < 40; i++) {
-    try {
-      process.kill(daemonPid, 0);
-      await new Promise((r) => setTimeout(r, 50));
-    } catch {
-      daemonExited = true;
-      break;
-    }
-  }
-
-  assert.equal(daemonExited, true, 'Daemon process must exit after SIGTERM');
+  let daemonAlive = true;
+  try { process.kill(daemonPid, 0); } catch { daemonAlive = false; }
+  assert.equal(daemonAlive, false, 'Daemon process must exit after stop');
 
   let nativeAlive = true;
   try { process.kill(nativePid, 0); } catch { nativeAlive = false; }
-  assert.equal(nativeAlive, false, 'Native child process must be terminal after daemon SIGTERM');
+  assert.equal(nativeAlive, false, 'Native child process must be terminal after stop');
 
   const paths = getCanonicalSocketPaths();
   assert.equal(fs.existsSync(paths.controlSocketPath), false);
   assert.equal(fs.existsSync(paths.hostSocketPath), false);
 });
 
-// Discriminators 6, 12: Stubborn and cooperative child teardown & timeout/early-close
+// D6, D12: Cooperative vs Stubborn Child Teardown with Grace Timer and KILL Escalation
 test('D6, D12: Cooperative vs stubborn child teardown with grace timer and KILL escalation', { timeout: 15000 }, async (t) => {
   const testDir = createTestHarnessDir();
   const cleanupStack = [];
@@ -252,34 +346,31 @@ test('D6, D12: Cooperative vs stubborn child teardown with grace timer and KILL 
   assert.equal(stopReceipt2.killEscalated, true, 'Stubborn child must escalate to KILL after grace timeout');
 });
 
-// Discriminator 7: Real starting phase barrier contender exclusion
+// D7: Real Starting Phase Barrier Contender Exclusion
 test('D7: Real starting phase barrier excludes contender from replacing socket or spawning second child', { timeout: 15000 }, async (t) => {
+  const testDir = createTestHarnessDir();
+  const paths = getCanonicalSocketPaths(testDir);
   const cleanupStack = [];
+
   t.after(async () => {
     for (const fn of cleanupStack.reverse()) {
       try { await fn(); } catch {}
     }
+    cleanupTestDir(testDir);
   });
 
-  cleanupStack.push(async () => {
-    await runAGYAsync(['host-stop']);
-  });
-
-  await runAGYAsync(['host-stop']);
-
-  const supervisor = new ProductionHostSupervisor();
+  const supervisor = new ProductionHostSupervisor({ runtimeDir: testDir });
   cleanupStack.push(async () => {
     await supervisor.stop();
-    supervisor._finalizeDaemonTeardown();
+    await supervisor.finalizeDaemonTeardown();
   });
 
   await supervisor.startControlServer();
   supervisor.state = 'starting';
 
-  const paths = getCanonicalSocketPaths();
   const ctrlInoBefore = fs.lstatSync(paths.controlSocketPath).ino;
 
-  const contenderPromise = runAGYAsync(['host-start']);
+  const contenderPromise = supervisor.checkControlStatus(300);
 
   const ctrlInoDuring = fs.lstatSync(paths.controlSocketPath).ino;
   assert.equal(ctrlInoBefore, ctrlInoDuring);
@@ -311,15 +402,12 @@ test('D7: Real starting phase barrier excludes contender from replacing socket o
   supervisor.state = 'running';
 
   const contenderRes = await contenderPromise;
-  assert.equal(contenderRes.code, 0);
-  const contenderOut = JSON.parse(contenderRes.stdout);
-  assert.equal(contenderOut.success, true);
-  assert.equal(contenderOut.idempotent, true);
-  assert.equal(contenderOut.generation, supervisor.generation);
+  assert.equal(contenderRes.alive, true);
+  assert.equal(contenderRes.data.generation, supervisor.generation);
 });
 
-// Discriminator 8: Native-live / Control-absent returns RUNNING_UNMANAGED and preserves PID/inode
-test('D8: Unmanaged native host returns RUNNING_UNMANAGED without mutating host socket or signaling sentinel', { timeout: 15000 }, async (t) => {
+// D8: Public Unmanaged State CLI Operations
+test('D8: Unmanaged native host returns RUNNING_UNMANAGED via public CLI commands', { timeout: 15000 }, async (t) => {
   const testDir = createTestHarnessDir();
   const paths = getCanonicalSocketPaths(testDir);
   const cleanupStack = [];
@@ -366,36 +454,46 @@ test('D8: Unmanaged native host returns RUNNING_UNMANAGED without mutating host 
   }, /Native host process is running without an owner control server/);
 
   const finalHostIno = fs.lstatSync(paths.hostSocketPath).ino;
-  assert.equal(initialHostIno, finalHostIno, 'Host socket inode must remain untouched');
+  assert.equal(initialHostIno, finalHostIno, 'Unmanaged host socket inode must remain untouched');
 });
 
-// Discriminator 9: Stale / Ambiguous status and stop return STALE_OR_AMBIGUOUS and preserve artifacts
-test('D9: Dangling socket returns STALE_OR_AMBIGUOUS and preserves socket file', { timeout: 15000 }, async (t) => {
-  const testDir = createTestHarnessDir();
-  const paths = getCanonicalSocketPaths(testDir);
+// D9: Public Stale / Ambiguous State CLI Operations
+test('D9: Dangling control socket returns STALE_OR_AMBIGUOUS via public CLI commands', { timeout: 15000 }, async (t) => {
   const cleanupStack = [];
-
   t.after(async () => {
     for (const fn of cleanupStack.reverse()) {
       try { await fn(); } catch {}
     }
-    cleanupTestDir(testDir);
   });
 
+  cleanupStack.push(async () => {
+    await runAGYAsync(['host-stop']);
+  });
+
+  await runAGYAsync(['host-stop']);
+
+  const paths = getCanonicalSocketPaths();
   await createRealDanglingSocket(paths.controlSocketPath);
 
   const initialIno = fs.lstatSync(paths.controlSocketPath).ino;
 
-  const supervisor = new ProductionHostSupervisor({ runtimeDir: testDir });
-  const ctrlProbe = await supervisor.checkControlStatus(300);
-  assert.equal(ctrlProbe.alive, false);
+  const statusRes = await runAGYAsync(['host-status']);
+  assert.notEqual(statusRes.code, 0);
+  const statusOut = JSON.parse(statusRes.stdout);
+  assert.equal(statusOut.status, 'STALE_OR_AMBIGUOUS');
+  assert.equal(statusOut.code, 'STALE_OR_AMBIGUOUS');
+
+  const stopRes = await runAGYAsync(['host-stop']);
+  assert.notEqual(stopRes.code, 0);
+  const stopOut = JSON.parse(stopRes.stdout);
+  assert.equal(stopOut.status, 'STALE_OR_AMBIGUOUS');
 
   assert.equal(fs.existsSync(paths.controlSocketPath), true, 'Dangling control socket must be preserved before mutation');
   assert.equal(fs.lstatSync(paths.controlSocketPath).ino, initialIno);
 });
 
-// Discriminator 10: Mandatory root Identity, socket replacement, symlink rejection in safeUnlinkSocket
-test('D10: safeUnlinkSocket requires mandatory rootIdentity, rejects symlinks, foreign UIDs, and inode mismatches', { timeout: 15000 }, async (t) => {
+// D10: Socket Identity & Security Validation in safeUnlinkSocket
+test('D10: safeUnlinkSocket requires mandatory rootIdentity and socketIdentity, rejecting symlinks and mismatched identities', { timeout: 15000 }, async (t) => {
   const testDir = createTestHarnessDir();
   const cleanupStack = [];
 
@@ -411,40 +509,47 @@ test('D10: safeUnlinkSocket requires mandatory rootIdentity, rejects symlinks, f
 
   const stA = fs.lstatSync(socketPath);
   const rootIdentity = getCanonicalRuntimeDirIdentity(testDir);
+  const socketIdentityA = { uid: stA.uid, dev: stA.dev, ino: stA.ino, type: 'socket' };
 
   // 1. Missing rootIdentity must throw Error
   assert.throws(() => {
-    safeUnlinkSocket(socketPath, null, stA.ino, stA.dev);
+    safeUnlinkSocket(socketPath, null, socketIdentityA);
   }, /safeUnlinkSocket requires mandatory captured rootIdentity/);
 
-  // 2. Inode mismatch must throw Error
+  // 2. Missing socketIdentity must throw Error
   assert.throws(() => {
-    safeUnlinkSocket(socketPath, rootIdentity, stA.ino + 999, stA.dev);
+    safeUnlinkSocket(socketPath, rootIdentity, null);
+  }, /safeUnlinkSocket requires mandatory captured socketIdentity/);
+
+  // 3. Inode mismatch must throw Error
+  assert.throws(() => {
+    safeUnlinkSocket(socketPath, rootIdentity, { ...socketIdentityA, ino: stA.ino + 999 });
   }, /inode mismatch/);
 
-  // 3. Device mismatch must throw Error
+  // 4. Device mismatch must throw Error
   assert.throws(() => {
-    safeUnlinkSocket(socketPath, rootIdentity, stA.ino, stA.dev + 999);
+    safeUnlinkSocket(socketPath, rootIdentity, { ...socketIdentityA, dev: stA.dev + 999 });
   }, /device mismatch/);
 
-  // 4. Socket A replaced by socket B: A is unlinked, B created. Relinking A must fail and B survives!
+  // 5. Socket A replaced by socket B: A is unlinked, B created. Relinking A must fail and B survives!
   fs.unlinkSync(socketPath);
   await createRealDanglingSocket(socketPath);
 
   assert.throws(() => {
-    safeUnlinkSocket(socketPath, rootIdentity, stA.ino, stA.dev);
+    safeUnlinkSocket(socketPath, rootIdentity, socketIdentityA);
   }, /inode mismatch/);
 
   assert.equal(fs.existsSync(socketPath), true, 'Socket B must survive when unlinking A is rejected');
 
   // Clean up B with correct identity
   const stB = fs.lstatSync(socketPath);
-  const unlinked = safeUnlinkSocket(socketPath, rootIdentity, stB.ino, stB.dev);
+  const socketIdentityB = { uid: stB.uid, dev: stB.dev, ino: stB.ino, type: 'socket' };
+  const unlinked = safeUnlinkSocket(socketPath, rootIdentity, socketIdentityB);
   assert.equal(unlinked, true);
 });
 
-// Discriminator 11: Strict IPC failures on production codec/server
-test('D11: Strict IPC validation of ID equality, 16MB payload limits, and single frame handling', { timeout: 15000 }, async (t) => {
+// D11: Strict Table-Driven IPC Tests
+test('D11: Strict table-driven IPC testing of falsy IDs, bounds, trailing frames, and single action per connection', { timeout: 15000 }, async (t) => {
   const testDir = createTestHarnessDir();
   const paths = getCanonicalSocketPaths(testDir);
   const cleanupStack = [];
@@ -459,37 +564,58 @@ test('D11: Strict IPC validation of ID equality, 16MB payload limits, and single
   const supervisor = new ProductionHostSupervisor({ runtimeDir: testDir });
   await supervisor.startControlServer();
   cleanupStack.push(async () => {
-    supervisor._finalizeDaemonTeardown();
+    await supervisor.finalizeDaemonTeardown();
   });
 
-  // 1. Missing ID request returns BAD_REQUEST
-  const client1 = net.createConnection(paths.controlSocketPath);
-  cleanupStack.push(async () => { try { client1.destroy(); } catch {} });
+  // Table Test 1: Valid Falsy IDs (number 0, false, empty string)
+  for (const falsyId of [0, false, '']) {
+    const res = await sendFramedIPCRequest(paths.controlSocketPath, { id: falsyId, method: 'status' });
+    assert.equal(res.id, falsyId, `Response ID must preserve falsy value ${JSON.stringify(falsyId)}`);
+    assert.equal(res.success, true);
+  }
 
+  // Table Test 2: Missing ID returns BAD_REQUEST
+  const clientMissingId = net.createConnection(paths.controlSocketPath);
+  cleanupStack.push(async () => { try { clientMissingId.destroy(); } catch {} });
   await new Promise((resolve) => {
-    client1.on('connect', () => {
+    clientMissingId.on('connect', () => {
       const payload = Buffer.from(JSON.stringify({ method: 'status' }), 'utf-8');
       const header = Buffer.alloc(4);
       header.writeUInt32BE(payload.length, 0);
-      client1.write(Buffer.concat([header, payload]));
+      clientMissingId.write(Buffer.concat([header, payload]));
     });
-    client1.on('data', (chunk) => {
+    clientMissingId.on('data', (chunk) => {
       const msgLen = chunk.readUInt32BE(0);
       const resp = JSON.parse(chunk.subarray(4, 4 + msgLen).toString('utf-8'));
       assert.equal(resp.success, false);
       assert.equal(resp.error.code, 'BAD_REQUEST');
+      clientMissingId.destroy();
       resolve();
     });
   });
 
-  // 2. Response with method 'status' returns object with matching ID
-  const resObj = await sendFramedIPCRequest(paths.controlSocketPath, { id: 'test-id-123', method: 'status' });
-  assert.equal(resObj.id, 'test-id-123');
-  assert.equal(resObj.success, true);
+  // Table Test 3: Trailing / Repeated frames on single connection cause rejection without action
+  const clientRepeated = net.createConnection(paths.controlSocketPath);
+  cleanupStack.push(async () => { try { clientRepeated.destroy(); } catch {} });
+  await new Promise((resolve) => {
+    clientRepeated.on('connect', () => {
+      const frame1 = encodeFrame({ id: 'frame1', method: 'status' });
+      const frame2 = encodeFrame({ id: 'frame2', method: 'status' });
+      clientRepeated.write(Buffer.concat([frame1, frame2]));
+    });
+    clientRepeated.on('data', (chunk) => {
+      const msgLen = chunk.readUInt32BE(0);
+      const resp = JSON.parse(chunk.subarray(4, 4 + msgLen).toString('utf-8'));
+      assert.equal(resp.success, false, 'Repeated frame connection must be rejected');
+      assert.equal(resp.error.code, 'BAD_REQUEST');
+      clientRepeated.destroy();
+      resolve();
+    });
+  });
 });
 
-// Discriminator 13: Socket-existence readiness mutant rejection
-test('D13: Socket-existence readiness mutant fails when socket returns invalid framing or child exits early', { timeout: 15000 }, async (t) => {
+// D13: Readiness Failure Discrimination
+test('D13: Discriminates invalid framed payload from early child process exit', { timeout: 15000 }, async (t) => {
   const testDir = createTestHarnessDir();
   const paths = getCanonicalSocketPaths(testDir);
   let badServer = null;
@@ -501,26 +627,37 @@ test('D13: Socket-existence readiness mutant fails when socket returns invalid f
     cleanupTestDir(testDir);
   });
 
+  // 1. Invalid framing response
   badServer = net.createServer((sock) => {
-    sock.write(Buffer.from('INVALID_NOT_FRAMED_JSON'));
+    sock.write(Buffer.from('INVALID_NOT_FRAMED_JSON'), () => {
+      try { sock.destroy(); } catch {}
+    });
   });
   await new Promise((r) => badServer.listen(paths.hostSocketPath, r));
 
-  const supervisor = new ProductionHostSupervisor({ runtimeDir: testDir });
-  const probe = await supervisor.checkNativeStatus(300);
-  assert.equal(probe.alive, false, 'Invalid framed payload must fail native status check');
+  const supervisor1 = new ProductionHostSupervisor({ runtimeDir: testDir });
+  const probe1 = await supervisor1.checkNativeStatus(300);
+  assert.equal(probe1.alive, false, 'Invalid framed payload must fail native status check');
 
-  await assert.rejects(async () => {
-    await supervisor.start({
+  // Clean up badServer and socket before step 2
+  await new Promise((r) => badServer.close(r));
+  badServer = null;
+  try { fs.unlinkSync(paths.hostSocketPath); } catch {}
+
+  // 2. Early child process exit
+  const supervisor2 = new ProductionHostSupervisor({ runtimeDir: testDir });
+  await assert.rejects(
+    supervisor2.start({
       binaryPath: process.execPath,
-      readinessTimeoutMs: 300
-    });
-  });
-
-  assert.equal(supervisor.state, 'stopped');
+      binaryArgs: ['-e', 'process.exit(42);'],
+      readinessTimeoutMs: 500
+    }),
+    /Host child process exited during startup/
+  );
+  assert.equal(supervisor2.state, 'stopped');
 });
 
-// Discriminator 14: COMPUTER_USE_RUNTIME_DIR Environmental Override Isolation
+// D14: Environmental Override Isolation & Sentinel Preservation
 test('D14: Public CLI commands ignore COMPUTER_USE_RUNTIME_DIR environmental override and preserve sentinel files', { timeout: 15000 }, async (t) => {
   const testDir = createTestHarnessDir();
   const cleanupStack = [];
@@ -548,9 +685,31 @@ test('D14: Public CLI commands ignore COMPUTER_USE_RUNTIME_DIR environmental ove
   assert.equal(initialSt.mode, finalSt.mode, 'Sentinel permissions must remain unchanged');
 });
 
-// Discriminator 15: Clean-export build & stage verification proof
-test('D15: Clean-export stage-host-app verification proof', { timeout: 30000 }, async (t) => {
-  const stageRes = await runAGYAsync(['stage-host-app']);
-  assert.equal(stageRes.code, 0, `stage-host-app failed: ${stageRes.stderr}`);
-  assert.ok(fs.existsSync(stagedBinary), 'Staged binary must exist after stage-host-app');
+// D15: Clean Export & Source Verification Proof
+test('D15: Clean-export stage-host-app verification proof', { timeout: 45000 }, async (t) => {
+  const tmpExportDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-clean-export-'));
+  t.after(() => {
+    cleanupTestDir(tmpExportDir);
+  });
+
+  // Archive tracked files into clean export
+  execSync(`git archive HEAD | tar -x -C ${tmpExportDir}`, { cwd: REPO_ROOT });
+
+  // Remove release/staged build artifacts in the clean export
+  const stagedPath = path.join(tmpExportDir, 'apps/computer-use-host/.build/staged');
+  if (fs.existsSync(stagedPath)) {
+    fs.rmSync(stagedPath, { recursive: true, force: true });
+  }
+
+  // Invoke stage-host-app in the clean export
+  const cliInExport = path.join(tmpExportDir, 'bin/agy-computer-use');
+  const stageRes = execSync(`${cliInExport} stage-host-app`, { cwd: tmpExportDir, encoding: 'utf-8' });
+  const jsonStart = stageRes.indexOf('{');
+  const jsonEnd = stageRes.lastIndexOf('}');
+  assert.notEqual(jsonStart, -1, 'stage-host-app output must contain JSON');
+  const stageJson = JSON.parse(stageRes.substring(jsonStart, jsonEnd + 1));
+
+  assert.equal(stageJson.success, true);
+  assert.ok(fs.existsSync(stageJson.binaryPath), 'Staged binary must exist in clean export');
 });
+

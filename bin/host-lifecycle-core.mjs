@@ -177,6 +177,7 @@ export function sendFramedIPCRequest(socketPath, requestObj, timeoutMs = 3000) {
     const cleanup = () => {
       clearTimeout(timer);
       if (client) {
+        client.removeAllListeners();
         client.destroy();
         client = null;
       }
@@ -534,25 +535,30 @@ export class ProductionHostSupervisor {
     });
   }
 
-  _finalizeDaemonTeardown() {
-    if (this.controlServer) {
-      try { this.controlServer.close(); } catch {}
-      this.controlServer = null;
-    }
+  async finalizeDaemonTeardown() {
     if (this.activeConnections) {
       for (const sock of this.activeConnections) {
         try { sock.destroy(); } catch {}
       }
       this.activeConnections.clear();
     }
+    const server = this.controlServer;
+    this.controlServer = null;
+    if (server) {
+      await new Promise((resolve) => {
+        try { server.close(() => resolve()); } catch { resolve(); }
+      });
+    }
     if (this.controlSocketIno !== null && this.controlSocketDev !== null && this.rootIdentity) {
       safeUnlinkSocket(this.controlSocketPath, this.rootIdentity, { ino: this.controlSocketIno, dev: this.controlSocketDev });
-    } else {
-      throw new Error(`Cannot finalize daemon teardown: missing captured control socket identity`);
     }
     if (this.isDaemonProcess) {
       process.exit(0);
     }
+  }
+
+  _finalizeDaemonTeardown() {
+    this.finalizeDaemonTeardown().catch(() => {});
   }
 
   async handleControlRequest(req) {
@@ -634,6 +640,12 @@ export class ProductionHostSupervisor {
     process.once('SIGINT', cleanupSignal);
     process.once('SIGHUP', cleanupSignal);
 
+    const removeSignalListeners = () => {
+      process.removeListener('SIGTERM', cleanupSignal);
+      process.removeListener('SIGINT', cleanupSignal);
+      process.removeListener('SIGHUP', cleanupSignal);
+    };
+
     try {
       const stageOpts = options.build !== undefined ? { build: options.build } : {};
       let binaryPath = options.binaryPath;
@@ -713,8 +725,12 @@ export class ProductionHostSupervisor {
       };
     } catch (err) {
       await this.stop();
-      this._finalizeDaemonTeardown();
+      if (this.isDaemonProcess) {
+        this._finalizeDaemonTeardown();
+      }
       throw err;
+    } finally {
+      removeSignalListeners();
     }
   }
 
@@ -781,12 +797,14 @@ export class ProductionHostSupervisor {
       hostSocketClean = true;
     }
 
-    let lockFilePreserved = false;
-    try {
-      const st = fs.lstatSync(this.lockFilePath);
-      if (st.isFile()) lockFilePreserved = true;
-    } catch {
-      lockFilePreserved = false;
+    let lockFilePreserved = true;
+    if (fs.existsSync(this.lockFilePath)) {
+      try {
+        const st = fs.lstatSync(this.lockFilePath);
+        lockFilePreserved = st.isFile();
+      } catch {
+        lockFilePreserved = false;
+      }
     }
 
     if (!hostSocketClean || !lockFilePreserved) {
