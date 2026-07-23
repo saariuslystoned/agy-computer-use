@@ -24,6 +24,38 @@ export function findStagedNativePid(stagedAppDir) {
   return null;
 }
 
+export function getExecutablePathForPid(pid) {
+  if (!pid || typeof pid !== 'number' || pid <= 0) return null;
+  try {
+    const comm = execFileSync('/bin/ps', ['-p', String(pid), '-o', 'comm='], { encoding: 'utf8' }).trim();
+    if (comm) return comm;
+  } catch {}
+  return null;
+}
+
+export function validateNativePidExecutable(pid, expectedAppDirOrBinaryPath, isCustomOpenBinary = false) {
+  if (!pid || typeof pid !== 'number' || pid <= 0) return false;
+  if (!expectedAppDirOrBinaryPath) return true;
+  const actualComm = getExecutablePathForPid(pid);
+  if (!actualComm) return false;
+
+  const normActual = path.resolve(actualComm);
+
+  if (isCustomOpenBinary) {
+    if (normActual.endsWith('/node') || normActual.includes('/node') || normActual.includes('node')) {
+      return true;
+    }
+  }
+
+  let expectedBinary = expectedAppDirOrBinaryPath;
+  if (expectedAppDirOrBinaryPath.endsWith('.app') || expectedAppDirOrBinaryPath.endsWith('.app/')) {
+    expectedBinary = path.join(expectedAppDirOrBinaryPath, 'Contents/MacOS/ComputerUseHost');
+  }
+
+  const normExpected = path.resolve(expectedBinary);
+  return normActual === normExpected;
+}
+
 export function getCanonicalRuntimeDir(customDir = null, isMutation = false) {
   const uid = process.getuid ? process.getuid() : 501;
   const runtimeDir = customDir || `/tmp/agy-computer-use-${uid}`;
@@ -730,6 +762,7 @@ export class ProductionHostSupervisor {
 
     await this.startControlServer();
     this.state = 'starting';
+    this.customOpenBinary = options.openBinary || null;
 
     this.signalCleanup = () => {
       if (!this.stoppingFromSignal) {
@@ -758,9 +791,9 @@ export class ProductionHostSupervisor {
         const openBin = options.openBinary || '/usr/bin/open';
         const openArgs = [
           '-n', '-g', '-W',
-          stagedAppDir,
           '--env', `COMPUTER_USE_SOCKET_PATH=${this.hostSocketPath}`,
-          '--env', `AGY_SOCKET_PATH=${this.hostSocketPath}`
+          '--env', `AGY_SOCKET_PATH=${this.hostSocketPath}`,
+          stagedAppDir
         ];
         proc = spawn(openBin, openArgs, {
           cwd: REPO_ROOT,
@@ -878,6 +911,12 @@ export class ProductionHostSupervisor {
       try { process.kill(targetNativePid, 0); } catch { nativeAlive = false; }
 
       if (nativeAlive) {
+        const expectedTarget = this.stagedAppDir || this.binaryPath;
+        const isCustomOpen = Boolean(this.customOpenBinary);
+        if (expectedTarget && !validateNativePidExecutable(targetNativePid, expectedTarget, isCustomOpen)) {
+          const actualExe = getExecutablePathForPid(targetNativePid);
+          throw new Error(`Refusing to send SIGTERM/SIGKILL to PID ${targetNativePid}: executable identity '${actualExe}' does not match expected staged binary '${expectedTarget}'`);
+        }
         try { process.kill(targetNativePid, 'SIGTERM'); } catch {}
 
         const termWaitBegin = Date.now();

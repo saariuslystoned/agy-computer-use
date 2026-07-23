@@ -898,13 +898,57 @@ test('M9-LAUNCHSERVICES: Staged app launch uses LaunchServices open with exact f
 
   const validAppDir = path.join(REPO_ROOT, 'apps/computer-use-host/.build/staged/ComputerUseHost.app');
   const openLogFile = path.join(testDir, 'open-args.json');
+  const launcherPidFile = path.join(testDir, 'launcher-pid.json');
+  const mockNativeBin = path.join(testDir, 'mock-native-host.js');
   const mockOpenBin = path.join(testDir, 'mock-open.js');
-  const scriptContent = `#!/usr/bin/env node
+
+  const nativeScriptContent = `#!/usr/bin/env node
 import fs from 'node:fs';
 import net from 'node:net';
 
+const socketPath = process.argv[2];
+const server = net.createServer((socket) => {
+  let rxBuf = Buffer.alloc(0);
+  socket.on('data', (chunk) => {
+    rxBuf = Buffer.concat([rxBuf, chunk]);
+    if (rxBuf.length >= 4) {
+      const len = rxBuf.readUInt32BE(0);
+      if (rxBuf.length >= 4 + len) {
+        const req = JSON.parse(rxBuf.subarray(4, 4 + len).toString());
+        const resp = {
+          id: req.id,
+          success: true,
+          data: {
+            connected: true,
+            pid: process.pid,
+            tcc_permission_state: 'granted',
+            accessibility_available: true,
+            accessibility_trusted: true,
+            input_mutation_state: 'enabled'
+          }
+        };
+        const payload = Buffer.from(JSON.stringify(resp));
+        const head = Buffer.alloc(4);
+        head.writeUInt32BE(payload.length, 0);
+        socket.write(Buffer.concat([head, payload]));
+      }
+    }
+  });
+});
+server.listen(socketPath);
+process.on('SIGTERM', () => { server.close(); process.exit(0); });
+process.on('SIGINT', () => { server.close(); process.exit(0); });
+setTimeout(() => {}, 20000);
+`;
+  fs.writeFileSync(mockNativeBin, nativeScriptContent, { mode: 0o755 });
+
+  const openScriptContent = `#!/usr/bin/env node
+import fs from 'node:fs';
+import { spawn } from 'node:child_process';
+
 const args = process.argv.slice(2);
 fs.writeFileSync(${JSON.stringify(openLogFile)}, JSON.stringify(args));
+fs.writeFileSync(${JSON.stringify(launcherPidFile)}, String(process.pid));
 
 let socketPath = null;
 for (let i = 0; i < args.length; i++) {
@@ -914,41 +958,15 @@ for (let i = 0; i < args.length; i++) {
 }
 
 if (socketPath) {
-  const server = net.createServer((socket) => {
-    let rxBuf = Buffer.alloc(0);
-    socket.on('data', (chunk) => {
-      rxBuf = Buffer.concat([rxBuf, chunk]);
-      if (rxBuf.length >= 4) {
-        const len = rxBuf.readUInt32BE(0);
-        if (rxBuf.length >= 4 + len) {
-          const req = JSON.parse(rxBuf.subarray(4, 4 + len).toString());
-          const resp = {
-            id: req.id,
-            success: true,
-            data: {
-              connected: true,
-              pid: process.pid,
-              tcc_permission_state: 'granted',
-              accessibility_available: true,
-              accessibility_trusted: true,
-              input_mutation_state: 'enabled'
-            }
-          };
-          const payload = Buffer.from(JSON.stringify(resp));
-          const head = Buffer.alloc(4);
-          head.writeUInt32BE(payload.length, 0);
-          socket.write(Buffer.concat([head, payload]));
-        }
-      }
-    });
+  const child = spawn(process.execPath, [${JSON.stringify(mockNativeBin)}, socketPath], {
+    detached: true,
+    stdio: 'ignore'
   });
-  server.listen(socketPath);
-  process.on('SIGTERM', () => { server.close(); process.exit(0); });
-  process.on('SIGINT', () => { server.close(); process.exit(0); });
-  setTimeout(() => {}, 10000);
+  child.unref();
 }
+process.exit(0);
 `;
-  fs.writeFileSync(mockOpenBin, scriptContent, { mode: 0o755 });
+  fs.writeFileSync(mockOpenBin, openScriptContent, { mode: 0o755 });
 
   const supervisor = new ProductionHostSupervisor({
     runtimeDir: testDir,
@@ -962,12 +980,21 @@ if (socketPath) {
   assert.equal(startRes.status, 'running');
   assert.ok(typeof startRes.nativePid === 'number' && startRes.nativePid > 0, 'start result must include positive nativePid');
 
+  const launcherPid = parseInt(fs.readFileSync(launcherPidFile, 'utf8'), 10);
+  assert.notEqual(startRes.nativePid, launcherPid, 'Public nativePid MUST be distinct from launcher PID');
+
+  const statusRes = await supervisor.handleControlRequest({ id: 'test-status', method: 'status' });
+  assert.equal(statusRes.data.nativePid, startRes.nativePid, 'Public status endpoint must report exact nativePid');
+
   const loggedArgs = JSON.parse(fs.readFileSync(openLogFile, 'utf8'));
-  assert.equal(loggedArgs[0], '-n', 'Must use LaunchServices -n flag');
-  assert.equal(loggedArgs[1], '-g', 'Must use LaunchServices -g flag');
-  assert.equal(loggedArgs[2], '-W', 'Must use LaunchServices -W flag');
-  assert.equal(loggedArgs[3], validAppDir, 'Must target staged app bundle');
-  assert.ok(loggedArgs.includes('--env'), 'Must pass --env flags');
+  assert.equal(loggedArgs[0], '-n', 'Flag 1 must be -n');
+  assert.equal(loggedArgs[1], '-g', 'Flag 2 must be -g');
+  assert.equal(loggedArgs[2], '-W', 'Flag 3 must be -W');
+  assert.equal(loggedArgs[3], '--env', 'Flag 4 must be --env');
+  assert.ok(loggedArgs[4].startsWith('COMPUTER_USE_SOCKET_PATH='), 'Flag 5 must be COMPUTER_USE_SOCKET_PATH');
+  assert.equal(loggedArgs[5], '--env', 'Flag 6 must be --env');
+  assert.ok(loggedArgs[6].startsWith('AGY_SOCKET_PATH='), 'Flag 7 must be AGY_SOCKET_PATH');
+  assert.equal(loggedArgs[7], validAppDir, 'Flag 8 (last arg) must be app path');
 
   const stopRes = await supervisor.stop();
   assert.equal(stopRes.status, 'stopped');
