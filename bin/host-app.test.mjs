@@ -949,7 +949,7 @@ test('ARP2-F2: Zero public fixed-production seam module-namespace assertion and 
         }
         const options = { build: false };
         await mod.stageHostApp(options);
-        console.log(JSON.stringify({ staged: true, callerCallbackCount: 0 }));
+        console.log(JSON.stringify({ staged: true }));
         process.exit(0);
     `;
     const tmpScript = path.join(os.tmpdir(), `agy-seam-probe-${Date.now()}.mjs`);
@@ -958,23 +958,54 @@ test('ARP2-F2: Zero public fixed-production seam module-namespace assertion and 
         const stdout = execFileSync(process.execPath, [tmpScript], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] });
         const res = JSON.parse(stdout.trim());
         assert.equal(res.staged, true, 'Importer probe stageHostApp must resolve cleanly');
-        assert.equal(res.callerCallbackCount, 0, 'Importer probe callerCallbackCount must be 0');
     } finally {
         fs.rmSync(tmpScript, { force: true });
     }
 
-    let callbackCount = 0;
-    await assert.rejects(
-        async () => await hostAppModule.stageHostApp({ build: false, _testValidationHook: () => { callbackCount++; } }),
-        /forbidden in stageHostApp/
-    );
-    assert.equal(callbackCount, 0, '_testValidationHook rejection must execute zero callbacks');
+    function runObsoleteHookChildProbe(hookKey) {
+        const hookProbeCode = `
+            import * as mod from ${JSON.stringify(hostAppAbsPath)};
+            let callbackCount = 0;
+            const harness = new mod.TestStagingHarness();
+            const removalsBefore = harness.removalSpyCount;
 
-    await assert.rejects(
-        async () => await hostAppModule.stageHostApp({ build: false, _setTestValidationHook: () => { callbackCount++; } }),
-        /forbidden in stageHostApp/
-    );
-    assert.equal(callbackCount, 0, '_setTestValidationHook rejection must execute zero callbacks');
+            let rejected = false;
+            try {
+                await mod.stageHostApp({
+                    harness,
+                    build: false,
+                    [${JSON.stringify(hookKey)}]: () => { callbackCount++; }
+                });
+            } catch {
+                rejected = true;
+            }
+
+            const removalsAfter = harness.removalSpyCount;
+            harness.cleanup();
+
+            console.log(JSON.stringify({
+                rejected,
+                callbackCount,
+                removalsBefore,
+                removalsAfter
+            }));
+            process.exit(0);
+        `;
+        const childScript = path.join(os.tmpdir(), `agy-hook-child-${hookKey}-${Date.now()}.mjs`);
+        fs.writeFileSync(childScript, hookProbeCode);
+        try {
+            const stdout = execFileSync(process.execPath, [childScript], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] });
+            const res = JSON.parse(stdout.trim());
+            assert.equal(res.rejected, true, `Obsolete hook ${hookKey} child probe must reject`);
+            assert.equal(res.callbackCount, 0, `Obsolete hook ${hookKey} callback count must be 0`);
+            assert.equal(res.removalsAfter, res.removalsBefore, `Obsolete hook ${hookKey} must not execute removal`);
+        } finally {
+            fs.rmSync(childScript, { force: true });
+        }
+    }
+
+    runObsoleteHookChildProbe('_testValidationHook');
+    runObsoleteHookChildProbe('_setTestValidationHook');
 });
 
 test('ARP2-S3: Nonvacuous snapshotTree oracle direct test', async () => {
@@ -1418,6 +1449,27 @@ test('A-L3: Bounded supervisor unit tests for spawn error, early exit, timeout, 
     });
 });
 
+async function assertBoundaryRejection(label, makeOptions) {
+    const harness = new TestStagingHarness();
+    const productionStage = path.resolve('apps/computer-use-host/.build/staged');
+    const productionBefore = snapshotTree(productionStage);
+    const harnessBefore = snapshotTree(harness.rootDir);
+    const removalsBefore = harness.removalSpyCount;
+
+    let rejected = false;
+    try {
+        await stageHostApp(makeOptions(harness));
+    } catch {
+        rejected = true;
+    }
+
+    assert.equal(rejected, true, `${label}: malformed options must reject`);
+    assert.equal(harness.removalSpyCount, removalsBefore, `${label}: rejection must happen before harness removal`);
+    assert.deepStrictEqual(snapshotTree(harness.rootDir), harnessBefore, `${label}: rejection must not mutate harness root`);
+    assert.deepStrictEqual(snapshotTree(productionStage), productionBefore, `${label}: rejection must not mutate production staging`);
+    harness.cleanup();
+}
+
 test('ARP3-G1: Strict stageHostApp public option grammar and obsolete-hook rejection', async (t) => {
     await t.test('1. Valid stageHostApp call variants resolve cleanly', async () => {
         const harness = new TestStagingHarness();
@@ -1432,58 +1484,82 @@ test('ARP3-G1: Strict stageHostApp public option grammar and obsolete-hook rejec
         }
     });
 
-    await t.test('2. Option type and prototype rejections', async () => {
-        const harness = new TestStagingHarness();
-        try {
-            const invalidOptions = [
-                null,
-                123,
-                'invalid',
-                true,
-                Symbol('opt'),
-                () => {},
-                [],
-                Object.assign(Object.create(null), { harness, build: false }),
-                Object.assign(Object.create({ build: false }), { harness }),
-                Object.assign(Object.create({ relativeTarget: 'inherited.app' }), { harness, build: false })
-            ];
-            for (const opt of invalidOptions) {
-                await assert.rejects(
-                    async () => await stageHostApp(opt),
-                    /Option/
-                );
-            }
-        } finally {
-            harness.cleanup();
+    await t.test('2. Option type and prototype rejections with side-effect oracle', async () => {
+        const invalidOptionsFns = [
+            ['null options', () => null],
+            ['numeric options', () => 123],
+            ['string options', () => 'invalid'],
+            ['boolean options', () => true],
+            ['symbol options', () => Symbol('opt')],
+            ['function options', (h) => Object.assign(function options() {}, { harness: h, build: false })],
+            ['array options', (h) => Object.assign([], { harness: h, build: false })],
+            ['null prototype', (h) => Object.assign(Object.create(null), { harness: h, build: false })],
+            ['custom prototype with inherited unknown/build', (h) => Object.assign(Object.create({ build: false }), { harness: h })],
+            ['custom prototype with inherited relativeTarget', (h) => Object.assign(Object.create({ relativeTarget: 'inherited.app' }), { harness: h, build: false })]
+        ];
+        for (const [label, makeOpt] of invalidOptionsFns) {
+            await assertBoundaryRejection(label, makeOpt);
         }
     });
 
-    await t.test('3. Symbol, non-enumerable, and unknown key rejections', async () => {
-        const harness = new TestStagingHarness();
-        try {
-            const symOpt = { harness, build: false, [Symbol('key')]: true };
-            await assert.rejects(async () => await stageHostApp(symOpt), /symbol/i);
-
-            const nonEnumOpt = { harness, build: false };
-            Object.defineProperty(nonEnumOpt, 'nonEnumKey', { value: 1, enumerable: false });
-            await assert.rejects(async () => await stageHostApp(nonEnumOpt), /forbidden/i);
-
-            const unknownOpt = { harness, build: false, execFileAsync: () => {} };
-            await assert.rejects(async () => await stageHostApp(unknownOpt), /forbidden/i);
-        } finally {
-            harness.cleanup();
-        }
+    await t.test('3. Symbol, non-enumerable, and unknown key rejections with side-effect oracle', async () => {
+        await assertBoundaryRejection('own Symbol key', (h) => ({ harness: h, build: false, [Symbol('key')]: true }));
+        await assertBoundaryRejection('non-enumerable own unknown key', (h) => {
+            const opt = { harness: h, build: false };
+            Object.defineProperty(opt, 'nonEnumKey', { value: 1, enumerable: false });
+            return opt;
+        });
+        await assertBoundaryRejection('unknown own key', (h) => ({ harness: h, build: false, execFileAsync: () => {} }));
     });
 
-    await t.test('4. Field type validation for build, harness, relativeTarget', async () => {
-        const harness = new TestStagingHarness();
+    await t.test('4. Field type validation for build, harness, relativeTarget with side-effect oracle', async () => {
+        await assertBoundaryRejection('invalid build string', (h) => ({ harness: h, build: 'false' }));
+        await assertBoundaryRejection('invalid harness object', () => ({ harness: {} }));
+        await assertBoundaryRejection('relativeTarget without harness', () => ({ relativeTarget: 'foo.app' }));
+        await assertBoundaryRejection('invalid relativeTarget type', (h) => ({ harness: h, relativeTarget: 123 }));
+    });
+
+    await t.test('5. Bounded Object.prototype pollution and ownership poisoning discriminators', async () => {
         try {
-            await assert.rejects(async () => await stageHostApp({ harness, build: 'false' }), /boolean/i);
-            await assert.rejects(async () => await stageHostApp({ harness: {} }), /instance of TestStagingHarness/i);
-            await assert.rejects(async () => await stageHostApp({ relativeTarget: 'foo.app' }), /without a test harness/i);
-            await assert.rejects(async () => await stageHostApp({ harness, relativeTarget: 123 }), /must be a string/i);
+            Object.prototype.enumerableUnknownInheritedKey = 'poison';
+            await assertBoundaryRejection('enumerable inherited unknown', (h) => ({ harness: h, build: false }));
         } finally {
-            harness.cleanup();
+            delete Object.prototype.enumerableUnknownInheritedKey;
+        }
+
+        try {
+            Object.defineProperty(Object.prototype, 'build', { value: false, writable: true, configurable: true, enumerable: false });
+            await assertBoundaryRejection('non-enumerable inherited build', (h) => ({ harness: h }));
+        } finally {
+            delete Object.prototype.build;
+        }
+
+        try {
+            Object.defineProperty(Object.prototype, 'relativeTarget', { value: 'INHERITED.app', writable: true, configurable: true, enumerable: false });
+            await assertBoundaryRejection('non-enumerable inherited relativeTarget', (h) => ({ harness: h, build: false }));
+        } finally {
+            delete Object.prototype.relativeTarget;
+        }
+
+        const symKey = Symbol('inheritedSymbolKey');
+        try {
+            Object.prototype[symKey] = 'poison';
+            await assertBoundaryRejection('inherited Symbol key', (h) => ({ harness: h, build: false }));
+        } finally {
+            delete Object.prototype[symKey];
+        }
+
+        const origHasOwnProperty = Object.prototype.hasOwnProperty;
+        try {
+            Object.defineProperty(Object.prototype, 'build', { value: false, writable: true, configurable: true, enumerable: false });
+            Object.defineProperty(Object.prototype, 'relativeTarget', { value: 'INHERITED.app', writable: true, configurable: true, enumerable: false });
+            Object.prototype.hasOwnProperty = function () { return true; };
+
+            await assertBoundaryRejection('poisoned hasOwnProperty with inherited build/relativeTarget', (h) => ({ harness: h }));
+        } finally {
+            Object.prototype.hasOwnProperty = origHasOwnProperty;
+            delete Object.prototype.build;
+            delete Object.prototype.relativeTarget;
         }
     });
 });

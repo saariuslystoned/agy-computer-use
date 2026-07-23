@@ -172,6 +172,8 @@ const STANDARD_OBJECT_PROTOS = new Set([
     '__proto__'
 ]);
 
+const safeHasOwn = Object.hasOwn;
+
 function validateStageOptions(options) {
     if (options === undefined) {
         return { hasBuild: false, build: true, hasHarness: false, harness: undefined, hasRelativeTarget: false, relativeTarget: undefined };
@@ -194,32 +196,32 @@ function validateStageOptions(options) {
     }
 
     for (const key in options) {
-        if (!Object.prototype.hasOwnProperty.call(options, key)) {
+        if (!safeHasOwn(options, key)) {
             throw new Error(`Inherited option '${key}' is forbidden`);
         }
     }
 
     for (const key of Reflect.ownKeys(Object.prototype)) {
         if (typeof key === 'symbol') {
-            if (key in options && !Object.prototype.hasOwnProperty.call(options, key)) {
+            if (key in options && !safeHasOwn(options, key)) {
                 throw new Error('Inherited symbol option is forbidden');
             }
         } else if (!STANDARD_OBJECT_PROTOS.has(key)) {
-            if (key in options && !Object.prototype.hasOwnProperty.call(options, key)) {
+            if (key in options && !safeHasOwn(options, key)) {
                 throw new Error(`Inherited option '${key}' is forbidden`);
             }
         }
     }
 
     for (const allowedKey of ['build', 'harness', 'relativeTarget']) {
-        if (allowedKey in options && !Object.prototype.hasOwnProperty.call(options, allowedKey)) {
+        if (allowedKey in options && !safeHasOwn(options, allowedKey)) {
             throw new Error(`Inherited option '${allowedKey}' is forbidden`);
         }
     }
 
-    const hasBuild = Object.prototype.hasOwnProperty.call(options, 'build');
-    const hasHarness = Object.prototype.hasOwnProperty.call(options, 'harness');
-    const hasRelativeTarget = Object.prototype.hasOwnProperty.call(options, 'relativeTarget');
+    const hasBuild = safeHasOwn(options, 'build');
+    const hasHarness = safeHasOwn(options, 'harness');
+    const hasRelativeTarget = safeHasOwn(options, 'relativeTarget');
 
     let build;
     if (hasBuild) {
