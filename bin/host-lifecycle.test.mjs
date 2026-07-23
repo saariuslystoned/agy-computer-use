@@ -890,4 +890,3 @@ test('M9-STABILITY: Missing or invalid staged app fails closed before daemon lau
   assert.equal(fs.existsSync(paths.hostSocketPath), false, 'No host socket residue after invalid app start failure');
   assert.equal(supervisorInvalid.controlServer, null, 'Control server must be null');
 });
-
