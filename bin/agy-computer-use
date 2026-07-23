@@ -20,7 +20,7 @@ function fail(msg) {
 }
 
 const subcommand = process.argv[2] || "doctor";
-const validSubcommands = ["build", "doctor", "production-ready", "canary-ready", "test-native", "stage-host-app", "host-principal"];
+const validSubcommands = ["build", "doctor", "production-ready", "canary-ready", "test-native", "stage-host-app", "host-principal", "host-start", "host-status", "host-stop"];
 
 if (!validSubcommands.includes(subcommand)) {
   console.error(`[FAIL] Unknown subcommand '${subcommand}'. Valid subcommands are: ${validSubcommands.join(", ")}`);
@@ -125,6 +125,20 @@ async function verifyProductionMcpConfiguredStdio() {
 }
 
 async function main() {
+  if (subcommand === "host-start" || subcommand === "host-status" || subcommand === "host-stop") {
+    const lifecycleJs = path.join(rootDir, "bin/host-lifecycle.mjs");
+    const extraArgs = process.argv.slice(3);
+    try {
+      execFileSync(process.execPath, [lifecycleJs, subcommand, ...extraArgs], {
+        cwd: rootDir,
+        stdio: "inherit"
+      });
+      process.exit(0);
+    } catch (err) {
+      process.exit(err.status || 1);
+    }
+  }
+
   if (subcommand === "stage-host-app") {
     log("Staging ComputerUseHost.app background principal bundle...");
     execSync("node bin/host-app.mjs stage", { cwd: rootDir, stdio: "inherit" });

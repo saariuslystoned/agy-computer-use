@@ -72,9 +72,34 @@ The MCP server exposes the following active tools to Gemini 3.6 Flash / Antigrav
 
 ### Running Tests & Readiness Checks
 
+- **Production Host Lifecycle Commands**:
+  - Start Native Host:
+    ```bash
+    ./bin/agy-computer-use host-start
+    ```
+  - Check Host Status (read-only):
+    ```bash
+    ./bin/agy-computer-use host-status
+    ```
+  - Stop Native Host:
+    ```bash
+    ./bin/agy-computer-use host-stop
+    ```
+
+- **Process Authority & Lifecycle Policies**:
+  - **Terminal Owner Correlation**: Host lifecycle commands (`host-start`, `host-status`, `host-stop`) communicate with the supervisor owner process over `control.sock`. `host-stop` RPC awaits exact native child close and socket residue verification before returning terminal receipt (containing generation ID, daemon PID, native PID, and `native_closed: true`).
+  - **Non-Override Runtime Directory Policy**: Public CLI host commands operate strictly on the canonical runtime directory (`/tmp/agy-computer-use-<uid>`), enforcing single-owner Unix domain socket permissions (`0700`) and inode identity validation to prevent socket hijacking or symlink attacks. Custom runtime directory overrides (`COMPUTER_USE_RUNTIME_DIR`) are restricted to isolated test harnesses and rejected or fail-closed in public production CLI operations.
+
+> [!NOTE]
+> This milestone is **observation-only**. Input mutation remains disabled, the principal remains `ad_hoc_ephemeral`, and a denied Screen Recording state is a human TCC gate rather than permission to change TCC. Live screenshot proof is not claimed in this milestone.
+
 - **Authoritative Native Swift Test Authority**:
   ```bash
   ./bin/agy-computer-use test-native
+  ```
+- **Focused Production Host Lifecycle Test Authority**:
+  ```bash
+  node --test bin/host-lifecycle.test.mjs
   ```
 - **TypeScript MCP Server Tests & TypeScript Check**:
   ```bash

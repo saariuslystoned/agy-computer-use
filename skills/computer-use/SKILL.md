@@ -15,9 +15,17 @@ This skill teaches Google Antigravity agents (and Gemini models) how to reliably
 ## Operational Core Principles
 
 ### 1. Status & Observation
+- **Host Lifecycle Management**:
+  - `./bin/agy-computer-use host-start`: Starts the background native host process.
+  - `./bin/agy-computer-use host-status`: Checks if native host is `running`, `stopped`, or `stale`.
+  - `./bin/agy-computer-use host-stop`: Stops the native host process cleanly, awaiting exact native child close and terminal owner receipt (`native_closed: true`).
+  - *Process Authority & Security*: Host lifecycle commands communicate with the owner control server on `control.sock` (terminal owner correlation) and strictly enforce the non-override canonical runtime directory policy (`/tmp/agy-computer-use-<uid>`).
 - **ALWAYS** call `computer_use_status` to verify host connection, TCC permission state (`granted`), and display topology.
 - Call `computer_use_observe` to capture current desktop screen state and receive a valid `capture_id` and `topology_version`.
 - Dynamic topology versions (`topology_version`) are required tokens returned from observation.
+
+> [!NOTE]
+> Observation-only milestone: input mutation remains disabled, host principal is `ad_hoc_ephemeral`, and denied Screen Recording state is a human TCC gate. Live screenshot proof is not claimed in this milestone.
 
 ### 2. Coordinate System (`0...999`)
 - All coordinates in visual layout analysis are normalized to an integer grid from `0` to `999`.

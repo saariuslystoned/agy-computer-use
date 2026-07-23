@@ -169,13 +169,27 @@ export class UnixSocketHostClient implements HostClient {
       };
     }
 
-    if (!fs.existsSync(this.socketPath)) {
+    let st: fs.Stats;
+    try {
+      st = fs.lstatSync(this.socketPath);
+    } catch (err: any) {
       return {
         id: "no-socket",
         success: false,
         error: {
           code: "TARGET_UNREACHABLE",
           message: `Unix domain socket not found at ${this.socketPath}`
+        }
+      };
+    }
+
+    if (st.isSymbolicLink() || !st.isSocket()) {
+      return {
+        id: "invalid-socket",
+        success: false,
+        error: {
+          code: "TARGET_UNREACHABLE",
+          message: `Path at ${this.socketPath} is not a valid Unix domain socket`
         }
       };
     }
@@ -252,6 +266,15 @@ export class UnixSocketHostClient implements HostClient {
           ...(params ? { params } : {})
         };
         const payloadJson = JSON.stringify(payloadObj);
+        if (payloadJson.length > 16 * 1024 * 1024) {
+          clearTimeout(timer);
+          finish({
+            id: reqId,
+            success: false,
+            error: { code: "REQUEST_TOO_LARGE", message: "Request payload exceeds 16MB" }
+          });
+          return;
+        }
         const payloadBuf = Buffer.from(payloadJson, "utf-8");
 
         if (payloadBuf.length > 16 * 1024 * 1024) {
@@ -289,7 +312,9 @@ export class UnixSocketHostClient implements HostClient {
                 error: { code: "IPC_ERROR", message: `Socket write error: ${err.message}` }
               });
             }
+            return;
           }
+          try { client?.end(); } catch {}
         });
       });
 
