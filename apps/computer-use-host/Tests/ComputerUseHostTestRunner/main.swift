@@ -5369,5 +5369,43 @@ public struct ComputerUseHostTestRunner {
         try listener39b.start()
         listener39b.stop()
         assertTrue(scripted39.areAllDescriptorsClosed, "All descriptors must be closed after listener39b stop")
+
+        // Test listener.start() failure closeout and signal source cancellation
+        final class FailingHostListener: HostListener, @unchecked Sendable {
+            let stopCounter = AtomicCounter()
+            func start() throws {
+                throw ComputerUseError.ipcError(reason: "Injected listener start failure")
+            }
+            func acceptAndHandleOneConnection() async throws -> Bool { false }
+            func stop() { stopCounter.increment() }
+        }
+
+        final class TrackingSignalSource: HostSignalSource, @unchecked Sendable {
+            let cancelCounter = AtomicCounter()
+            func resume() {}
+            func cancel() { cancelCounter.increment() }
+        }
+
+        final class TrackingSignalSourceFactory: HostSignalSourceFactory, @unchecked Sendable {
+            let intSource = TrackingSignalSource()
+            let termSource = TrackingSignalSource()
+            func makeSignalSource(signal sig: Int32, queue: DispatchQueue, handler: @escaping @Sendable () -> Void) -> any HostSignalSource {
+                if sig == SIGINT { return intSource }
+                return termSource
+            }
+        }
+
+        let failingListener = FailingHostListener()
+        let trackingFactory = TrackingSignalSourceFactory()
+        let lifecycleFailing = HostLifecycle(listener: failingListener, signalFactory: trackingFactory)
+        do {
+            try lifecycleFailing.start()
+            assertTrue(false, "Failing listener start must throw")
+        } catch {
+            assertEqual(lifecycleFailing.currentState, .stopped, "Failed start must leave lifecycle in .stopped state")
+            assertEqual(failingListener.stopCounter.value, 1, "Failing listener start must call listener.stop() exactly once")
+            assertEqual(trackingFactory.intSource.cancelCounter.value, 1, "Failing listener start must cancel SIGINT source exactly once")
+            assertEqual(trackingFactory.termSource.cancelCounter.value, 1, "Failing listener start must cancel SIGTERM source exactly once")
+        }
     }
 }

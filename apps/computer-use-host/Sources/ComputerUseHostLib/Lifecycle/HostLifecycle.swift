@@ -105,7 +105,11 @@ public final class HostLifecycle: @unchecked Sendable {
         do {
             try listener.start()
         } catch {
-            stop()
+            lock.lock()
+            state = .stopped
+            lock.unlock()
+            cancelSignalSources()
+            listener.stop()
             throw error
         }
 
