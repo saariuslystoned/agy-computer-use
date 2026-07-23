@@ -2,7 +2,8 @@
 
 - **Run ID**: `agy-cu-m10-d3-ax-pointer-01-20260723`
 - **Staged Source Candidate HEAD**: `e1b06f1adb2186ef6d47c4ee2d93c45d864f22f1` (CI Push [#30035943899](https://github.com/saariuslystoned/agy-computer-use/actions/runs/30035943899), CI PR [#30035946527](https://github.com/saariuslystoned/agy-computer-use-m10-d3-20260723/actions/runs/30035946527))
-- **Proof & Docs Candidate HEAD**: (Pending final commit)
+- **Current Proof & Docs HEAD**: `6e61bbc9be4ec3c271891d4e2fb6fb8b4226f30e`
+
 - **Worktree Path**: `/Users/aiworker02/Developer/worktrees/agy-computer-use-m10-d3-20260723`
 - **Host Machine**: `aiworker-02.local`
 
