@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import net from 'node:net';
+import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { stageHostApp } from './host-app.mjs';
@@ -10,15 +11,18 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const REPO_ROOT = path.resolve(__dirname, '..');
 
-export function getCanonicalRuntimeDir() {
+export function getCanonicalRuntimeDir(customDir = null, isMutation = false) {
   const uid = process.getuid ? process.getuid() : 501;
-  const runtimeDir = process.env.COMPUTER_USE_RUNTIME_DIR || `/tmp/agy-computer-use-${uid}`;
+  const runtimeDir = customDir || `/tmp/agy-computer-use-${uid}`;
 
   let st;
   try {
     st = fs.lstatSync(runtimeDir);
   } catch (err) {
     if (err.code === 'ENOENT') {
+      if (!isMutation) {
+        return runtimeDir;
+      }
       fs.mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
       st = fs.lstatSync(runtimeDir);
     } else {
@@ -35,15 +39,36 @@ export function getCanonicalRuntimeDir() {
   if (process.getuid && st.uid !== uid) {
     throw new Error(`Runtime directory ${runtimeDir} owner mismatch: expected UID ${uid}, got ${st.uid}`);
   }
-  if ((st.mode & 0o077) !== 0) {
+  if (isMutation && (st.mode & 0o077) !== 0) {
     fs.chmodSync(runtimeDir, 0o700);
   }
 
   return runtimeDir;
 }
 
-export function getCanonicalSocketPaths(customDir) {
-  const baseDir = customDir || getCanonicalRuntimeDir();
+export function getCanonicalRuntimeDirIdentity(customDir = null, isMutation = false) {
+  const runtimeDir = getCanonicalRuntimeDir(customDir, isMutation);
+  let st;
+  try {
+    st = fs.lstatSync(runtimeDir);
+  } catch (err) {
+    if (err.code === 'ENOENT') {
+      const uid = process.getuid ? process.getuid() : 501;
+      return { uid, dev: null, ino: null, type: 'absent' };
+    }
+    throw err;
+  }
+  const uid = process.getuid ? process.getuid() : 501;
+  return {
+    uid: st.uid,
+    dev: st.dev,
+    ino: st.ino,
+    type: 'directory'
+  };
+}
+
+export function getCanonicalSocketPaths(customDir = null, isMutation = false) {
+  const baseDir = getCanonicalRuntimeDir(customDir, isMutation);
   return {
     runtimeDir: baseDir,
     hostSocketPath: path.join(baseDir, 'host.sock'),
@@ -52,7 +77,11 @@ export function getCanonicalSocketPaths(customDir) {
   };
 }
 
-export function safeUnlinkSocket(socketPath, expectedIno = null, expectedDev = null) {
+export function safeUnlinkSocket(socketPath, rootIdentity, expectedIno = null, expectedDev = null) {
+  if (!rootIdentity || typeof rootIdentity !== 'object' || rootIdentity.uid === undefined || rootIdentity.dev === undefined || rootIdentity.ino === undefined) {
+    throw new Error(`safeUnlinkSocket requires mandatory captured rootIdentity {uid, dev, ino}`);
+  }
+
   let st;
   try {
     st = fs.lstatSync(socketPath);
@@ -70,18 +99,55 @@ export function safeUnlinkSocket(socketPath, expectedIno = null, expectedDev = n
   if (st.uid !== currentUid) {
     throw new Error(`Refusing to unlink socket owned by UID ${st.uid} (expected ${currentUid})`);
   }
-  if (expectedIno !== null && st.ino !== expectedIno) {
+  if (expectedIno !== null && expectedIno !== undefined && st.ino !== expectedIno) {
     throw new Error(`Refusing to unlink socket at ${socketPath}: inode mismatch (expected ${expectedIno}, got ${st.ino})`);
   }
-  if (expectedDev !== null && st.dev !== expectedDev) {
+  if (expectedDev !== null && expectedDev !== undefined && st.dev !== expectedDev) {
     throw new Error(`Refusing to unlink socket at ${socketPath}: device mismatch (expected ${expectedDev}, got ${st.dev})`);
   }
+
+  const parentDir = path.dirname(socketPath);
+  let parentSt;
+  try {
+    parentSt = fs.lstatSync(parentDir);
+  } catch (err) {
+    throw new Error(`Refusing to unlink socket at ${socketPath}: failed to lstat root directory ${parentDir}: ${err.message}`);
+  }
+  if (parentSt.isSymbolicLink() || !parentSt.isDirectory()) {
+    throw new Error(`Refusing to unlink socket at ${socketPath}: root directory ${parentDir} is not a valid directory`);
+  }
+  if (rootIdentity.uid !== undefined && parentSt.uid !== rootIdentity.uid) {
+    throw new Error(`Refusing to unlink socket at ${socketPath}: root directory UID mismatch (expected ${rootIdentity.uid}, got ${parentSt.uid})`);
+  }
+  if (rootIdentity.dev !== null && rootIdentity.dev !== undefined && parentSt.dev !== rootIdentity.dev) {
+    throw new Error(`Refusing to unlink socket at ${socketPath}: root directory dev mismatch (expected ${rootIdentity.dev}, got ${parentSt.dev})`);
+  }
+  if (rootIdentity.ino !== null && rootIdentity.ino !== undefined && parentSt.ino !== rootIdentity.ino) {
+    throw new Error(`Refusing to unlink socket at ${socketPath}: root directory inode mismatch (expected ${rootIdentity.ino}, got ${parentSt.ino})`);
+  }
+
+  // Immediate identical revalidation before unlink
+  let st2;
+  try {
+    st2 = fs.lstatSync(socketPath);
+  } catch (err) {
+    if (err.code === 'ENOENT') return false;
+    throw err;
+  }
+  if (st2.isSymbolicLink() || !st2.isSocket() || st2.uid !== currentUid || st2.ino !== st.ino || st2.dev !== st.dev) {
+    throw new Error(`Socket state changed during revalidation prior to unlink at ${socketPath}`);
+  }
+
   fs.unlinkSync(socketPath);
   return true;
 }
 
 export function sendFramedIPCRequest(socketPath, requestObj, timeoutMs = 3000) {
   return new Promise((resolve, reject) => {
+    if (!requestObj || typeof requestObj !== 'object' || requestObj.id === undefined || requestObj.id === null) {
+      return reject(new Error('IPC request must include a valid request id'));
+    }
+
     let st;
     try {
       st = fs.lstatSync(socketPath);
@@ -121,7 +187,7 @@ export function sendFramedIPCRequest(socketPath, requestObj, timeoutMs = 3000) {
     });
 
     let rxBuf = Buffer.alloc(0);
-    const MAX_PAYLOAD_SIZE = 16 * 1024 * 1024; // 16MB
+    const MAX_PAYLOAD_SIZE = 16 * 1024 * 1024;
 
     client.on('data', (chunk) => {
       rxBuf = Buffer.concat([rxBuf, chunk]);
@@ -141,8 +207,10 @@ export function sendFramedIPCRequest(socketPath, requestObj, timeoutMs = 3000) {
           settled = true;
           try {
             const parsed = JSON.parse(payloadJson);
-            if (requestObj.id !== undefined && parsed.id !== undefined && String(parsed.id) !== String(requestObj.id)) {
-              reject(new Error(`IPC response ID mismatch: expected ${requestObj.id}, got ${parsed.id}`));
+            if (parsed.id === undefined || parsed.id === null) {
+              reject(new Error(`IPC response missing ID`));
+            } else if (parsed.id !== requestObj.id) {
+              reject(new Error(`IPC response ID mismatch: expected ${JSON.stringify(requestObj.id)} (${typeof requestObj.id}), got ${JSON.stringify(parsed.id)} (${typeof parsed.id})`));
             } else {
               resolve(parsed);
             }
@@ -184,21 +252,54 @@ export function validateStatusResponseSchema(res) {
 
 export class ProductionHostSupervisor {
   constructor(options = {}) {
-    this.runtimeDir = options.runtimeDir || getCanonicalRuntimeDir();
-    const paths = getCanonicalSocketPaths(this.runtimeDir);
+    this.runtimeDir = getCanonicalRuntimeDir(options.runtimeDir, false);
+    const paths = getCanonicalSocketPaths(this.runtimeDir, false);
     this.hostSocketPath = paths.hostSocketPath;
     this.controlSocketPath = paths.controlSocketPath;
     this.lockFilePath = paths.lockFilePath;
 
+    this.generation = crypto.randomUUID();
+    this.isDaemonProcess = options.isDaemonProcess ?? false;
+    this.activeConnections = new Set();
     this.child = null;
     this.controlServer = null;
+    this.rootIdentity = null;
     this.controlSocketIno = null;
     this.controlSocketDev = null;
+    this.hostSocketIno = null;
+    this.hostSocketDev = null;
     this.childClosedPromise = null;
     this.childClosedResolver = null;
     this.cleanupPromise = null;
     this.stoppingFromSignal = false;
+    this.killEscalated = false;
     this.state = 'stopped';
+  }
+
+  ensureLockFile() {
+    let lockSt = null;
+    try {
+      lockSt = fs.lstatSync(this.lockFilePath);
+    } catch (err) {
+      if (err.code === 'ENOENT') {
+        fs.writeFileSync(this.lockFilePath, 'LOCK', { mode: 0o600 });
+        lockSt = fs.lstatSync(this.lockFilePath);
+      } else {
+        throw err;
+      }
+    }
+
+    if (lockSt.isSymbolicLink()) {
+      throw new Error(`Lock file ${this.lockFilePath} cannot be a symbolic link`);
+    }
+    if (!lockSt.isFile()) {
+      throw new Error(`Lock file ${this.lockFilePath} must be a regular file`);
+    }
+    const uid = process.getuid ? process.getuid() : 501;
+    if (process.getuid && lockSt.uid !== uid) {
+      throw new Error(`Lock file ${this.lockFilePath} owner mismatch: expected UID ${uid}, got ${lockSt.uid}`);
+    }
+    fs.chmodSync(this.lockFilePath, 0o600);
   }
 
   async checkNativeStatus(timeoutMs = 1500) {
@@ -224,10 +325,10 @@ export class ProductionHostSupervisor {
         { id: `ctrl-probe-${Date.now()}`, method: 'status' },
         timeoutMs
       );
-      if (res && res.success && res.data?.status === 'running') {
+      if (res && res.success && res.data && ['starting', 'running', 'stopping'].includes(res.data.status)) {
         return { alive: true, data: res.data };
       }
-      return { alive: false, reason: 'control_not_running' };
+      return { alive: false, reason: 'control_not_running', raw: res };
     } catch (err) {
       return { alive: false, reason: err.message };
     }
@@ -235,7 +336,11 @@ export class ProductionHostSupervisor {
 
   startControlServer() {
     return new Promise((resolve, reject) => {
-      // If control socket path exists, probe if alive
+      // Ensure runtime directory exists with mutation
+      this.runtimeDir = getCanonicalRuntimeDir(this.runtimeDir, true);
+      this.rootIdentity = getCanonicalRuntimeDirIdentity(this.runtimeDir, true);
+      this.ensureLockFile();
+
       let existingSt = null;
       try {
         existingSt = fs.lstatSync(this.controlSocketPath);
@@ -245,26 +350,24 @@ export class ProductionHostSupervisor {
         if (existingSt.isSymbolicLink() || !existingSt.isSocket()) {
           return reject(new Error(`Control socket path ${this.controlSocketPath} exists and is not a plain UNIX socket`));
         }
-        // Probe if active
-        this.checkControlStatus(300).then((ctrlProbe) => {
+        // Probe owner control status
+        this.checkControlStatus(300).then(async (ctrlProbe) => {
           if (ctrlProbe.alive) {
             return reject(new Error(`Active supervisor control server already running on ${this.controlSocketPath}`));
           }
-          // Dead socket, safe unlink
+          // Probe native host status
+          const nativeProbe = await this.checkNativeStatus(300);
+          if (nativeProbe.alive) {
+            return reject(new Error(`Native host process is running without an owner control server on ${this.hostSocketPath}`));
+          }
+          // Both control and native are dead, safe unlink stale control socket
           try {
-            safeUnlinkSocket(this.controlSocketPath);
+            safeUnlinkSocket(this.controlSocketPath, this.rootIdentity, existingSt.ino, existingSt.dev);
           } catch (unlinkErr) {
             return reject(unlinkErr);
           }
           this._bindControlServer(resolve, reject);
-        }).catch(() => {
-          try {
-            safeUnlinkSocket(this.controlSocketPath);
-          } catch (unlinkErr) {
-            return reject(unlinkErr);
-          }
-          this._bindControlServer(resolve, reject);
-        });
+        }).catch((err) => reject(err));
       } else {
         this._bindControlServer(resolve, reject);
       }
@@ -273,9 +376,24 @@ export class ProductionHostSupervisor {
 
   _bindControlServer(resolve, reject) {
     const server = net.createServer((socket) => {
+      this.activeConnections.add(socket);
+      socket.setTimeout(2000);
+
+      socket.on('timeout', () => {
+        socket.destroy();
+      });
+
+      const cleanupConn = () => {
+        this.activeConnections.delete(socket);
+      };
+      socket.on('close', cleanupConn);
+      socket.on('error', cleanupConn);
+
       let rxBuf = Buffer.alloc(0);
+      let handledFrame = false;
       const MAX_PAYLOAD = 16 * 1024 * 1024;
       socket.on('data', (chunk) => {
+        if (handledFrame) return;
         rxBuf = Buffer.concat([rxBuf, chunk]);
         if (rxBuf.length >= 4) {
           const msgLen = rxBuf.readUInt32BE(0);
@@ -284,26 +402,51 @@ export class ProductionHostSupervisor {
             return;
           }
           if (rxBuf.length >= 4 + msgLen) {
+            handledFrame = true;
             const payloadJson = rxBuf.subarray(4, 4 + msgLen).toString('utf-8');
             try {
               const req = JSON.parse(payloadJson);
+              if (!req || typeof req !== 'object' || req.id === undefined || req.id === null) {
+                const errResp = { id: req?.id ?? null, success: false, error: { code: 'BAD_REQUEST', message: 'Missing request id' } };
+                const respBuf = Buffer.from(JSON.stringify(errResp), 'utf-8');
+                const headBuf = Buffer.alloc(4);
+                headBuf.writeUInt32BE(respBuf.length, 0);
+                socket.write(Buffer.concat([headBuf, respBuf]), () => {
+                  try { socket.end(); } catch {}
+                });
+                return;
+              }
               this.handleControlRequest(req).then((respObj) => {
                 const respBuf = Buffer.from(JSON.stringify(respObj), 'utf-8');
                 const headBuf = Buffer.alloc(4);
                 headBuf.writeUInt32BE(respBuf.length, 0);
                 socket.write(Buffer.concat([headBuf, respBuf]), () => {
                   if (req?.method === 'stop') {
-                    // Drain and close after stop request
-                    socket.end();
+                    try { socket.end(); } catch {}
                   }
+                });
+                if (req?.method === 'stop') {
+                  setImmediate(() => {
+                    this._finalizeDaemonTeardown();
+                  });
+                }
+              }).catch((err) => {
+                const errResp = { id: req.id, success: false, error: { code: 'INTERNAL_ERROR', message: err.message } };
+                const respBuf = Buffer.from(JSON.stringify(errResp), 'utf-8');
+                const headBuf = Buffer.alloc(4);
+                headBuf.writeUInt32BE(respBuf.length, 0);
+                socket.write(Buffer.concat([headBuf, respBuf]), () => {
+                  try { socket.end(); } catch {}
                 });
               });
             } catch (err) {
-              const errResp = { id: 'err', success: false, error: { code: 'BAD_REQUEST', message: err.message } };
+              const errResp = { id: null, success: false, error: { code: 'BAD_REQUEST', message: err.message } };
               const respBuf = Buffer.from(JSON.stringify(errResp), 'utf-8');
               const headBuf = Buffer.alloc(4);
               headBuf.writeUInt32BE(respBuf.length, 0);
-              socket.write(Buffer.concat([headBuf, respBuf]));
+              socket.write(Buffer.concat([headBuf, respBuf]), () => {
+                try { socket.end(); } catch {}
+              });
             }
           }
         }
@@ -326,6 +469,33 @@ export class ProductionHostSupervisor {
     });
   }
 
+  _finalizeDaemonTeardown() {
+    if (this.controlServer) {
+      try { this.controlServer.close(); } catch {}
+      this.controlServer = null;
+    }
+    if (this.activeConnections) {
+      for (const sock of this.activeConnections) {
+        try { sock.destroy(); } catch {}
+      }
+      this.activeConnections.clear();
+    }
+    if (this.controlSocketIno !== null && this.rootIdentity) {
+      try {
+        safeUnlinkSocket(this.controlSocketPath, this.rootIdentity, this.controlSocketIno, this.controlSocketDev);
+      } catch {}
+    } else {
+      let st = null;
+      try { st = fs.lstatSync(this.controlSocketPath); } catch {}
+      if (st && st.isSocket() && this.rootIdentity) {
+        try { safeUnlinkSocket(this.controlSocketPath, this.rootIdentity, st.ino, st.dev); } catch {}
+      }
+    }
+    if (this.isDaemonProcess) {
+      process.exit(0);
+    }
+  }
+
   async handleControlRequest(req) {
     const reqId = req?.id || 'ctrl-req';
     const method = req?.method;
@@ -336,27 +506,23 @@ export class ProductionHostSupervisor {
         id: reqId,
         success: true,
         data: {
-          status: native.alive ? 'running' : 'unhealthy',
-          pid: this.child?.pid || null,
+          status: this.state,
+          generation: this.generation,
           daemonPid: process.pid,
-          native: native.data || null
+          pid: this.child?.pid || null,
+          nativePid: this.child?.pid || null,
+          native: native.data || null,
+          killEscalated: this.killEscalated
         }
       };
     }
 
     if (method === 'stop') {
-      // Schedule asynchronous teardown so response can flush
-      setImmediate(() => {
-        this.stop().then(() => {
-          process.exit(0);
-        }).catch(() => {
-          process.exit(1);
-        });
-      });
+      const stopResult = await this.stop();
       return {
         id: reqId,
         success: true,
-        data: { status: 'stopped' }
+        data: stopResult
       };
     }
 
@@ -374,22 +540,28 @@ export class ProductionHostSupervisor {
         return {
           status: 'running',
           idempotent: true,
+          generation: this.generation,
+          daemonPid: process.pid,
           pid: this.child.pid,
+          nativePid: this.child.pid,
           socketPath: this.hostSocketPath,
           tcc_permission_state: native.data.tcc_permission_state
         };
       }
     }
 
-    // 1. Atomically reserve & bind control socket first before staging/spawning!
+    // Atomically reserve & bind control socket first before staging/spawning
     await this.startControlServer();
     this.state = 'starting';
 
-    // Trap signals on daemon process for automatic teardown
     const cleanupSignal = () => {
       if (!this.stoppingFromSignal) {
         this.stoppingFromSignal = true;
-        this.stop().then(() => process.exit(0)).catch(() => process.exit(1));
+        this.stop().then(() => {
+          this._finalizeDaemonTeardown();
+        }).catch(() => {
+          this._finalizeDaemonTeardown();
+        });
       }
     };
     process.once('SIGTERM', cleanupSignal);
@@ -400,15 +572,15 @@ export class ProductionHostSupervisor {
       const defaultBinary = path.join(REPO_ROOT, 'apps/computer-use-host/.build/staged/ComputerUseHost.app/Contents/MacOS/ComputerUseHost');
       let binaryPath = options.binaryPath || defaultBinary;
 
-      if (!fs.existsSync(binaryPath) || options.stage === true) {
-        const stagedResult = await stageHostApp({ build: options.build ?? false });
+      if (!fs.existsSync(binaryPath) || options.stage === true || options.build === true) {
+        const stageOpts = options.build !== undefined ? { build: options.build } : {};
+        const stagedResult = await stageHostApp(stageOpts);
         binaryPath = stagedResult.binaryPath;
       }
       if (!fs.existsSync(binaryPath)) {
         throw new Error(`Staged binary does not exist at ${binaryPath}`);
       }
 
-      // Track child exit
       let childClosed = false;
       this.childClosedPromise = new Promise((resolve) => {
         this.childClosedResolver = resolve;
@@ -441,7 +613,6 @@ export class ProductionHostSupervisor {
         }
       });
 
-      // Poll native status
       const readinessTimeoutMs = options.readinessTimeoutMs || 5000;
       const startTime = Date.now();
       let ready = false;
@@ -462,16 +633,26 @@ export class ProductionHostSupervisor {
         throw new Error(childClosed ? 'Host child process exited during startup' : `Readiness check timed out after ${readinessTimeoutMs}ms`);
       }
 
+      try {
+        const hostSt = fs.lstatSync(this.hostSocketPath);
+        this.hostSocketIno = hostSt.ino;
+        this.hostSocketDev = hostSt.dev;
+      } catch {}
+
       this.state = 'running';
       return {
         status: 'running',
         idempotent: false,
+        generation: this.generation,
+        daemonPid: process.pid,
         pid: proc.pid,
+        nativePid: proc.pid,
         socketPath: this.hostSocketPath,
         tcc_permission_state: lastNativeData.tcc_permission_state
       };
     } catch (err) {
       await this.stop();
+      this._finalizeDaemonTeardown();
       throw err;
     }
   }
@@ -485,9 +666,12 @@ export class ProductionHostSupervisor {
   }
 
   async _stopInternal(stopTimeoutMs = 3000) {
-    this.state = 'stopped';
+    this.state = 'stopping';
 
-    // 1. Teardown child process if present
+    const nativePid = this.child?.pid || null;
+    let nativeClosed = false;
+    let killEscalated = false;
+
     if (this.child) {
       const proc = this.child;
       this.child = null;
@@ -500,42 +684,75 @@ export class ProductionHostSupervisor {
           });
         }
 
+        let graceTimer = null;
+        const timeoutPromise = new Promise((r) => {
+          graceTimer = setTimeout(() => r('timed_out'), stopTimeoutMs);
+        });
+
         try {
           proc.kill('SIGTERM');
         } catch {}
 
-        const timeoutPromise = new Promise((r) => setTimeout(() => r('timed_out'), stopTimeoutMs));
         const res = await Promise.race([childPromise, timeoutPromise]);
+        if (graceTimer) clearTimeout(graceTimer);
 
         if (res === 'timed_out') {
+          killEscalated = true;
+          this.killEscalated = true;
           try {
             proc.kill('SIGKILL');
           } catch {}
           await childPromise;
         }
+        nativeClosed = true;
+      } else {
+        nativeClosed = true;
+      }
+    } else {
+      nativeClosed = true;
+    }
+
+    if (this.hostSocketIno !== null && this.rootIdentity) {
+      try {
+        safeUnlinkSocket(this.hostSocketPath, this.rootIdentity, this.hostSocketIno, this.hostSocketDev);
+      } catch {}
+    } else {
+      let st = null;
+      try { st = fs.lstatSync(this.hostSocketPath); } catch {}
+      if (st && st.isSocket() && this.rootIdentity) {
+        try { safeUnlinkSocket(this.hostSocketPath, this.rootIdentity, st.ino, st.dev); } catch {}
       }
     }
 
-    // 2. Close control server
-    if (this.controlServer) {
-      try {
-        await new Promise((r) => this.controlServer.close(r));
-      } catch {}
-      this.controlServer = null;
+    let hostSocketClean = true;
+    try {
+      const st = fs.lstatSync(this.hostSocketPath);
+      if (st) hostSocketClean = false;
+    } catch {
+      hostSocketClean = true;
     }
 
-    // 3. Clean up sockets safely
-    if (fs.existsSync(this.controlSocketPath)) {
-      try {
-        safeUnlinkSocket(this.controlSocketPath, this.controlSocketIno, this.controlSocketDev);
-      } catch {}
-    }
-    if (fs.existsSync(this.hostSocketPath)) {
-      try {
-        safeUnlinkSocket(this.hostSocketPath);
-      } catch {}
+    let lockFilePreserved = false;
+    try {
+      const st = fs.lstatSync(this.lockFilePath);
+      if (st.isFile()) lockFilePreserved = true;
+    } catch {
+      lockFilePreserved = false;
     }
 
-    return { status: 'stopped', idempotent: false };
+    this.state = 'stopped';
+
+    return {
+      status: 'stopped',
+      generation: this.generation,
+      daemonPid: process.pid,
+      nativePid: nativePid,
+      native_closed: nativeClosed,
+      killEscalated: killEscalated || this.killEscalated || false,
+      residueState: {
+        hostSocketClean,
+        lockFilePreserved
+      }
+    };
   }
 }

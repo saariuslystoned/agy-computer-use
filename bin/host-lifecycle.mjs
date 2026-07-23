@@ -17,66 +17,114 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const REPO_ROOT = path.resolve(__dirname, '..');
 
-function fail(msg, code = 1) {
-  const errOutput = { success: false, error: msg };
-  console.error(JSON.stringify(errOutput, null, 2));
-  process.exit(code);
+function fail(msg, status = 'error', code = 'ERROR', exitCode = 1) {
+  const errOutput = { success: false, status, code, error: msg };
+  console.log(JSON.stringify(errOutput, null, 2));
+  process.exit(exitCode);
 }
 
 function validateCLIArgs(argv) {
-  // argv: [node, script, command, ...extra]
   if (argv.length > 3) {
-    fail(`Lifecycle commands accept zero extra arguments or flags. Received ${argv.length - 3} extra argument(s).`);
+    fail(`Lifecycle commands accept zero extra arguments or flags. Received ${argv.length - 3} extra argument(s).`, 'error', 'INVALID_ARGS', 1);
   }
 }
 
 export async function executeHostStart(customSupervisor) {
-  const runtimeDir = customSupervisor?.runtimeDir || getCanonicalRuntimeDir();
-  const paths = getCanonicalSocketPaths(runtimeDir);
-  const supervisor = customSupervisor || new ProductionHostSupervisor({ runtimeDir });
+  const supervisor = customSupervisor || new ProductionHostSupervisor();
+  const runtimeDir = supervisor.runtimeDir;
+  const paths = getCanonicalSocketPaths(runtimeDir, false);
 
-  // 1. Probe control server status
-  const ctrlProbe = await supervisor.checkControlStatus(500);
+  // 1. Probe control server status first
+  const ctrlProbe = await supervisor.checkControlStatus(1000);
   if (ctrlProbe.alive) {
-    const nativeProbe = await supervisor.checkNativeStatus(500);
-    if (nativeProbe.alive) {
-      console.log(JSON.stringify({
-        success: true,
-        status: 'running',
-        idempotent: true,
-        message: 'Host app already running and healthy',
-        tcc_permission_state: nativeProbe.data.tcc_permission_state
-      }, null, 2));
-      process.exit(0);
-      return;
+    const ownerStatus = ctrlProbe.data.status;
+    const initialGen = ctrlProbe.data.generation;
+
+    if (ownerStatus === 'running') {
+      const nativeProbe = await supervisor.checkNativeStatus(1000);
+      if (nativeProbe.alive) {
+        console.log(JSON.stringify({
+          success: true,
+          status: 'running',
+          idempotent: true,
+          generation: ctrlProbe.data.generation,
+          daemonPid: ctrlProbe.data.daemonPid,
+          pid: ctrlProbe.data.nativePid || ctrlProbe.data.pid || null,
+          socketPath: paths.hostSocketPath,
+          tcc_permission_state: nativeProbe.data.tcc_permission_state
+        }, null, 2));
+        process.exit(0);
+        return;
+      }
+    }
+
+    if (ownerStatus === 'starting') {
+      // Live owner is currently starting - wait/probe that exact generation!
+      const startWaitTimeoutMs = 7000;
+      const startWaitBegin = Date.now();
+      let readyRunning = false;
+      let finalCtrlData = null;
+      let finalNativeData = null;
+
+      while (Date.now() - startWaitBegin < startWaitTimeoutMs) {
+        const cProbe = await supervisor.checkControlStatus(300);
+        if (cProbe.alive && cProbe.data.generation === initialGen) {
+          if (cProbe.data.status === 'running') {
+            const nProbe = await supervisor.checkNativeStatus(300);
+            if (nProbe.alive) {
+              readyRunning = true;
+              finalCtrlData = cProbe.data;
+              finalNativeData = nProbe.data;
+              break;
+            }
+          }
+        } else if (!cProbe.alive) {
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 150));
+      }
+
+      if (readyRunning && finalCtrlData && finalNativeData) {
+        console.log(JSON.stringify({
+          success: true,
+          status: 'running',
+          idempotent: true,
+          generation: finalCtrlData.generation,
+          daemonPid: finalCtrlData.daemonPid,
+          pid: finalCtrlData.nativePid || finalCtrlData.pid || null,
+          socketPath: paths.hostSocketPath,
+          tcc_permission_state: finalNativeData.tcc_permission_state
+        }, null, 2));
+        process.exit(0);
+        return;
+      }
+
+      fail('Existing starting host daemon failed to transition to running within timeout', 'error', 'START_TIMEOUT', 1);
     }
   }
 
   // 2. Check if native host is active without control server (unmanaged)
-  if (fs.existsSync(paths.hostSocketPath)) {
+  let hostSocketExists = false;
+  try {
+    const st = fs.lstatSync(paths.hostSocketPath);
+    if (st.isSocket()) hostSocketExists = true;
+  } catch {}
+
+  if (hostSocketExists) {
     const nativeProbe = await supervisor.checkNativeStatus(500);
     if (nativeProbe.alive) {
-      fail('Native host process is running without an owner control server. Refusing to alter unmanaged host.', 1);
+      fail('Native host process is running without an owner control server. Refusing to alter unmanaged host.', 'running_unmanaged', 'UNMANAGED_HOST', 1);
     }
   }
 
-  // 3. Clean up any stale sockets if not alive
-  if (fs.existsSync(paths.controlSocketPath)) {
-    try { safeUnlinkSocket(paths.controlSocketPath); } catch {}
-  }
-  if (fs.existsSync(paths.hostSocketPath)) {
-    try { safeUnlinkSocket(paths.hostSocketPath); } catch {}
-  }
-
-  // 4. Launch persistent supervisor daemon process
+  // 3. In-process supervisor test path vs production CLI daemon spawn
   if (customSupervisor) {
-    // In-process start (for direct supervisor tests)
     try {
       const res = await supervisor.start();
       console.log(JSON.stringify({ success: true, ...res }, null, 2));
       process.exit(0);
     } catch (err) {
-      fail(`host-start failed: ${err.message}`);
+      fail(`host-start failed: ${err.message}`, 'error', 'START_FAILED', 1);
     }
     return;
   }
@@ -87,23 +135,32 @@ export async function executeHostStart(customSupervisor) {
     detached: true,
     stdio: 'ignore'
   });
-  daemon.unref();
 
   const spawnedDaemonPid = daemon.pid;
+  let daemonClosed = false;
+  let daemonError = null;
 
-  // 5. Handshake loop: poll control + native readiness
+  daemon.on('close', () => { daemonClosed = true; });
+  daemon.on('error', (err) => { daemonError = err; daemonClosed = true; });
+
+  // 4. Handshake loop: poll control + native readiness
   const timeoutMs = 7000;
   const startTime = Date.now();
   let ctrlReady = false;
   let nativeData = null;
+  let finalCtrlData = null;
 
   while (Date.now() - startTime < timeoutMs) {
+    if (daemonClosed || daemon.exitCode !== null || daemon.signalCode !== null) {
+      break;
+    }
     const cProbe = await supervisor.checkControlStatus(300);
     if (cProbe.alive) {
       const nProbe = await supervisor.checkNativeStatus(300);
       if (nProbe.alive) {
         ctrlReady = true;
         nativeData = nProbe.data;
+        finalCtrlData = cProbe.data;
         break;
       }
     }
@@ -111,17 +168,28 @@ export async function executeHostStart(customSupervisor) {
   }
 
   if (!ctrlReady) {
-    fail('Host daemon failed to start or pass readiness check within timeout', 1);
+    try { daemon.kill('SIGTERM'); } catch {}
+    const killTimer = setTimeout(() => {
+      try { daemon.kill('SIGKILL'); } catch {}
+    }, 1500);
+    if (!daemonClosed) {
+      await new Promise((r) => daemon.on('close', r));
+    }
+    clearTimeout(killTimer);
+    fail(`Host daemon failed to start or pass readiness check within timeout${daemonError ? `: ${daemonError.message}` : ''}`, 'error', 'START_TIMEOUT', 1);
   }
 
-  const finalCtrl = await supervisor.checkControlStatus(300);
-  const isWinningOwner = Boolean(spawnedDaemonPid && finalCtrl.data?.daemonPid === spawnedDaemonPid);
+  daemon.unref();
+
+  const isWinningOwner = Boolean(spawnedDaemonPid && finalCtrlData?.daemonPid === spawnedDaemonPid);
 
   console.log(JSON.stringify({
     success: true,
     status: 'running',
     idempotent: !isWinningOwner,
-    pid: finalCtrl.data?.pid || null,
+    generation: finalCtrlData?.generation,
+    daemonPid: finalCtrlData?.daemonPid,
+    pid: finalCtrlData?.nativePid || finalCtrlData?.pid || null,
     socketPath: paths.hostSocketPath,
     tcc_permission_state: nativeData?.tcc_permission_state || 'unknown'
   }, null, 2));
@@ -129,24 +197,54 @@ export async function executeHostStart(customSupervisor) {
 }
 
 export async function executeHostStatus(customSupervisor) {
-  const runtimeDir = customSupervisor?.runtimeDir || getCanonicalRuntimeDir();
-  const paths = getCanonicalSocketPaths(runtimeDir);
-  const supervisor = customSupervisor || new ProductionHostSupervisor({ runtimeDir });
+  const supervisor = customSupervisor || new ProductionHostSupervisor();
+  const paths = getCanonicalSocketPaths(supervisor.runtimeDir, false);
 
   const ctrlProbe = await supervisor.checkControlStatus(1000);
-  const nativeProbe = await supervisor.checkNativeStatus(1000);
 
-  if (ctrlProbe.alive && nativeProbe.alive) {
-    console.log(JSON.stringify({
-      success: true,
-      status: 'running',
-      data: nativeProbe.data
-    }, null, 2));
-    process.exit(0);
-    return;
+  if (ctrlProbe.alive) {
+    if (ctrlProbe.data.status === 'running') {
+      const nativeProbe = await supervisor.checkNativeStatus(1000);
+      if (nativeProbe.alive) {
+        console.log(JSON.stringify({
+          success: true,
+          status: 'running',
+          generation: ctrlProbe.data.generation,
+          daemonPid: ctrlProbe.data.daemonPid,
+          pid: ctrlProbe.data.nativePid || ctrlProbe.data.pid || null,
+          data: nativeProbe.data
+        }, null, 2));
+        process.exit(0);
+        return;
+      }
+    } else if (ctrlProbe.data.status === 'starting') {
+      console.log(JSON.stringify({
+        success: true,
+        status: 'starting',
+        generation: ctrlProbe.data.generation,
+        daemonPid: ctrlProbe.data.daemonPid,
+        pid: ctrlProbe.data.nativePid || ctrlProbe.data.pid || null,
+        data: ctrlProbe.data
+      }, null, 2));
+      process.exit(0);
+      return;
+    }
   }
 
-  if (!fs.existsSync(paths.controlSocketPath) && !fs.existsSync(paths.hostSocketPath)) {
+  let ctrlSocketExists = false;
+  let hostSocketExists = false;
+
+  try {
+    const st = fs.lstatSync(paths.controlSocketPath);
+    if (st.isSocket() || st.isSymbolicLink() || st.isFile() || st.isDirectory()) ctrlSocketExists = true;
+  } catch {}
+
+  try {
+    const st = fs.lstatSync(paths.hostSocketPath);
+    if (st.isSocket() || st.isSymbolicLink() || st.isFile() || st.isDirectory()) hostSocketExists = true;
+  } catch {}
+
+  if (!ctrlSocketExists && !hostSocketExists) {
     console.log(JSON.stringify({
       success: true,
       status: 'stopped',
@@ -156,68 +254,104 @@ export async function executeHostStatus(customSupervisor) {
     return;
   }
 
-  if (nativeProbe.alive && !ctrlProbe.alive) {
-    fail('Native host socket is active but supervisor control process is absent (running_unmanaged)', 1);
+  if (hostSocketExists && !ctrlSocketExists) {
+    const nativeProbe = await supervisor.checkNativeStatus(500);
+    if (nativeProbe.alive) {
+      fail('Native host socket is active but supervisor control process is absent (running_unmanaged)', 'running_unmanaged', 'UNMANAGED_HOST', 1);
+    }
   }
 
-  if (ctrlProbe.alive && !nativeProbe.alive) {
-    fail('Supervisor control server is active but native host process is unresponsive', 1);
+  if (ctrlSocketExists && !hostSocketExists) {
+    fail('Supervisor control server is active but native host process is absent (stale_or_ambiguous)', 'stale_or_ambiguous', 'STALE_OR_AMBIGUOUS', 1);
   }
 
-  fail('Socket files exist but host and control endpoints are unresponsive (stale)', 1);
+  fail('Socket files exist but host and control endpoints are unresponsive (stale)', 'stale_or_ambiguous', 'STALE_OR_AMBIGUOUS', 1);
 }
 
 export async function executeHostStop(customSupervisor) {
-  const runtimeDir = customSupervisor?.runtimeDir || getCanonicalRuntimeDir();
-  const paths = getCanonicalSocketPaths(runtimeDir);
-  const supervisor = customSupervisor || new ProductionHostSupervisor({ runtimeDir });
+  const supervisor = customSupervisor || new ProductionHostSupervisor();
+  const paths = getCanonicalSocketPaths(supervisor.runtimeDir, false);
 
   const ctrlProbe = await supervisor.checkControlStatus(1000);
 
   if (ctrlProbe.alive) {
+    const ownerGen = ctrlProbe.data.generation;
+    const ownerDaemonPid = ctrlProbe.data.daemonPid;
+
     try {
       const res = await sendFramedIPCRequest(
         paths.controlSocketPath,
         { id: `stop-cli-${Date.now()}`, method: 'stop' },
         4000
       );
-      if (res && res.success) {
-        console.log(JSON.stringify({ success: true, status: 'stopped', idempotent: false }, null, 2));
-        process.exit(0);
-        return;
+      if (res && res.success && res.data && res.data.status === 'stopped') {
+        const receipt = res.data;
+        if (receipt.generation !== ownerGen || receipt.daemonPid !== ownerDaemonPid) {
+          fail('Stop receipt identity mismatch', 'stale_or_ambiguous', 'STOP_FAILED', 1);
+        }
+
+        // Bounded wait for daemon process termination and socket absence
+        const stopWaitBegin = Date.now();
+        const stopWaitTimeoutMs = 3000;
+        let daemonDead = false;
+
+        while (Date.now() - stopWaitBegin < stopWaitTimeoutMs) {
+          try {
+            process.kill(ownerDaemonPid, 0);
+            await new Promise((r) => setTimeout(r, 50));
+          } catch {
+            daemonDead = true;
+            break;
+          }
+        }
+
+        let ctrlSocketPresent = false;
+        try { fs.lstatSync(paths.controlSocketPath); ctrlSocketPresent = true; } catch {}
+
+        if (daemonDead && !ctrlSocketPresent) {
+          console.log(JSON.stringify({ success: true, status: 'stopped', idempotent: false }, null, 2));
+          process.exit(0);
+          return;
+        }
+
+        fail('Daemon process did not terminate within timeout after stop receipt', 'error', 'STOP_TIMEOUT', 1);
       }
     } catch (err) {
-      fail(`Failed to send stop request to active supervisor: ${err.message}`, 1);
+      fail(`Failed to send stop request to active supervisor: ${err.message}`, 'error', 'STOP_FAILED', 1);
     }
   }
 
-  if (!fs.existsSync(paths.controlSocketPath) && !fs.existsSync(paths.hostSocketPath)) {
+  let ctrlSocketExists = false;
+  let hostSocketExists = false;
+
+  try {
+    const st = fs.lstatSync(paths.controlSocketPath);
+    if (st.isSocket() || st.isSymbolicLink() || st.isFile() || st.isDirectory()) ctrlSocketExists = true;
+  } catch {}
+
+  try {
+    const st = fs.lstatSync(paths.hostSocketPath);
+    if (st.isSocket() || st.isSymbolicLink() || st.isFile() || st.isDirectory()) hostSocketExists = true;
+  } catch {}
+
+  if (!ctrlSocketExists && !hostSocketExists) {
     console.log(JSON.stringify({ success: true, status: 'stopped', idempotent: true }, null, 2));
     process.exit(0);
     return;
   }
 
-  if (fs.existsSync(paths.hostSocketPath)) {
+  if (hostSocketExists) {
     const nativeProbe = await supervisor.checkNativeStatus(500);
     if (nativeProbe.alive) {
-      fail('Refusing to stop host: native host process exists without an active supervisor owner', 1);
+      fail('Refusing to stop host: native host process exists without an active supervisor owner', 'running_unmanaged', 'UNMANAGED_HOST', 1);
     }
   }
 
-  // Socket files exist but endpoints are dead - report stopped after safe cleanup
-  if (fs.existsSync(paths.controlSocketPath)) {
-    try { safeUnlinkSocket(paths.controlSocketPath); } catch {}
-  }
-  if (fs.existsSync(paths.hostSocketPath)) {
-    try { safeUnlinkSocket(paths.hostSocketPath); } catch {}
-  }
-
-  console.log(JSON.stringify({ success: true, status: 'stopped', idempotent: true }, null, 2));
-  process.exit(0);
+  fail('Socket files exist but supervisor control server is not active', 'stale_or_ambiguous', 'NO_OWNER', 1);
 }
 
 async function runDaemon() {
-  const supervisor = new ProductionHostSupervisor();
+  const supervisor = new ProductionHostSupervisor({ isDaemonProcess: true });
   try {
     await supervisor.start();
   } catch (err) {
@@ -244,10 +378,10 @@ async function main() {
   } else if (command === 'host-stop') {
     await executeHostStop();
   } else {
-    fail(`Unknown host lifecycle command '${command}'`);
+    fail(`Unknown host lifecycle command '${command}'`, 'error', 'UNKNOWN_COMMAND', 1);
   }
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) {
-  main().catch((err) => fail(err.message));
+  main().catch((err) => fail(err.message, 'error', 'UNHANDLED_ERROR', 1));
 }
