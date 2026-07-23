@@ -18,7 +18,8 @@ This skill teaches Google Antigravity agents (and Gemini models) how to reliably
 - **Host Lifecycle Management**:
   - `./bin/agy-computer-use host-start`: Starts the background native host process.
   - `./bin/agy-computer-use host-status`: Checks if native host is `running`, `stopped`, or `stale`.
-  - `./bin/agy-computer-use host-stop`: Stops the native host process cleanly.
+  - `./bin/agy-computer-use host-stop`: Stops the native host process cleanly, awaiting exact native child close and terminal owner receipt (`native_closed: true`).
+  - *Process Authority & Security*: Host lifecycle commands communicate with the owner control server on `control.sock` (terminal owner correlation) and strictly enforce the non-override canonical runtime directory policy (`/tmp/agy-computer-use-<uid>`).
 - **ALWAYS** call `computer_use_status` to verify host connection, TCC permission state (`granted`), and display topology.
 - Call `computer_use_observe` to capture current desktop screen state and receive a valid `capture_id` and `topology_version`.
 - Dynamic topology versions (`topology_version`) are required tokens returned from observation.

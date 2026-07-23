@@ -151,9 +151,6 @@ export async function executeHostStart(customSupervisor) {
   let finalCtrlData = null;
 
   while (Date.now() - startTime < timeoutMs) {
-    if (daemonClosed || daemon.exitCode !== null || daemon.signalCode !== null) {
-      break;
-    }
     const cProbe = await supervisor.checkControlStatus(300);
     if (cProbe.alive) {
       const nProbe = await supervisor.checkNativeStatus(300);
@@ -163,6 +160,8 @@ export async function executeHostStart(customSupervisor) {
         finalCtrlData = cProbe.data;
         break;
       }
+    } else if (daemonClosed || daemon.exitCode !== null || daemon.signalCode !== null) {
+      break;
     }
     await new Promise((r) => setTimeout(r, 150));
   }

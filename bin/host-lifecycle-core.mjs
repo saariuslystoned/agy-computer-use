@@ -336,42 +336,54 @@ export class ProductionHostSupervisor {
 
   startControlServer() {
     return new Promise((resolve, reject) => {
-      // Ensure runtime directory exists with mutation
       this.runtimeDir = getCanonicalRuntimeDir(this.runtimeDir, true);
       this.rootIdentity = getCanonicalRuntimeDirIdentity(this.runtimeDir, true);
       this.ensureLockFile();
 
-      let existingSt = null;
-      try {
-        existingSt = fs.lstatSync(this.controlSocketPath);
-      } catch (e) {}
+      let existingControlSt = null;
+      try { existingControlSt = fs.lstatSync(this.controlSocketPath); } catch (e) {}
 
-      if (existingSt) {
-        if (existingSt.isSymbolicLink() || !existingSt.isSocket()) {
-          return reject(new Error(`Control socket path ${this.controlSocketPath} exists and is not a plain UNIX socket`));
-        }
-        // Probe owner control status
-        this.checkControlStatus(300).then(async (ctrlProbe) => {
-          if (ctrlProbe.alive) {
-            return reject(new Error(`Active supervisor control server already running on ${this.controlSocketPath}`));
-          }
-          // Probe native host status
-          const nativeProbe = await this.checkNativeStatus(300);
+      let existingHostSt = null;
+      try { existingHostSt = fs.lstatSync(this.hostSocketPath); } catch (e) {}
+
+      if (existingHostSt && existingHostSt.isSocket()) {
+        this.checkNativeStatus(300).then(async (nativeProbe) => {
           if (nativeProbe.alive) {
+            if (existingControlSt && existingControlSt.isSocket()) {
+              const ctrlProbe = await this.checkControlStatus(300);
+              if (ctrlProbe.alive) {
+                return reject(new Error(`Active supervisor control server already running on ${this.controlSocketPath}`));
+              }
+            }
             return reject(new Error(`Native host process is running without an owner control server on ${this.hostSocketPath}`));
           }
-          // Both control and native are dead, safe unlink stale control socket
-          try {
-            safeUnlinkSocket(this.controlSocketPath, this.rootIdentity, existingSt.ino, existingSt.dev);
-          } catch (unlinkErr) {
-            return reject(unlinkErr);
-          }
-          this._bindControlServer(resolve, reject);
+          this._proceedWithControlBinding(existingControlSt, resolve, reject);
         }).catch((err) => reject(err));
       } else {
-        this._bindControlServer(resolve, reject);
+        this._proceedWithControlBinding(existingControlSt, resolve, reject);
       }
     });
+  }
+
+  _proceedWithControlBinding(existingControlSt, resolve, reject) {
+    if (existingControlSt) {
+      if (existingControlSt.isSymbolicLink() || !existingControlSt.isSocket()) {
+        return reject(new Error(`Control socket path ${this.controlSocketPath} exists and is not a plain UNIX socket`));
+      }
+      this.checkControlStatus(300).then(async (ctrlProbe) => {
+        if (ctrlProbe.alive) {
+          return reject(new Error(`Active supervisor control server already running on ${this.controlSocketPath}`));
+        }
+        try {
+          safeUnlinkSocket(this.controlSocketPath, this.rootIdentity, existingControlSt.ino, existingControlSt.dev);
+        } catch (unlinkErr) {
+          return reject(unlinkErr);
+        }
+        this._bindControlServer(resolve, reject);
+      }).catch((err) => reject(err));
+    } else {
+      this._bindControlServer(resolve, reject);
+    }
   }
 
   _bindControlServer(resolve, reject) {
@@ -550,7 +562,6 @@ export class ProductionHostSupervisor {
       }
     }
 
-    // Atomically reserve & bind control socket first before staging/spawning
     await this.startControlServer();
     this.state = 'starting';
 

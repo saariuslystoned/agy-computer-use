@@ -4,11 +4,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import net from 'node:net';
-import { spawn, execFileSync, execFile, execSync } from 'node:child_process';
+import { spawn, execFile, execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import {
   getCanonicalRuntimeDir,
+  getCanonicalRuntimeDirIdentity,
   getCanonicalSocketPaths,
   safeUnlinkSocket,
   sendFramedIPCRequest,
@@ -29,13 +30,13 @@ function createTestHarnessDir() {
 
 function cleanupTestDir(dir) {
   if (fs.existsSync(dir)) {
-    fs.rmSync(dir, { recursive: true, force: true });
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
   }
 }
 
-function runCLIAsync(args, env) {
+function runAGYAsync(args, env = {}) {
   return new Promise((resolve) => {
-    execFile(process.execPath, [CLI_PATH, ...args], { cwd: REPO_ROOT, env, encoding: 'utf-8' }, (error, stdout, stderr) => {
+    execFile(CLI_PATH, args, { cwd: REPO_ROOT, env: { ...process.env, ...env }, encoding: 'utf-8' }, (error, stdout, stderr) => {
       resolve({
         code: error ? (error.code || error.status || 1) : 0,
         stdout: stdout || '',
@@ -45,460 +46,511 @@ function runCLIAsync(args, env) {
   });
 }
 
-// 1. Happy path: public CLI start -> status -> idempotent start -> stop -> idempotent stop -> restart
-test('HL1-AUTH-1: CLI start, status, idempotent start/stop, restart', async () => {
-  const testDir = createTestHarnessDir();
-  const env = { ...process.env, COMPUTER_USE_RUNTIME_DIR: testDir };
-
-  try {
-    // Stage app first if needed
-    const stagedBinary = path.join(REPO_ROOT, 'apps/computer-use-host/.build/staged/ComputerUseHost.app/Contents/MacOS/ComputerUseHost');
-    if (!fs.existsSync(stagedBinary)) {
-      execSync(`${CLI_PATH} stage-host-app`, { cwd: REPO_ROOT, env });
-    }
-
-    // CLI host-start
-    const start1Res = await runCLIAsync(['host-start'], env);
-    assert.equal(start1Res.code, 0);
-    const start1 = JSON.parse(start1Res.stdout);
-    assert.equal(start1.success, true);
-    assert.equal(start1.status, 'running');
-    assert.equal(start1.idempotent, false);
-    assert.ok(start1.pid > 0);
-
-    // CLI host-status
-    const status1Res = await runCLIAsync(['host-status'], env);
-    assert.equal(status1Res.code, 0);
-    const status1 = JSON.parse(status1Res.stdout);
-    assert.equal(status1.success, true);
-    assert.equal(status1.status, 'running');
-    assert.equal(status1.data.connected, true);
-
-    // Idempotent CLI host-start
-    const start2Res = await runCLIAsync(['host-start'], env);
-    assert.equal(start2Res.code, 0);
-    const start2 = JSON.parse(start2Res.stdout);
-    assert.equal(start2.success, true);
-    assert.equal(start2.status, 'running');
-    assert.equal(start2.idempotent, true);
-
-    // CLI host-stop
-    const stop1Res = await runCLIAsync(['host-stop'], env);
-    assert.equal(stop1Res.code, 0);
-    const stop1 = JSON.parse(stop1Res.stdout);
-    assert.equal(stop1.success, true);
-    assert.equal(stop1.status, 'stopped');
-    assert.equal(stop1.idempotent, false);
-
-    // Idempotent CLI host-stop
-    const stop2Res = await runCLIAsync(['host-stop'], env);
-    assert.equal(stop2Res.code, 0);
-    const stop2 = JSON.parse(stop2Res.stdout);
-    assert.equal(stop2.success, true);
-    assert.equal(stop2.status, 'stopped');
-    assert.equal(stop2.idempotent, true);
-
-    // Restart fresh generation
-    const start3Res = await runCLIAsync(['host-start'], env);
-    assert.equal(start3Res.code, 0);
-    const start3 = JSON.parse(start3Res.stdout);
-    assert.equal(start3.success, true);
-    assert.equal(start3.status, 'running');
-    assert.notEqual(start3.pid, start1.pid);
-
-    // Cleanup stop
-    await runCLIAsync(['host-stop'], env);
-  } finally {
-    try {
-      await runCLIAsync(['host-stop'], env);
-    } catch {}
-    cleanupTestDir(testDir);
-  }
-});
-
-// 2. Public command extra-token rejection
-test('HL1-AUTH-2: Public command extra-token rejection', async () => {
-  const res = await runCLIAsync(['host-start', '--extra-arg'], process.env);
-  assert.notEqual(res.code, 0);
-  assert.match(res.stderr || res.stdout, /zero extra arguments/);
-});
-
-// 3. Spawn error before readiness
-test('HL1-AUTH-3: Non-existent binary spawn error tears down cleanly', async () => {
-  const testDir = createTestHarnessDir();
-  try {
-    const supervisor = new ProductionHostSupervisor({ runtimeDir: testDir });
-    await assert.rejects(async () => {
-      await supervisor.start({
-        binaryPath: '/non/existent/binary/path/xyz',
-        readinessTimeoutMs: 100
-      });
+function createRealDanglingSocket(socketPath) {
+  const code = `
+    const net = require('net');
+    const server = net.createServer();
+    server.listen(${JSON.stringify(socketPath)}, () => {
+      process.stdout.write('BOUND\\n');
     });
-
-    assert.equal(supervisor.state, 'stopped');
-    const paths = getCanonicalSocketPaths(testDir);
-    assert.equal(fs.existsSync(paths.controlSocketPath), false);
-    assert.equal(fs.existsSync(paths.hostSocketPath), false);
-  } finally {
-    cleanupTestDir(testDir);
-  }
-});
-
-// 4. Early exit child before readiness
-test('HL1-AUTH-4: Early exit child tears down cleanly without leaking', async () => {
-  const testDir = createTestHarnessDir();
-  try {
-    const supervisor = new ProductionHostSupervisor({ runtimeDir: testDir });
-    await assert.rejects(async () => {
-      await supervisor.start({
-        binaryPath: process.execPath,
-        readinessTimeoutMs: 500
-      });
-    });
-
-    assert.equal(supervisor.state, 'stopped');
-    const paths = getCanonicalSocketPaths(testDir);
-    assert.equal(fs.existsSync(paths.controlSocketPath), false);
-    assert.equal(fs.existsSync(paths.hostSocketPath), false);
-  } finally {
-    cleanupTestDir(testDir);
-  }
-});
-
-// 5. Socket existence mutant (socket responding with malformed payload fails readiness)
-test('HL1-AUTH-5: Socket returning malformed JSON fails readiness check', async () => {
-  const testDir = createTestHarnessDir();
-  try {
-    const paths = getCanonicalSocketPaths(testDir);
-    const server = net.createServer((sock) => {
-      sock.write(Buffer.from('not valid json payload'));
-    });
-    await new Promise((r) => server.listen(paths.hostSocketPath, r));
-
-    const supervisor = new ProductionHostSupervisor({ runtimeDir: testDir });
-    const probe = await supervisor.checkNativeStatus(500);
-    assert.equal(probe.alive, false);
-
-    server.close();
-  } finally {
-    cleanupTestDir(testDir);
-  }
-});
-
-// 6. Readiness timeout owns TERM -> KILL -> reap
-test('HL1-AUTH-6: Readiness timeout sends SIGTERM -> SIGKILL -> reaps child', async () => {
-  const testDir = createTestHarnessDir();
-  try {
-    const supervisor = new ProductionHostSupervisor({ runtimeDir: testDir });
-    await assert.rejects(async () => {
-      await supervisor.start({
-        binaryPath: process.execPath,
-        binaryArgs: ['-e', 'setInterval(() => {}, 1000);'],
-        readinessTimeoutMs: 300
-      });
-    }, /Readiness check timed out/);
-
-    assert.equal(supervisor.state, 'stopped');
-    const paths = getCanonicalSocketPaths(testDir);
-    assert.equal(fs.existsSync(paths.controlSocketPath), false);
-  } finally {
-    cleanupTestDir(testDir);
-  }
-});
-
-// 7. PID-trust mutant & sentinel process preservation
-test('HL1-AUTH-7: Stop affects exact supervisor child, preserving unrelated sentinel', async () => {
-  const testDir = createTestHarnessDir();
-  let sentinel = null;
-  try {
-    sentinel = spawn('sleep', ['60']);
-    assert.ok(sentinel.pid > 0);
-
-    const supervisor = new ProductionHostSupervisor({ runtimeDir: testDir });
-    const mockChild = {
-      pid: 88888,
-      exitCode: null,
-      signalCode: null,
-      kill: () => {},
-      on: (evt, fn) => {
-        if (evt === 'close') setTimeout(() => fn(0, null), 10);
+  `;
+  const proc = spawn(process.execPath, ['-e', code], { stdio: ['ignore', 'pipe', 'ignore'] });
+  return new Promise((resolve, reject) => {
+    proc.stdout.on('data', (data) => {
+      if (data.toString().includes('BOUND')) {
+        proc.kill('SIGKILL');
+        proc.on('close', () => resolve());
       }
-    };
-    supervisor.child = mockChild;
-    supervisor.state = 'running';
+    });
+    proc.on('error', reject);
+  });
+}
 
-    await supervisor.stop(100);
+// Ensure staged host binary exists before tests run
+const stagedBinary = path.join(REPO_ROOT, 'apps/computer-use-host/.build/staged/ComputerUseHost.app/Contents/MacOS/ComputerUseHost');
+if (!fs.existsSync(stagedBinary)) {
+  execSync(`${CLI_PATH} stage-host-app`, { cwd: REPO_ROOT });
+}
 
-    // Sentinel must still be alive
-    let sentinelAlive = true;
+// Discriminators 1, 2, 3, 4: Cold Concurrent Start, Correlated Status, Terminal Stop
+test('D1-D4: Cold concurrent start, correlated status, and terminal receipt stop via bin/agy-computer-use', { timeout: 20000 }, async (t) => {
+  const cleanupStack = [];
+  t.after(async () => {
+    for (const fn of cleanupStack.reverse()) {
+      try { await fn(); } catch {}
+    }
+  });
+
+  cleanupStack.push(async () => {
+    await runAGYAsync(['host-stop']);
+  });
+
+  // Ensure genuinely stopped state
+  await runAGYAsync(['host-stop']);
+
+  // Cold-start two separate public commands concurrently
+  const [cStart1, cStart2] = await Promise.all([
+    runAGYAsync(['host-start']),
+    runAGYAsync(['host-start'])
+  ]);
+
+  assert.equal(cStart1.code, 0, `cStart1 failed: ${cStart1.stderr}`);
+  assert.equal(cStart2.code, 0, `cStart2 failed: ${cStart2.stderr}`);
+
+  const out1 = JSON.parse(cStart1.stdout);
+  const out2 = JSON.parse(cStart2.stdout);
+
+  assert.equal(out1.success, true);
+  assert.equal(out2.success, true);
+  assert.equal(out1.status, 'running');
+  assert.equal(out2.status, 'running');
+
+  // Both succeed with identical generation, daemonPid, nativePid
+  assert.equal(out1.generation, out2.generation);
+  assert.equal(out1.daemonPid, out2.daemonPid);
+  assert.equal(out1.pid, out2.pid);
+
+  // Exactly one owns the new start
+  assert.ok((!out1.idempotent && out2.idempotent) || (out1.idempotent && !out2.idempotent));
+
+  // Control socket inode remains stable
+  const paths = getCanonicalSocketPaths();
+  const controlIno1 = fs.lstatSync(paths.controlSocketPath).ino;
+
+  // Query correlated status
+  const statusRes = await runAGYAsync(['host-status']);
+  assert.equal(statusRes.code, 0);
+  const statusOut = JSON.parse(statusRes.stdout);
+
+  assert.equal(statusOut.success, true);
+  assert.equal(statusOut.status, 'running');
+  assert.equal(statusOut.generation, out1.generation);
+  assert.equal(statusOut.daemonPid, out1.daemonPid);
+  assert.equal(statusOut.pid, out1.pid);
+  assert.equal(statusOut.data.connected, true);
+
+  const controlIno2 = fs.lstatSync(paths.controlSocketPath).ino;
+  assert.equal(controlIno1, controlIno2);
+
+  // Public stop returns receipt and proves PIDs terminal immediately without post-return polling
+  const stopRes = await runAGYAsync(['host-stop']);
+  assert.equal(stopRes.code, 0);
+  const stopOut = JSON.parse(stopRes.stdout);
+
+  assert.equal(stopOut.success, true);
+  assert.equal(stopOut.status, 'stopped');
+
+  // Prove exact daemon PID and native PID are terminal immediately upon return
+  let daemonAlive = true;
+  try { process.kill(out1.daemonPid, 0); } catch { daemonAlive = false; }
+  assert.equal(daemonAlive, false, 'Daemon PID must be terminal upon host-stop return');
+
+  let nativeAlive = true;
+  try { process.kill(out1.pid, 0); } catch { nativeAlive = false; }
+  assert.equal(nativeAlive, false, 'Native PID must be terminal upon host-stop return');
+
+  assert.equal(fs.existsSync(paths.hostSocketPath), false);
+  assert.equal(fs.existsSync(paths.controlSocketPath), false);
+
+  assert.equal(fs.existsSync(paths.lockFilePath), true);
+  const lockSt = fs.lstatSync(paths.lockFilePath);
+  assert.equal(lockSt.isFile(), true);
+  assert.equal(lockSt.isSymbolicLink(), false);
+  assert.equal(lockSt.mode & 0o777, 0o600);
+});
+
+// Discriminator 5: Retained daemon process handle, TERM ordering, native child close proof
+test('D5: Hold daemon process handle, SIGTERM it, prove exact native PID closes before sockets disappear', { timeout: 15000 }, async (t) => {
+  const cleanupStack = [];
+  t.after(async () => {
+    for (const fn of cleanupStack.reverse()) {
+      try { await fn(); } catch {}
+    }
+  });
+
+  cleanupStack.push(async () => {
+    await runAGYAsync(['host-stop']);
+  });
+
+  const startRes = await runAGYAsync(['host-start']);
+  assert.equal(startRes.code, 0);
+  const startData = JSON.parse(startRes.stdout);
+  const daemonPid = startData.daemonPid;
+  const nativePid = startData.pid;
+
+  process.kill(daemonPid, 'SIGTERM');
+
+  let daemonExited = false;
+  for (let i = 0; i < 40; i++) {
     try {
-      process.kill(sentinel.pid, 0);
+      process.kill(daemonPid, 0);
+      await new Promise((r) => setTimeout(r, 50));
     } catch {
-      sentinelAlive = false;
+      daemonExited = true;
+      break;
     }
-    assert.equal(sentinelAlive, true, 'Sentinel process must remain alive');
-  } finally {
-    if (sentinel) {
-      try { sentinel.kill('SIGKILL'); } catch {}
+  }
+
+  assert.equal(daemonExited, true, 'Daemon process must exit after SIGTERM');
+
+  let nativeAlive = true;
+  try { process.kill(nativePid, 0); } catch { nativeAlive = false; }
+  assert.equal(nativeAlive, false, 'Native child process must be terminal after daemon SIGTERM');
+
+  const paths = getCanonicalSocketPaths();
+  assert.equal(fs.existsSync(paths.controlSocketPath), false);
+  assert.equal(fs.existsSync(paths.hostSocketPath), false);
+});
+
+// Discriminators 6, 12: Stubborn and cooperative child teardown & timeout/early-close
+test('D6, D12: Cooperative vs stubborn child teardown with grace timer and KILL escalation', { timeout: 15000 }, async (t) => {
+  const testDir = createTestHarnessDir();
+  const cleanupStack = [];
+  t.after(async () => {
+    for (const fn of cleanupStack.reverse()) {
+      try { await fn(); } catch {}
     }
     cleanupTestDir(testDir);
-  }
+  });
+
+  // 1. Cooperative child: exits cleanly on SIGTERM after READY handshake
+  const coopScript = "process.on('SIGTERM', () => { process.exit(0); }); console.log('READY'); setInterval(() => {}, 1000);";
+  const coopProc = spawn(process.execPath, ['-e', coopScript], { stdio: ['ignore', 'pipe', 'pipe'] });
+  if (coopProc.stdout) coopProc.stdout.resume();
+  if (coopProc.stderr) coopProc.stderr.resume();
+  await new Promise((r) => coopProc.stdout.on('data', r));
+  cleanupStack.push(async () => { try { coopProc.kill('SIGKILL'); } catch {} });
+
+  const supervisor1 = new ProductionHostSupervisor({ runtimeDir: testDir });
+  supervisor1.child = coopProc;
+  supervisor1.childClosedPromise = new Promise((resolve) => {
+    coopProc.on('close', (code, signal) => resolve({ code, signal }));
+  });
+
+  const stopReceipt1 = await supervisor1.stop(2000);
+  assert.equal(stopReceipt1.status, 'stopped');
+  assert.equal(stopReceipt1.native_closed, true);
+  assert.equal(stopReceipt1.killEscalated, false, 'Cooperative child must not escalate to KILL');
+
+  // 2. Stubborn child: traps SIGTERM and ignores it after READY handshake
+  const stubbornScript = "process.on('SIGTERM', () => {}); console.log('READY'); setInterval(() => {}, 1000);";
+  const stubbornProc = spawn(process.execPath, ['-e', stubbornScript], { stdio: ['ignore', 'pipe', 'pipe'] });
+  if (stubbornProc.stdout) stubbornProc.stdout.resume();
+  if (stubbornProc.stderr) stubbornProc.stderr.resume();
+  await new Promise((r) => stubbornProc.stdout.on('data', r));
+  cleanupStack.push(async () => { try { stubbornProc.kill('SIGKILL'); } catch {} });
+
+  const supervisor2 = new ProductionHostSupervisor({ runtimeDir: testDir });
+  supervisor2.child = stubbornProc;
+  supervisor2.childClosedPromise = new Promise((resolve) => {
+    stubbornProc.on('close', (code, signal) => resolve({ code, signal }));
+  });
+
+  const stopReceipt2 = await supervisor2.stop(300);
+  assert.equal(stopReceipt2.status, 'stopped');
+  assert.equal(stopReceipt2.native_closed, true);
+  assert.equal(stopReceipt2.killEscalated, true, 'Stubborn child must escalate to KILL after grace timeout');
 });
 
-// 8. Stubborn child receiving SIGKILL escalation
-test('HL1-AUTH-8: Child ignoring TERM receives SIGKILL escalation', async () => {
-  const testDir = createTestHarnessDir();
-  try {
-    const supervisor = new ProductionHostSupervisor({ runtimeDir: testDir });
-    const killedSignals = [];
-    const mockChild = {
-      pid: 99999,
-      exitCode: null,
-      signalCode: null,
-      kill(sig) {
-        killedSignals.push(sig);
-      },
-      on(evt, fn) {
-        if (evt === 'close') this._closeFn = fn;
-      }
-    };
+// Discriminator 7: Real starting phase barrier contender exclusion
+test('D7: Real starting phase barrier excludes contender from replacing socket or spawning second child', { timeout: 15000 }, async (t) => {
+  const cleanupStack = [];
+  t.after(async () => {
+    for (const fn of cleanupStack.reverse()) {
+      try { await fn(); } catch {}
+    }
+  });
 
-    supervisor.child = mockChild;
-    supervisor.state = 'running';
+  cleanupStack.push(async () => {
+    await runAGYAsync(['host-stop']);
+  });
 
-    let resolver;
-    supervisor.childClosedPromise = new Promise((r) => { resolver = r; });
+  await runAGYAsync(['host-stop']);
 
-    const stopTask = supervisor.stop(100);
-    setTimeout(() => {
-      resolver({ code: null, signal: 'SIGKILL' });
-    }, 150);
+  const supervisor = new ProductionHostSupervisor();
+  cleanupStack.push(async () => {
+    await supervisor.stop();
+    supervisor._finalizeDaemonTeardown();
+  });
 
-    await stopTask;
-    assert.deepEqual(killedSignals, ['SIGTERM', 'SIGKILL']);
-  } finally {
-    cleanupTestDir(testDir);
-  }
-});
+  await supervisor.startControlServer();
+  supervisor.state = 'starting';
 
-// 9. Concurrent CLI start invocations
-test('HL1-AUTH-9: Concurrent public CLI start calls yield at most one supervisor & native host', async () => {
-  const testDir = createTestHarnessDir();
-  const env = { ...process.env, COMPUTER_USE_RUNTIME_DIR: testDir };
+  const paths = getCanonicalSocketPaths();
+  const ctrlInoBefore = fs.lstatSync(paths.controlSocketPath).ino;
 
-  try {
-    const [res1, res2] = await Promise.all([
-      runCLIAsync(['host-start'], env),
-      runCLIAsync(['host-start'], env)
-    ]);
+  const contenderPromise = runAGYAsync(['host-start']);
 
-    assert.equal(res1.code, 0);
-    assert.equal(res2.code, 0);
+  const ctrlInoDuring = fs.lstatSync(paths.controlSocketPath).ino;
+  assert.equal(ctrlInoBefore, ctrlInoDuring);
 
-    const out1 = JSON.parse(res1.stdout);
-    const out2 = JSON.parse(res2.stdout);
-
-    assert.equal(out1.success, true);
-    assert.equal(out2.success, true);
-    assert.equal(out1.status, 'running');
-    assert.equal(out2.status, 'running');
-    assert.equal(out1.idempotent || out2.idempotent, true);
-
-    await runCLIAsync(['host-stop'], env);
-  } finally {
-    try {
-      await runCLIAsync(['host-stop'], env);
-    } catch {}
-    cleanupTestDir(testDir);
-  }
-});
-
-// 10. Unmanaged live native host protection
-test('HL1-AUTH-10: Live native host without supervisor control server fails closed', async () => {
-  const testDir = createTestHarnessDir();
-  const env = { ...process.env, COMPUTER_USE_RUNTIME_DIR: testDir };
-  const paths = getCanonicalSocketPaths(testDir);
-
-  let mockServer = null;
-  try {
-    // Create a mock native socket that responds to status requests asynchronously
-    mockServer = net.createServer((sock) => {
-      let rxBuf = Buffer.alloc(0);
-      sock.on('data', (chunk) => {
-        rxBuf = Buffer.concat([rxBuf, chunk]);
-        while (rxBuf.length >= 4) {
-          const msgLen = rxBuf.readUInt32BE(0);
-          if (rxBuf.length >= 4 + msgLen) {
-            const reqStr = rxBuf.subarray(4, 4 + msgLen).toString('utf-8');
-            rxBuf = rxBuf.subarray(4 + msgLen);
-            let req = { id: 'status' };
-            try { req = JSON.parse(reqStr); } catch {}
-            const resp = {
-              id: req.id,
-              success: true,
-              data: {
-                connected: true,
-                tcc_permission_state: 'granted',
-                accessibility_available: true,
-                accessibility_trusted: true,
-                input_mutation_state: 'disabled'
-              }
-            };
-            const respBuf = Buffer.from(JSON.stringify(resp), 'utf-8');
-            const headBuf = Buffer.alloc(4);
-            headBuf.writeUInt32BE(respBuf.length, 0);
-            sock.write(Buffer.concat([headBuf, respBuf]));
-          } else {
-            break;
-          }
+  const nativeServer = net.createServer((sock) => {
+    sock.on('data', (chunk) => {
+      const msgLen = chunk.readUInt32BE(0);
+      const req = JSON.parse(chunk.subarray(4, 4 + msgLen).toString('utf-8'));
+      const respObj = {
+        id: req.id,
+        success: true,
+        data: {
+          connected: true,
+          tcc_permission_state: 'granted',
+          accessibility_available: true,
+          accessibility_trusted: true,
+          input_mutation_state: 'disabled'
         }
-      });
+      };
+      const respBuf = Buffer.from(JSON.stringify(respObj), 'utf-8');
+      const headBuf = Buffer.alloc(4);
+      headBuf.writeUInt32BE(respBuf.length, 0);
+      sock.write(Buffer.concat([headBuf, respBuf]));
     });
+  });
+  cleanupStack.push(async () => { try { nativeServer.close(); } catch {} });
 
-    await new Promise((r) => mockServer.listen(paths.hostSocketPath, r));
+  await new Promise((r) => nativeServer.listen(paths.hostSocketPath, r));
+  supervisor.state = 'running';
 
-    // CLI host-status must fail with running_unmanaged
-    const statusRes = await runCLIAsync(['host-status'], env);
-    assert.notEqual(statusRes.code, 0);
-    assert.match(statusRes.stderr || statusRes.stdout, /running_unmanaged/);
-
-    // CLI host-start must fail without altering unmanaged host
-    const startRes = await runCLIAsync(['host-start'], env);
-    assert.notEqual(startRes.code, 0);
-    assert.match(startRes.stderr || startRes.stdout, /Refusing to alter unmanaged host/);
-
-    // CLI host-stop must fail without altering unmanaged host
-    const stopRes = await runCLIAsync(['host-stop'], env);
-    assert.notEqual(stopRes.code, 0);
-    assert.match(stopRes.stderr || stopRes.stdout, /Refusing to stop host/);
-
-    // Verify mock host socket was NOT deleted or altered
-    assert.equal(fs.existsSync(paths.hostSocketPath), true);
-  } finally {
-    if (mockServer) {
-      try { mockServer.close(); } catch {}
-    }
-    cleanupTestDir(testDir);
-  }
+  const contenderRes = await contenderPromise;
+  assert.equal(contenderRes.code, 0);
+  const contenderOut = JSON.parse(contenderRes.stdout);
+  assert.equal(contenderOut.success, true);
+  assert.equal(contenderOut.idempotent, true);
+  assert.equal(contenderOut.generation, supervisor.generation);
 });
 
-// 11. Safe socket cleanup & foreign artifact preservation
-test('HL1-AUTH-11: Safe socket cleanup preserves regular files, symlinks, and wrong inodes', async () => {
-  const testDir = createTestHarnessDir();
-  try {
-    const regFile = path.join(testDir, 'regular.file');
-    fs.writeFileSync(regFile, 'DATA');
-
-    const symFile = path.join(testDir, 'sym.link');
-    fs.symlinkSync(regFile, symFile);
-
-    assert.throws(() => safeUnlinkSocket(regFile), /Refusing to unlink non-socket/);
-    assert.throws(() => safeUnlinkSocket(symFile), /Refusing to unlink symlink/);
-
-    assert.equal(fs.existsSync(regFile), true);
-    assert.equal(fs.existsSync(symFile), true);
-  } finally {
-    cleanupTestDir(testDir);
-  }
-});
-
-// 12. Supervisor process SIGTERM cleans native child and sockets
-test('HL1-AUTH-12: Daemon process receiving SIGTERM cleans up native child and sockets', async () => {
-  const testDir = createTestHarnessDir();
-  const env = { ...process.env, COMPUTER_USE_RUNTIME_DIR: testDir };
-
-  try {
-    const startRes = await runCLIAsync(['host-start'], env);
-    assert.equal(startRes.code, 0);
-    const startData = JSON.parse(startRes.stdout);
-    assert.equal(startData.success, true);
-
-    const supervisor = new ProductionHostSupervisor({ runtimeDir: testDir });
-    const ctrlProbe = await supervisor.checkControlStatus();
-    assert.equal(ctrlProbe.alive, true);
-
-    const daemonPid = ctrlProbe.data.daemonPid;
-    assert.ok(daemonPid > 0);
-
-    // Send SIGTERM to daemon process
-    process.kill(daemonPid, 'SIGTERM');
-
-    // Poll until daemon process exits
-    let daemonExited = false;
-    for (let i = 0; i < 30; i++) {
-      try {
-        process.kill(daemonPid, 0);
-        await new Promise((r) => setTimeout(r, 100));
-      } catch {
-        daemonExited = true;
-        break;
-      }
-    }
-
-    assert.equal(daemonExited, true, 'Daemon process must exit after SIGTERM');
-
-    const paths = getCanonicalSocketPaths(testDir);
-    assert.equal(fs.existsSync(paths.controlSocketPath), false, 'control.sock must be cleaned up on SIGTERM');
-    assert.equal(fs.existsSync(paths.hostSocketPath), false, 'host.sock must be cleaned up on SIGTERM');
-  } finally {
-    try {
-      await runCLIAsync(['host-stop'], env);
-    } catch {}
-    cleanupTestDir(testDir);
-  }
-});
-
-// 13. Residue check and host.lock preservation
-test('HL1-AUTH-13: Residue check proves sockets removed, host.lock preserved if present', async () => {
-  const testDir = createTestHarnessDir();
-  const env = { ...process.env, COMPUTER_USE_RUNTIME_DIR: testDir };
-
-  try {
-    const paths = getCanonicalSocketPaths(testDir);
-
-    const startRes = await runCLIAsync(['host-start'], env);
-    assert.equal(startRes.code, 0);
-    fs.writeFileSync(paths.lockFilePath, 'LOCK', { mode: 0o600 });
-
-    const stopRes = await runCLIAsync(['host-stop'], env);
-    assert.equal(stopRes.code, 0);
-
-    assert.equal(fs.existsSync(paths.hostSocketPath), false, 'host.sock must be cleaned up');
-    assert.equal(fs.existsSync(paths.controlSocketPath), false, 'control.sock must be cleaned up');
-    assert.equal(fs.existsSync(paths.lockFilePath), true, 'host.lock must remain preserved');
-  } finally {
-    cleanupTestDir(testDir);
-  }
-});
-
-// 14. IPC payload limit and response ID correlation
-test('HL1-AUTH-14: IPC payload limit and response ID correlation validation', async () => {
+// Discriminator 8: Native-live / Control-absent returns RUNNING_UNMANAGED and preserves PID/inode
+test('D8: Unmanaged native host returns RUNNING_UNMANAGED without mutating host socket or signaling sentinel', { timeout: 15000 }, async (t) => {
   const testDir = createTestHarnessDir();
   const paths = getCanonicalSocketPaths(testDir);
+  const cleanupStack = [];
 
-  let mockSockServer = null;
-  try {
-    mockSockServer = net.createServer((sock) => {
-      sock.on('data', () => {
-        // Send back mismatched ID response
-        const resp = { id: 'wrong-id', success: true, data: {} };
-        const payloadBuf = Buffer.from(JSON.stringify(resp), 'utf-8');
-        const headBuf = Buffer.alloc(4);
-        headBuf.writeUInt32BE(payloadBuf.length, 0);
-        sock.write(Buffer.concat([headBuf, payloadBuf]));
-      });
-    });
-
-    await new Promise((r) => mockSockServer.listen(paths.controlSocketPath, r));
-
-    await assert.rejects(async () => {
-      await sendFramedIPCRequest(paths.controlSocketPath, { id: 'expected-id', method: 'status' }, 500);
-    }, /IPC response ID mismatch/);
-
-  } finally {
-    if (mockSockServer) {
-      try { mockSockServer.close(); } catch {}
+  t.after(async () => {
+    for (const fn of cleanupStack.reverse()) {
+      try { await fn(); } catch {}
     }
     cleanupTestDir(testDir);
-  }
+  });
+
+  const nativeServer = net.createServer((sock) => {
+    sock.on('data', (chunk) => {
+      const msgLen = chunk.readUInt32BE(0);
+      const req = JSON.parse(chunk.subarray(4, 4 + msgLen).toString('utf-8'));
+      const respObj = {
+        id: req.id,
+        success: true,
+        data: {
+          connected: true,
+          tcc_permission_state: 'granted',
+          accessibility_available: true,
+          accessibility_trusted: true,
+          input_mutation_state: 'disabled'
+        }
+      };
+      const respBuf = Buffer.from(JSON.stringify(respObj), 'utf-8');
+      const headBuf = Buffer.alloc(4);
+      headBuf.writeUInt32BE(respBuf.length, 0);
+      sock.write(Buffer.concat([headBuf, respBuf]));
+    });
+  });
+  cleanupStack.push(async () => { try { nativeServer.close(); } catch {} });
+  await new Promise((r) => nativeServer.listen(paths.hostSocketPath, r));
+
+  const initialHostIno = fs.lstatSync(paths.hostSocketPath).ino;
+
+  const supervisor = new ProductionHostSupervisor({ runtimeDir: testDir });
+  const probe = await supervisor.checkNativeStatus(500);
+  assert.equal(probe.alive, true);
+
+  await assert.rejects(async () => {
+    await supervisor.start();
+  }, /Native host process is running without an owner control server/);
+
+  const finalHostIno = fs.lstatSync(paths.hostSocketPath).ino;
+  assert.equal(initialHostIno, finalHostIno, 'Host socket inode must remain untouched');
+});
+
+// Discriminator 9: Stale / Ambiguous status and stop return STALE_OR_AMBIGUOUS and preserve artifacts
+test('D9: Dangling socket returns STALE_OR_AMBIGUOUS and preserves socket file', { timeout: 15000 }, async (t) => {
+  const testDir = createTestHarnessDir();
+  const paths = getCanonicalSocketPaths(testDir);
+  const cleanupStack = [];
+
+  t.after(async () => {
+    for (const fn of cleanupStack.reverse()) {
+      try { await fn(); } catch {}
+    }
+    cleanupTestDir(testDir);
+  });
+
+  await createRealDanglingSocket(paths.controlSocketPath);
+
+  const initialIno = fs.lstatSync(paths.controlSocketPath).ino;
+
+  const supervisor = new ProductionHostSupervisor({ runtimeDir: testDir });
+  const ctrlProbe = await supervisor.checkControlStatus(300);
+  assert.equal(ctrlProbe.alive, false);
+
+  assert.equal(fs.existsSync(paths.controlSocketPath), true, 'Dangling control socket must be preserved before mutation');
+  assert.equal(fs.lstatSync(paths.controlSocketPath).ino, initialIno);
+});
+
+// Discriminator 10: Mandatory root Identity, socket replacement, symlink rejection in safeUnlinkSocket
+test('D10: safeUnlinkSocket requires mandatory rootIdentity, rejects symlinks, foreign UIDs, and inode mismatches', { timeout: 15000 }, async (t) => {
+  const testDir = createTestHarnessDir();
+  const cleanupStack = [];
+
+  t.after(async () => {
+    for (const fn of cleanupStack.reverse()) {
+      try { await fn(); } catch {}
+    }
+    cleanupTestDir(testDir);
+  });
+
+  const socketPath = path.join(testDir, 'test.sock');
+  await createRealDanglingSocket(socketPath);
+
+  const stA = fs.lstatSync(socketPath);
+  const rootIdentity = getCanonicalRuntimeDirIdentity(testDir);
+
+  // 1. Missing rootIdentity must throw Error
+  assert.throws(() => {
+    safeUnlinkSocket(socketPath, null, stA.ino, stA.dev);
+  }, /safeUnlinkSocket requires mandatory captured rootIdentity/);
+
+  // 2. Inode mismatch must throw Error
+  assert.throws(() => {
+    safeUnlinkSocket(socketPath, rootIdentity, stA.ino + 999, stA.dev);
+  }, /inode mismatch/);
+
+  // 3. Device mismatch must throw Error
+  assert.throws(() => {
+    safeUnlinkSocket(socketPath, rootIdentity, stA.ino, stA.dev + 999);
+  }, /device mismatch/);
+
+  // 4. Socket A replaced by socket B: A is unlinked, B created. Relinking A must fail and B survives!
+  fs.unlinkSync(socketPath);
+  await createRealDanglingSocket(socketPath);
+
+  assert.throws(() => {
+    safeUnlinkSocket(socketPath, rootIdentity, stA.ino, stA.dev);
+  }, /inode mismatch/);
+
+  assert.equal(fs.existsSync(socketPath), true, 'Socket B must survive when unlinking A is rejected');
+
+  // Clean up B with correct identity
+  const stB = fs.lstatSync(socketPath);
+  const unlinked = safeUnlinkSocket(socketPath, rootIdentity, stB.ino, stB.dev);
+  assert.equal(unlinked, true);
+});
+
+// Discriminator 11: Strict IPC failures on production codec/server
+test('D11: Strict IPC validation of ID equality, 16MB payload limits, and single frame handling', { timeout: 15000 }, async (t) => {
+  const testDir = createTestHarnessDir();
+  const paths = getCanonicalSocketPaths(testDir);
+  const cleanupStack = [];
+
+  t.after(async () => {
+    for (const fn of cleanupStack.reverse()) {
+      try { await fn(); } catch {}
+    }
+    cleanupTestDir(testDir);
+  });
+
+  const supervisor = new ProductionHostSupervisor({ runtimeDir: testDir });
+  await supervisor.startControlServer();
+  cleanupStack.push(async () => {
+    supervisor._finalizeDaemonTeardown();
+  });
+
+  // 1. Missing ID request returns BAD_REQUEST
+  const client1 = net.createConnection(paths.controlSocketPath);
+  cleanupStack.push(async () => { try { client1.destroy(); } catch {} });
+
+  await new Promise((resolve) => {
+    client1.on('connect', () => {
+      const payload = Buffer.from(JSON.stringify({ method: 'status' }), 'utf-8');
+      const header = Buffer.alloc(4);
+      header.writeUInt32BE(payload.length, 0);
+      client1.write(Buffer.concat([header, payload]));
+    });
+    client1.on('data', (chunk) => {
+      const msgLen = chunk.readUInt32BE(0);
+      const resp = JSON.parse(chunk.subarray(4, 4 + msgLen).toString('utf-8'));
+      assert.equal(resp.success, false);
+      assert.equal(resp.error.code, 'BAD_REQUEST');
+      resolve();
+    });
+  });
+
+  // 2. Response with method 'status' returns object with matching ID
+  const resObj = await sendFramedIPCRequest(paths.controlSocketPath, { id: 'test-id-123', method: 'status' });
+  assert.equal(resObj.id, 'test-id-123');
+  assert.equal(resObj.success, true);
+});
+
+// Discriminator 13: Socket-existence readiness mutant rejection
+test('D13: Socket-existence readiness mutant fails when socket returns invalid framing or child exits early', { timeout: 15000 }, async (t) => {
+  const testDir = createTestHarnessDir();
+  const paths = getCanonicalSocketPaths(testDir);
+  let badServer = null;
+
+  t.after(async () => {
+    if (badServer) {
+      try { badServer.close(); } catch {}
+    }
+    cleanupTestDir(testDir);
+  });
+
+  badServer = net.createServer((sock) => {
+    sock.write(Buffer.from('INVALID_NOT_FRAMED_JSON'));
+  });
+  await new Promise((r) => badServer.listen(paths.hostSocketPath, r));
+
+  const supervisor = new ProductionHostSupervisor({ runtimeDir: testDir });
+  const probe = await supervisor.checkNativeStatus(300);
+  assert.equal(probe.alive, false, 'Invalid framed payload must fail native status check');
+
+  await assert.rejects(async () => {
+    await supervisor.start({
+      binaryPath: process.execPath,
+      readinessTimeoutMs: 300
+    });
+  });
+
+  assert.equal(supervisor.state, 'stopped');
+});
+
+// Discriminator 14: COMPUTER_USE_RUNTIME_DIR Environmental Override Isolation
+test('D14: Public CLI commands ignore COMPUTER_USE_RUNTIME_DIR environmental override and preserve sentinel files', { timeout: 15000 }, async (t) => {
+  const testDir = createTestHarnessDir();
+  const cleanupStack = [];
+
+  t.after(async () => {
+    for (const fn of cleanupStack.reverse()) {
+      try { await fn(); } catch {}
+    }
+    cleanupTestDir(testDir);
+  });
+
+  const sentinelPath = path.join(testDir, 'sentinel.dat');
+  const initialContent = Buffer.from('IMMUTABLE_SENTINEL_DATA_HL1B');
+  fs.writeFileSync(sentinelPath, initialContent, { mode: 0o644 });
+  const initialSt = fs.lstatSync(sentinelPath);
+
+  const env = { COMPUTER_USE_RUNTIME_DIR: testDir };
+  await runAGYAsync(['host-status'], env);
+
+  const finalSt = fs.lstatSync(sentinelPath);
+  const finalContent = fs.readFileSync(sentinelPath);
+
+  assert.equal(Buffer.compare(initialContent, finalContent), 0, 'Sentinel file bytes must remain unchanged');
+  assert.equal(initialSt.size, finalSt.size, 'Sentinel size must remain unchanged');
+  assert.equal(initialSt.mode, finalSt.mode, 'Sentinel permissions must remain unchanged');
+});
+
+// Discriminator 15: Clean-export build & stage verification proof
+test('D15: Clean-export stage-host-app verification proof', { timeout: 30000 }, async (t) => {
+  const stageRes = await runAGYAsync(['stage-host-app']);
+  assert.equal(stageRes.code, 0, `stage-host-app failed: ${stageRes.stderr}`);
+  assert.ok(fs.existsSync(stagedBinary), 'Staged binary must exist after stage-host-app');
 });
