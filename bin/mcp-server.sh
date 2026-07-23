@@ -1,6 +1,8 @@
 #!/bin/sh
 set -eu
 
+export PATH="${PATH:-}:/usr/bin:/bin"
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
@@ -27,10 +29,23 @@ if [ -n "$MISE_BIN" ]; then
   exec "$MISE_BIN" exec -- node "$SCRIPT_DIR/mcp-server.mjs" "$@"
 fi
 
-if [ "${TEST_FORCE_MISSING_MISE:-0}" != "1" ] && command -v node >/dev/null 2>&1; then
+NODE_VER=""
+PNPM_VER=""
+
+if command -v node >/dev/null 2>&1; then
+  NODE_VER="$(node -v 2>/dev/null || echo "")"
+fi
+
+if command -v pnpm >/dev/null 2>&1; then
+  PNPM_VER="$(pnpm -v 2>/dev/null || echo "")"
+fi
+
+NODE_NUM="$(echo "$NODE_VER" | sed 's/^v//')"
+
+if [ "$NODE_NUM" = "22.23.1" ] && [ "$PNPM_VER" = "10.33.0" ]; then
   cd "$REPO_ROOT"
   exec node "$SCRIPT_DIR/mcp-server.mjs" "$@"
 fi
 
-echo "[mcp-server-launcher] ERROR: Neither 'mise' CLI nor 'node' executable found on PATH or standard install paths (~/.local/bin, /opt/homebrew/bin, /usr/local/bin). Please install mise (https://mise.jdx.dev) and run 'mise install'." >&2
+echo "[mcp-server-launcher] ERROR: Unpinned or missing toolchain. Ambient Node.js (${NODE_VER:-missing}) or pnpm (${PNPM_VER:-missing}) does not match pinned versions (Node v22.23.1, pnpm 10.33.0). Please install mise (https://mise.jdx.dev) and run 'mise install'." >&2
 exit 1

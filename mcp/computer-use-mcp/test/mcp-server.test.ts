@@ -800,5 +800,31 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
 
     assert.notEqual(exitCode, 0, "Missing toolchain launcher execution must exit nonzero");
     assert.match(output, /\[mcp-server-launcher\] ERROR:/, "Missing toolchain launcher output must contain diagnostic error");
+
+    // Mismatched ambient version discriminator test
+    const tmpDir = fs.mkdtempSync(path.join(rootDir, "mcp/computer-use-mcp/test/fixtures/tmp_stub_") + Math.random().toString(36).substring(2));
+    const stubNode = path.join(tmpDir, "node");
+    fs.writeFileSync(stubNode, "#!/bin/sh\nif [ \"$1\" = \"-v\" ]; then echo 'v26.0.0'; exit 0; fi\nexit 1\n", { mode: 0o755 });
+
+    let misOutput = "";
+    let misExitCode = 0;
+    try {
+      execSync(`"${launcherAbsPath}"`, {
+        cwd: rootDir,
+        env: { PATH: `${tmpDir}:/usr/bin:/bin`, HOME: tmpDir, TEST_FORCE_MISSING_MISE: "1" },
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+    } catch (err: any) {
+      misExitCode = err.status || 1;
+      misOutput = (err.stderr || "") + "\n" + (err.stdout || "");
+    } finally {
+      try {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      } catch {}
+    }
+
+    assert.notEqual(misExitCode, 0, "Mismatched version launcher execution must exit nonzero");
+    assert.match(misOutput, /does not match pinned versions/, "Mismatched version launcher output must contain version diagnostic error");
   });
 });
