@@ -26,7 +26,7 @@ This skill teaches Google Antigravity agents (and Gemini models) how to reliably
   - `./bin/agy-computer-use host-status`: Checks if native host is `running`, `stopped`, or `stale`.
   - `./bin/agy-computer-use host-stop`: Stops the native host process cleanly, awaiting exact native child close and terminal owner receipt (`native_closed: true`).
   - *Process Authority & Security*: Host lifecycle commands communicate with the owner control server on `control.sock` (terminal owner correlation) and strictly enforce the non-override canonical runtime directory policy (`/tmp/agy-computer-use-<uid>`).
-- **ALWAYS** call `computer_use_status` to verify host connection, TCC permission state (`granted`), accessibility trust, and display topology.
+- **ALWAYS** call `computer_use_status` to verify host connection, TCC permission state (`granted`), OS input permission trust (`input_mutation_state: "enabled"` / `accessibility_trusted: true`), and display topology. Note: M9 input actions (`computer_use_click`, `computer_use_type`, `computer_use_shortcut`) are gated on Screen Recording `granted` plus `input_mutation_state: "enabled"` (OS process Accessibility trust), not optional AX-tree inspection (`ax_tree_inspection_available`).
 - Call `computer_use_observe` to capture current desktop screen state and receive a valid `capture_id` and `topology_version`.
 - Dynamic topology versions (`topology_version`) are required tokens returned from observation.
 

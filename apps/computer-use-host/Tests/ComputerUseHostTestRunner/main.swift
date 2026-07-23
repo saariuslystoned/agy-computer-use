@@ -1588,9 +1588,11 @@ public struct ComputerUseHostTestRunner {
 
         let expectedDataDict: [String: AnyCodable] = [
             "connected": .bool(true),
+            "pid": .int(Int(ProcessInfo.processInfo.processIdentifier)),
             "tcc_permission_state": .string("granted"),
             "accessibility_available": .bool(false),
-            "accessibility_trusted": .bool(false),
+            "accessibility_trusted": .bool(AXIsProcessTrusted()),
+            "ax_tree_inspection_available": .bool(false),
             "input_mutation_state": .string("disabled"),
             "topology_version": .string(fakeTopo.version),
             "primary_display_id": .int(1),
@@ -1680,7 +1682,7 @@ public struct ComputerUseHostTestRunner {
                 let resp10a = try readIPCResponse(from: rawFd)
                 assertEqual(resp10a.id, "eintr-req-10")
                 assertTrue(resp10a.success)
-                assertEqual(resp10a.data?.count, 9, "Top-level response data dictionary must contain exactly 9 keys")
+                assertEqual(resp10a.data?.count, 11, "Top-level response data dictionary must contain exactly 11 keys")
                 assertEqual(resp10a.data, expectedDataDict, "Response data dictionary must match full expected status payload exactly")
             }()
 
@@ -1717,7 +1719,7 @@ public struct ComputerUseHostTestRunner {
                 let resp10b = try readIPCResponse(from: clientFd10b)
                 assertEqual(resp10b.id, "eintr-req-10-recovery")
                 assertTrue(resp10b.success)
-                assertEqual(resp10b.data?.count, 9, "Recovery response data dictionary must contain exactly 9 keys")
+                assertEqual(resp10b.data?.count, 11, "Recovery response data dictionary must contain exactly 11 keys")
                 assertEqual(resp10b.data, expectedDataDict, "Recovery response data dictionary must match full expected status payload exactly")
             }()
 

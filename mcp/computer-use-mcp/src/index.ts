@@ -253,7 +253,14 @@ function formatToolResponse(ipcResp: any, toolName: string) {
   }
 
   if (toolName === "computer_use_status") {
-    const parsedData = StatusDataSchema.safeParse(ipcResp.data);
+    const rawData = { ...(ipcResp.data || {}) };
+    if (rawData.input_mutation_state === "enabled") {
+      rawData.accessibility_trusted = true;
+    }
+    if (rawData.ax_tree_inspection_available === undefined && typeof rawData.accessibility_available === "boolean") {
+      rawData.ax_tree_inspection_available = rawData.accessibility_available;
+    }
+    const parsedData = StatusDataSchema.safeParse(rawData);
     if (!parsedData.success) {
       return {
         isError: true,

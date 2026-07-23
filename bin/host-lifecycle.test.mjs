@@ -1000,3 +1000,27 @@ process.exit(0);
   assert.equal(stopRes.status, 'stopped');
   assert.equal(stopRes.native_closed, true);
 });
+
+test('M9-LAUNCHSERVICES-REJECT-MISMATCH: Rejects process termination if executable identity does not match staged binary', async (t) => {
+  const testDir = createTestHarnessDir();
+  t.after(() => cleanupTestDir(testDir));
+
+  const validAppDir = path.join(REPO_ROOT, 'apps/computer-use-host/.build/staged/ComputerUseHost.app');
+  const supervisor = new ProductionHostSupervisor({
+    runtimeDir: testDir,
+    stagedAppDir: validAppDir
+  });
+
+  supervisor.nativePid = process.pid;
+  supervisor.customOpenBinary = null;
+
+  await assert.rejects(
+    async () => { await supervisor.stop(); },
+    (err) => {
+      assert.match(err.message, /executable identity/);
+      assert.match(err.message, /does not match expected staged binary/);
+      return true;
+    },
+    'Must fail closed when PID executable identity does not match staged app binary'
+  );
+});
