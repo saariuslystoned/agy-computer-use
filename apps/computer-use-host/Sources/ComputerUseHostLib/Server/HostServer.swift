@@ -378,13 +378,14 @@ public actor HostServer {
 
             case "ax_tree":
                 guard axEngine.isAvailable else {
-                    throw ComputerUseError.targetUnreachable(reason: "AX tree inspection is unavailable in this build phase")
+                    throw ComputerUseError.targetUnreachable(reason: "AX tree inspection is unavailable or untrusted in this build phase")
                 }
                 let maxDepth = request.params?["max_depth"]?.rawValue as? Int ?? 10
-                let appId = request.params?["app_id"]?.rawValue as? String ?? "Finder"
-                let tree = try axEngine.inspectTree(maxDepth: maxDepth, appId: appId)
+                let appId = request.params?["app_id"]?.rawValue as? String
+                let currentTop = try topologyProvider.getTopology()
+                let treeResult = try axEngine.inspectTree(maxDepth: maxDepth, appId: appId, topologyVersion: currentTop.version)
                 let encoder = JSONEncoder()
-                let treeData = try encoder.encode(tree)
+                let treeData = try encoder.encode(treeResult)
                 let treeDict = try JSONDecoder().decode([String: AnyCodable].self, from: treeData)
                 return IPCResponse(id: request.id, success: true, data: treeDict)
 
@@ -446,6 +447,167 @@ public actor HostServer {
                     throw error
                 }
 
+            case "move":
+                guard inputEngine.isMutationEnabled else {
+                    throw ComputerUseError.mutationDisabled
+                }
+                guard let intentStr = request.params?["intent"]?.rawValue as? String,
+                      !intentStr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw ComputerUseError.ipcError(reason: "intent parameter is required and must be nonblank")
+                }
+                guard let reqTopVer = request.params?["topology_version"]?.rawValue as? String, !reqTopVer.isEmpty else {
+                    throw ComputerUseError.ipcError(reason: "topology_version parameter is required")
+                }
+                let currentTop = try topologyProvider.getTopology()
+                guard reqTopVer == currentTop.version else {
+                    throw ComputerUseError.staleTopology(current: currentTop.version, received: reqTopVer)
+                }
+                guard let reqCapId = request.params?["capture_id"]?.rawValue as? String, !reqCapId.isEmpty else {
+                    throw ComputerUseError.ipcError(reason: "capture_id parameter is required")
+                }
+                guard let activeCap = self.latestCapture,
+                      activeCap.captureId == reqCapId,
+                      activeCap.topologyVersion == reqTopVer else {
+                    throw ComputerUseError.staleCapture(current: self.latestCapture?.captureId ?? "", received: reqCapId)
+                }
+                guard let x = request.params?["x"]?.rawValue as? Int,
+                      let y = request.params?["y"]?.rawValue as? Int else {
+                    throw ComputerUseError.ipcError(reason: "x and y integer parameters are required")
+                }
+                try CoordinateMapper.validateGridCoordinates(x: x, y: y)
+
+                guard let display = currentTop.displays.first(where: { $0.id == activeCap.displayId }) else {
+                    throw ComputerUseError.targetUnreachable(reason: "Display ID \(activeCap.displayId) not found in active topology")
+                }
+
+                // ATOMIC LEASE CONSUMPTION
+                self.latestCapture = nil
+
+                do {
+                    let result = try inputEngine.performMove(gridX: x, gridY: y, captureId: reqCapId, currentCaptureId: reqCapId, display: display)
+                    return IPCResponse(id: request.id, success: true, data: [
+                        "action_id": .string(result.actionId),
+                        "status": .string(result.status),
+                        "capture_id": .string(result.captureId),
+                        "duration_ms": .double(result.durationMs)
+                    ])
+                } catch {
+                    inputEngine.releaseHeldInputs()
+                    throw error
+                }
+
+            case "scroll":
+                guard inputEngine.isMutationEnabled else {
+                    throw ComputerUseError.mutationDisabled
+                }
+                guard let intentStr = request.params?["intent"]?.rawValue as? String,
+                      !intentStr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw ComputerUseError.ipcError(reason: "intent parameter is required and must be nonblank")
+                }
+                guard let reqTopVer = request.params?["topology_version"]?.rawValue as? String, !reqTopVer.isEmpty else {
+                    throw ComputerUseError.ipcError(reason: "topology_version parameter is required")
+                }
+                let currentTop = try topologyProvider.getTopology()
+                guard reqTopVer == currentTop.version else {
+                    throw ComputerUseError.staleTopology(current: currentTop.version, received: reqTopVer)
+                }
+                guard let reqCapId = request.params?["capture_id"]?.rawValue as? String, !reqCapId.isEmpty else {
+                    throw ComputerUseError.ipcError(reason: "capture_id parameter is required")
+                }
+                guard let activeCap = self.latestCapture,
+                      activeCap.captureId == reqCapId,
+                      activeCap.topologyVersion == reqTopVer else {
+                    throw ComputerUseError.staleCapture(current: self.latestCapture?.captureId ?? "", received: reqCapId)
+                }
+                guard let x = request.params?["x"]?.rawValue as? Int,
+                      let y = request.params?["y"]?.rawValue as? Int else {
+                    throw ComputerUseError.ipcError(reason: "x and y integer parameters are required")
+                }
+                try CoordinateMapper.validateGridCoordinates(x: x, y: y)
+
+                let deltaX = request.params?["delta_x"]?.rawValue as? Int ?? 0
+                let deltaY = request.params?["delta_y"]?.rawValue as? Int ?? 0
+                guard deltaX != 0 || deltaY != 0 else {
+                    throw ComputerUseError.ipcError(reason: "At least one scroll delta (delta_x or delta_y) must be non-zero")
+                }
+
+                guard let display = currentTop.displays.first(where: { $0.id == activeCap.displayId }) else {
+                    throw ComputerUseError.targetUnreachable(reason: "Display ID \(activeCap.displayId) not found in active topology")
+                }
+
+                // ATOMIC LEASE CONSUMPTION
+                self.latestCapture = nil
+
+                do {
+                    let result = try inputEngine.performScroll(gridX: x, gridY: y, deltaX: deltaX, deltaY: deltaY, captureId: reqCapId, currentCaptureId: reqCapId, display: display)
+                    return IPCResponse(id: request.id, success: true, data: [
+                        "action_id": .string(result.actionId),
+                        "status": .string(result.status),
+                        "capture_id": .string(result.captureId),
+                        "duration_ms": .double(result.durationMs)
+                    ])
+                } catch {
+                    inputEngine.releaseHeldInputs()
+                    throw error
+                }
+
+            case "drag":
+                guard inputEngine.isMutationEnabled else {
+                    throw ComputerUseError.mutationDisabled
+                }
+                guard let intentStr = request.params?["intent"]?.rawValue as? String,
+                      !intentStr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw ComputerUseError.ipcError(reason: "intent parameter is required and must be nonblank")
+                }
+                guard let reqTopVer = request.params?["topology_version"]?.rawValue as? String, !reqTopVer.isEmpty else {
+                    throw ComputerUseError.ipcError(reason: "topology_version parameter is required")
+                }
+                let currentTop = try topologyProvider.getTopology()
+                guard reqTopVer == currentTop.version else {
+                    throw ComputerUseError.staleTopology(current: currentTop.version, received: reqTopVer)
+                }
+                guard let reqCapId = request.params?["capture_id"]?.rawValue as? String, !reqCapId.isEmpty else {
+                    throw ComputerUseError.ipcError(reason: "capture_id parameter is required")
+                }
+                guard let activeCap = self.latestCapture,
+                      activeCap.captureId == reqCapId,
+                      activeCap.topologyVersion == reqTopVer else {
+                    throw ComputerUseError.staleCapture(current: self.latestCapture?.captureId ?? "", received: reqCapId)
+                }
+                guard let startX = request.params?["start_x"]?.rawValue as? Int,
+                      let startY = request.params?["start_y"]?.rawValue as? Int,
+                      let endX = request.params?["end_x"]?.rawValue as? Int,
+                      let endY = request.params?["end_y"]?.rawValue as? Int else {
+                    throw ComputerUseError.ipcError(reason: "start_x, start_y, end_x, end_y integer parameters are required")
+                }
+                try CoordinateMapper.validateGridCoordinates(x: startX, y: startY)
+                try CoordinateMapper.validateGridCoordinates(x: endX, y: endY)
+
+                let buttonStr = request.params?["button"]?.rawValue as? String ?? "left"
+                guard let button = MouseButton(rawValue: buttonStr) else {
+                    throw ComputerUseError.ipcError(reason: "Invalid mouse button '\(buttonStr)'")
+                }
+
+                guard let display = currentTop.displays.first(where: { $0.id == activeCap.displayId }) else {
+                    throw ComputerUseError.targetUnreachable(reason: "Display ID \(activeCap.displayId) not found in active topology")
+                }
+
+                // ATOMIC LEASE CONSUMPTION
+                self.latestCapture = nil
+
+                do {
+                    let result = try inputEngine.performDrag(startX: startX, startY: startY, endX: endX, endY: endY, button: button, captureId: reqCapId, currentCaptureId: reqCapId, display: display)
+                    return IPCResponse(id: request.id, success: true, data: [
+                        "action_id": .string(result.actionId),
+                        "status": .string(result.status),
+                        "capture_id": .string(result.captureId),
+                        "duration_ms": .double(result.durationMs)
+                    ])
+                } catch {
+                    inputEngine.releaseHeldInputs()
+                    throw error
+                }
+
             case "type":
                 guard inputEngine.isMutationEnabled else {
                     throw ComputerUseError.mutationDisabled
@@ -469,8 +631,8 @@ public actor HostServer {
                       activeCap.topologyVersion == reqTopVer else {
                     throw ComputerUseError.staleCapture(current: self.latestCapture?.captureId ?? "", received: reqCapId)
                 }
-                guard let text = request.params?["text"]?.rawValue as? String, !text.isEmpty, text.count <= 1000 else {
-                    throw ComputerUseError.ipcError(reason: "text parameter is required and must be between 1 and 1000 characters")
+                guard let textPayload = request.params?["text"]?.rawValue as? String, !textPayload.isEmpty else {
+                    throw ComputerUseError.ipcError(reason: "text parameter is required and must be non-empty")
                 }
                 let pressEnter = request.params?["press_enter"]?.rawValue as? Bool ?? false
 
@@ -478,7 +640,7 @@ public actor HostServer {
                 self.latestCapture = nil
 
                 do {
-                    let result = try inputEngine.performType(text: text, pressEnter: pressEnter, captureId: reqCapId, currentCaptureId: reqCapId)
+                    let result = try inputEngine.performType(text: textPayload, pressEnter: pressEnter, captureId: reqCapId, currentCaptureId: reqCapId)
                     return IPCResponse(id: request.id, success: true, data: [
                         "action_id": .string(result.actionId),
                         "status": .string(result.status),
@@ -513,12 +675,12 @@ public actor HostServer {
                       activeCap.topologyVersion == reqTopVer else {
                     throw ComputerUseError.staleCapture(current: self.latestCapture?.captureId ?? "", received: reqCapId)
                 }
-                guard let rawKeys = request.params?["keys"]?.rawValue as? [Any] else {
-                    throw ComputerUseError.ipcError(reason: "keys parameter must be an array of strings")
+                guard let keysAny = request.params?["keys"]?.rawValue as? [Any] else {
+                    throw ComputerUseError.ipcError(reason: "keys array parameter is required")
                 }
-                let keys = rawKeys.compactMap { $0 as? String }
-                guard keys.count == rawKeys.count && !keys.isEmpty && keys.count <= 5 else {
-                    throw ComputerUseError.ipcError(reason: "keys array must contain between 1 and 5 strings")
+                let keys = keysAny.compactMap { $0 as? String }
+                guard keys.count == keysAny.count && !keys.isEmpty else {
+                    throw ComputerUseError.ipcError(reason: "keys must be an array of non-empty strings")
                 }
 
                 // ATOMIC LEASE CONSUMPTION
@@ -536,9 +698,6 @@ public actor HostServer {
                     inputEngine.releaseHeldInputs()
                     throw error
                 }
-
-            case "move", "drag", "scroll":
-                throw ComputerUseError.mutationDisabled
 
             default:
                 return IPCResponse(

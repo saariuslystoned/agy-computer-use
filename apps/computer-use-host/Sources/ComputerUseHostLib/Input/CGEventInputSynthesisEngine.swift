@@ -307,14 +307,162 @@ public final class CGEventInputSynthesisEngine: InputSynthesisEngine, @unchecked
     }
 
     public func performMove(gridX: Int, gridY: Int, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO {
-        throw ComputerUseError.mutationDisabled
+        defer { releaseHeldInputs() }
+
+        guard isMutationEnabled else {
+            throw ComputerUseError.mutationDisabled
+        }
+
+        guard captureId == currentCaptureId && !captureId.isEmpty else {
+            throw ComputerUseError.staleCapture(current: currentCaptureId, received: captureId)
+        }
+
+        let logicalPoint = try CoordinateMapper.gridToLogicalPoint(gridX: gridX, gridY: gridY, display: display)
+        let cgPoint = CGPoint(x: logicalPoint.x, y: logicalPoint.y)
+
+        let startClock = ContinuousClock().now
+
+        guard let moveEvent = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: cgPoint, mouseButton: .left) else {
+            throw ComputerUseError.ipcError(reason: "Failed to create mouse move CGEvent")
+        }
+        moveEvent.post(tap: .cghidEventTap)
+
+        let elapsed = ContinuousClock().now - startClock
+        let (sec, attosec) = elapsed.components
+        let durationMs = Double(sec) * 1000.0 + Double(attosec) / 1_000_000.0
+
+        return ActionResultDTO(
+            actionId: "act-\(UUID().uuidString.lowercased())",
+            status: "dispatched",
+            captureId: captureId,
+            durationMs: durationMs
+        )
     }
 
-    public func performDrag(startX: Int, startY: Int, endX: Int, endY: Int, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO {
-        throw ComputerUseError.mutationDisabled
+    public func performDrag(startX: Int, startY: Int, endX: Int, endY: Int, button: MouseButton = .left, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO {
+        defer { releaseHeldInputs() }
+
+        guard isMutationEnabled else {
+            throw ComputerUseError.mutationDisabled
+        }
+
+        guard captureId == currentCaptureId && !captureId.isEmpty else {
+            throw ComputerUseError.staleCapture(current: currentCaptureId, received: captureId)
+        }
+
+        let startPoint = try CoordinateMapper.gridToLogicalPoint(gridX: startX, gridY: startY, display: display)
+        let endPoint = try CoordinateMapper.gridToLogicalPoint(gridX: endX, gridY: endY, display: display)
+
+        let cgStart = CGPoint(x: startPoint.x, y: startPoint.y)
+        let cgEnd = CGPoint(x: endPoint.x, y: endPoint.y)
+        let cgButton = btnToCGButton(button)
+
+        let downType: CGEventType
+        let dragType: CGEventType
+        let upType: CGEventType
+
+        switch button {
+        case .left:
+            downType = .leftMouseDown
+            dragType = .leftMouseDragged
+            upType = .leftMouseUp
+        case .right:
+            downType = .rightMouseDown
+            dragType = .rightMouseDragged
+            upType = .rightMouseUp
+        case .middle:
+            downType = .otherMouseDown
+            dragType = .otherMouseDragged
+            upType = .otherMouseUp
+        }
+
+        let startClock = ContinuousClock().now
+
+        if let moveEvent = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: cgStart, mouseButton: cgButton) {
+            moveEvent.post(tap: .cghidEventTap)
+        }
+
+        lock.lock()
+        heldMouseButton = button
+        lock.unlock()
+
+        guard let downEvent = CGEvent(mouseEventSource: nil, mouseType: downType, mouseCursorPosition: cgStart, mouseButton: cgButton) else {
+            throw ComputerUseError.ipcError(reason: "Failed to create mouse down CGEvent for drag")
+        }
+        downEvent.post(tap: .cghidEventTap)
+
+        let steps = 5
+        for i in 1...steps {
+            let t = Double(i) / Double(steps)
+            let currentX = cgStart.x + (cgEnd.x - cgStart.x) * t
+            let currentY = cgStart.y + (cgEnd.y - cgStart.y) * t
+            let stepPoint = CGPoint(x: currentX, y: currentY)
+
+            if let dragEvent = CGEvent(mouseEventSource: nil, mouseType: dragType, mouseCursorPosition: stepPoint, mouseButton: cgButton) {
+                dragEvent.post(tap: .cghidEventTap)
+            }
+        }
+
+        guard let upEvent = CGEvent(mouseEventSource: nil, mouseType: upType, mouseCursorPosition: cgEnd, mouseButton: cgButton) else {
+            throw ComputerUseError.ipcError(reason: "Failed to create mouse up CGEvent for drag")
+        }
+        upEvent.post(tap: .cghidEventTap)
+
+        lock.lock()
+        heldMouseButton = nil
+        lock.unlock()
+
+        let elapsed = ContinuousClock().now - startClock
+        let (sec, attosec) = elapsed.components
+        let durationMs = Double(sec) * 1000.0 + Double(attosec) / 1_000_000.0
+
+        return ActionResultDTO(
+            actionId: "act-\(UUID().uuidString.lowercased())",
+            status: "dispatched",
+            captureId: captureId,
+            durationMs: durationMs
+        )
     }
 
     public func performScroll(gridX: Int, gridY: Int, deltaX: Int, deltaY: Int, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO {
-        throw ComputerUseError.mutationDisabled
+        defer { releaseHeldInputs() }
+
+        guard isMutationEnabled else {
+            throw ComputerUseError.mutationDisabled
+        }
+
+        guard captureId == currentCaptureId && !captureId.isEmpty else {
+            throw ComputerUseError.staleCapture(current: currentCaptureId, received: captureId)
+        }
+
+        guard deltaX != 0 || deltaY != 0 else {
+            throw ComputerUseError.ipcError(reason: "At least one scroll delta (deltaX or deltaY) must be non-zero")
+        }
+
+        let logicalPoint = try CoordinateMapper.gridToLogicalPoint(gridX: gridX, gridY: gridY, display: display)
+        let cgPoint = CGPoint(x: logicalPoint.x, y: logicalPoint.y)
+
+        let startClock = ContinuousClock().now
+
+        guard let moveEvent = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: cgPoint, mouseButton: .left) else {
+            throw ComputerUseError.ipcError(reason: "Failed to create mouse move CGEvent for scroll anchor")
+        }
+        moveEvent.post(tap: .cghidEventTap)
+
+        guard let scrollEvent = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: Int32(-deltaY), wheel2: Int32(-deltaX), wheel3: 0) else {
+            throw ComputerUseError.ipcError(reason: "Failed to create scroll wheel CGEvent")
+        }
+        scrollEvent.post(tap: .cghidEventTap)
+
+        let elapsed = ContinuousClock().now - startClock
+        let (sec, attosec) = elapsed.components
+        let durationMs = Double(sec) * 1000.0 + Double(attosec) / 1_000_000.0
+
+        return ActionResultDTO(
+            actionId: "act-\(UUID().uuidString.lowercased())",
+            status: "dispatched",
+            captureId: captureId,
+            durationMs: durationMs
+        )
     }
 }

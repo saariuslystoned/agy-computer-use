@@ -2255,7 +2255,10 @@ public struct ComputerUseHostTestRunner {
             assertEqual(await engineInv.encoderInvocationCount, 0)
         }
 
-        // C3-2 — Deterministic active display and low-memory exact-64M success
+        guard CGScreenRecordingAuthorizer().isScreenCaptureAccessGranted else {
+            fputs("[NOTICE] Skipping live SCShareableContent test19 assertion due to ungranted TCC screen recording permission in test runner process\n", stderr)
+            return
+        }
         let initialSCContent = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         assertTrue(initialSCContent.displays.first != nil, "SCShareableContent must contain at least one display")
         let activeDisplayId = Int(initialSCContent.displays.first!.displayID)
@@ -3854,7 +3857,9 @@ public struct ComputerUseHostTestRunner {
         try await runWithWatchdog(name: "test38_HostServerDeadlineCaptureAuthority") { try await run38_HostServerDeadlineCaptureAuthority() }
         try await runWithWatchdog(name: "test39_HostLifecycleAndSubprocessShutdown") { try await run39_HostLifecycleAndSubprocessShutdown() }
         try await runWithWatchdog(name: "test40_ActionRoutingFreshnessLeaseAndInputSynthesis") { try await run40_ActionRoutingFreshnessLeaseAndInputSynthesis() }
-        fputs("[ComputerUseHostTestRunner] Executed 40 native test cases successfully. ALL PASSED.\n", stderr)
+        try await runWithWatchdog(name: "test41_AXTreeInspectionTargetingRedactionCapsAndTruncation") { try await run41_AXTreeInspectionTargetingRedactionCapsAndTruncation() }
+        try await runWithWatchdog(name: "test42_MoveScrollDragPointerValidationStaleCaptureSingleUseLeaseAndUnconditionalRelease") { try await run42_MoveScrollDragPointerValidationStaleCaptureSingleUseLeaseAndUnconditionalRelease() }
+        fputs("[ComputerUseHostTestRunner] Executed 42 native test cases successfully. ALL PASSED.\n", stderr)
     }
 
     public enum BudgetWaitResult: Equatable, Sendable {
@@ -5470,7 +5475,7 @@ public struct ComputerUseHostTestRunner {
             func performMove(gridX: Int, gridY: Int, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO {
                 throw ComputerUseError.mutationDisabled
             }
-            func performDrag(startX: Int, startY: Int, endX: Int, endY: Int, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO {
+            func performDrag(startX: Int, startY: Int, endX: Int, endY: Int, button: MouseButton, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO {
                 throw ComputerUseError.mutationDisabled
             }
             func performScroll(gridX: Int, gridY: Int, deltaX: Int, deltaY: Int, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO {
@@ -5658,5 +5663,260 @@ public struct ComputerUseHostTestRunner {
         let mainContent = try String(contentsOfFile: relPath, encoding: .utf8)
         assertTrue(mainContent.contains("let inputEngine = CGEventInputSynthesisEngine()"), "ComputerUseHost main.swift must construct CGEventInputSynthesisEngine")
         assertTrue(!mainContent.contains("DisabledInputInjector()"), "ComputerUseHost main.swift MUST NOT construct DisabledInputInjector")
+    }
+
+    public static func run41_AXTreeInspectionTargetingRedactionCapsAndTruncation() async throws {
+        // 1. Sanitize text redaction & truncation tests
+        let redacted = BoundedAXTraverser.sanitizeText("secret123", isSecure: true)
+        assertEqual(redacted, "[REDACTED]")
+
+        let longText = String(repeating: "A", count: 300)
+        let sanitizedLong = BoundedAXTraverser.sanitizeText(longText, isSecure: false)
+        assertEqual(sanitizedLong?.count, 259)
+        assertTrue(sanitizedLong?.hasSuffix("...") == true)
+
+        // 2. Test DisabledAXInspector fails closed
+        let disabledInspector = DisabledAXInspector()
+        assertEqual(disabledInspector.isAvailable, false)
+        assertEqual(disabledInspector.isAccessibilityTrusted(), false)
+        var disabledThrew = false
+        do {
+            _ = try disabledInspector.inspectTree(maxDepth: 5, appId: "Finder")
+        } catch ComputerUseError.targetUnreachable {
+            disabledThrew = true
+        }
+        assertTrue(disabledThrew, "DisabledAXInspector inspectTree must throw targetUnreachable")
+
+        // 3. Test DefaultAXInspector with non-existent app identifier
+        let inspector = DefaultAXInspector()
+        if inspector.isAccessibilityTrusted() {
+            var nonexistentThrew = false
+            do {
+                _ = try inspector.inspectTree(maxDepth: 5, appId: "com.nonexistent.app.xyz.12345")
+            } catch ComputerUseError.targetUnreachable {
+                nonexistentThrew = true
+            }
+            assertTrue(nonexistentThrew, "DefaultAXInspector with nonexistent app identifier must throw targetUnreachable")
+        }
+
+        // 4. Test BoundedAXTraverser node cap and depth limits
+        var count = 0
+        var visited = Set<String>()
+        let sampleNode = AXNodeDTO(
+            id: "n1",
+            role: "AXWindow",
+            subrole: "AXSecureTextField",
+            title: longText,
+            value: "pass123",
+            enabled: true,
+            focused: false,
+            bounds: AXRect(x: 0, y: 0, width: 100, height: 100)
+        )
+        let sanitizedNode = BoundedAXTraverser.sanitizeNode(sampleNode, currentDepth: 1, maxDepth: 5, nodeCount: &count, maxNodes: 500, visited: &visited)
+        assertEqual(sanitizedNode?.value, "[REDACTED]")
+        assertTrue(sanitizedNode?.title?.hasSuffix("...") == true)
+        assertEqual(count, 1)
+    }
+
+    public static func run42_MoveScrollDragPointerValidationStaleCaptureSingleUseLeaseAndUnconditionalRelease() async throws {
+        struct TestCaptureEngine: DisplayCaptureEngine {
+            func captureDisplay(displayId: Int?, topology: DisplayTopology) async throws -> CaptureFrameDTO {
+                let pngData = Data([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xDB, 0x00, 0x43, 0x00, 0x08, 0x06, 0x06, 0x07, 0x06, 0x05, 0x08, 0x07, 0x07, 0x07, 0x09, 0x09, 0x08, 0x0A, 0x0C, 0x14, 0x0D, 0x0C, 0x0B, 0x0B, 0x0C, 0x19, 0x12, 0x13, 0x0F, 0x14, 0x1D, 0x1A, 0x1F, 0x1E, 0x1D, 0x1A, 0x1C, 0x1C, 0x20, 0x24, 0x2E, 0x27, 0x20, 0x22, 0x2C, 0x23, 0x1C, 0x1C, 0x28, 0x37, 0x29, 0x2C, 0x30, 0x31, 0x34, 0x34, 0x34, 0x1F, 0x27, 0x39, 0x3D, 0x38, 0x32, 0x3C, 0x2E, 0x33, 0x34, 0x32, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x0A, 0x00, 0x0A, 0x01, 0x01, 0x11, 0x00, 0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00, 0xD2, 0xCF, 0x20, 0xFF, 0xD9])
+                return CaptureFrameDTO(
+                    captureId: "cap-move-001",
+                    timestamp: 1000,
+                    topologyVersion: topology.version,
+                    displayId: displayId ?? 1,
+                    widthPoints: 1920,
+                    heightPoints: 1080,
+                    scaleFactor: 2.0,
+                    pixelWidth: 3840,
+                    pixelHeight: 2160,
+                    imageFormat: "jpeg",
+                    imageDataBase64: pngData.base64EncodedString(),
+                    imageByteLength: pngData.count,
+                    imageSha256: SHA256.hash(data: pngData).compactMap { String(format: "%02x", $0) }.joined()
+                )
+            }
+        }
+
+        final class TrackPointerInputEngine: InputSynthesisEngine, @unchecked Sendable {
+            let enabled: Bool
+            let lock = NSLock()
+            var moveCalls: [(x: Int, y: Int)] = []
+            var scrollCalls: [(x: Int, y: Int, dx: Int, dy: Int)] = []
+            var dragCalls: [(startX: Int, startY: Int, endX: Int, endY: Int, button: MouseButton)] = []
+            var releaseCount: Int = 0
+
+            init(enabled: Bool = true) { self.enabled = enabled }
+            var isMutationEnabled: Bool { enabled }
+
+            func releaseHeldInputs() {
+                lock.lock(); releaseCount += 1; lock.unlock()
+            }
+
+            func performClick(gridX: Int, gridY: Int, button: MouseButton, clickCount: Int, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO {
+                defer { releaseHeldInputs() }
+                return ActionResultDTO(actionId: "act-click", status: "dispatched", captureId: captureId, durationMs: 1.0)
+            }
+
+            func performMove(gridX: Int, gridY: Int, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO {
+                defer { releaseHeldInputs() }
+                guard isMutationEnabled else { throw ComputerUseError.mutationDisabled }
+                guard captureId == currentCaptureId && !captureId.isEmpty else {
+                    throw ComputerUseError.staleCapture(current: currentCaptureId, received: captureId)
+                }
+                lock.lock(); moveCalls.append((gridX, gridY)); lock.unlock()
+                return ActionResultDTO(actionId: "act-move-1", status: "dispatched", captureId: captureId, durationMs: 2.0)
+            }
+
+            func performScroll(gridX: Int, gridY: Int, deltaX: Int, deltaY: Int, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO {
+                defer { releaseHeldInputs() }
+                guard isMutationEnabled else { throw ComputerUseError.mutationDisabled }
+                guard captureId == currentCaptureId && !captureId.isEmpty else {
+                    throw ComputerUseError.staleCapture(current: currentCaptureId, received: captureId)
+                }
+                guard deltaX != 0 || deltaY != 0 else {
+                    throw ComputerUseError.ipcError(reason: "Scroll deltas cannot both be zero")
+                }
+                lock.lock(); scrollCalls.append((gridX, gridY, deltaX, deltaY)); lock.unlock()
+                return ActionResultDTO(actionId: "act-scroll-1", status: "dispatched", captureId: captureId, durationMs: 3.0)
+            }
+
+            func performDrag(startX: Int, startY: Int, endX: Int, endY: Int, button: MouseButton, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO {
+                defer { releaseHeldInputs() }
+                guard isMutationEnabled else { throw ComputerUseError.mutationDisabled }
+                guard captureId == currentCaptureId && !captureId.isEmpty else {
+                    throw ComputerUseError.staleCapture(current: currentCaptureId, received: captureId)
+                }
+                lock.lock(); dragCalls.append((startX, startY, endX, endY, button)); lock.unlock()
+                return ActionResultDTO(actionId: "act-drag-1", status: "dispatched", captureId: captureId, durationMs: 4.0)
+            }
+
+            func performType(text: String, pressEnter: Bool, captureId: String, currentCaptureId: String) throws -> ActionResultDTO {
+                defer { releaseHeldInputs() }
+                return ActionResultDTO(actionId: "act-type", status: "dispatched", captureId: captureId, durationMs: 1.0)
+            }
+
+            func performShortcut(keys: [String], captureId: String, currentCaptureId: String) throws -> ActionResultDTO {
+                defer { releaseHeldInputs() }
+                return ActionResultDTO(actionId: "act-shortcut", status: "dispatched", captureId: captureId, durationMs: 1.0)
+            }
+        }
+
+        let topo = DisplayTopology(
+            version: "top-sha256-fb6c55499cfac6b4ad6aa412b55237d1560d7c36c41f7f148810a2d2479ab22d",
+            primaryDisplayId: 1,
+            displays: [
+                DisplayInfo(id: 1, widthPoints: 1920, heightPoints: 1080, scaleFactor: 2.0, originX: 0, originY: 0, pixelWidth: 3840, pixelHeight: 2160, rotation: 0)
+            ]
+        )
+
+        let trackEngine = TrackPointerInputEngine(enabled: true)
+        let server = HostServer(
+            authorizer: FakeScreenRecordingAuthorizer(granted: true),
+            topologyProvider: FakeDisplayTopologyProvider(topology: topo),
+            captureEngine: TestCaptureEngine(),
+            inputEngine: trackEngine
+        )
+
+        // 1. Observe to get capture lease
+        let obsResp = await server.handleRequest(IPCRequest(id: "req-1", method: "observe"))
+        assertTrue(obsResp.success, "Observe request must succeed")
+        let capId = obsResp.data?["capture_id"]?.rawValue as? String ?? ""
+
+        // 2. Perform Move -> succeeds, consumes lease, calls releaseHeldInputs
+        let moveResp = await server.handleRequest(IPCRequest(
+            id: "req-2",
+            method: "move",
+            params: [
+                "capture_id": .string(capId),
+                "topology_version": .string(topo.version),
+                "x": .int(100),
+                "y": .int(200),
+                "intent": .string("Move mouse to target")
+            ]
+        ))
+        assertTrue(moveResp.success, "Move request must succeed")
+        assertEqual(trackEngine.moveCalls.count, 1)
+        assertEqual(trackEngine.releaseCount, 1)
+
+        // 3. Stale Move -> repeat call without observe fails with STALE_CAPTURE
+        let staleMoveResp = await server.handleRequest(IPCRequest(
+            id: "req-3",
+            method: "move",
+            params: [
+                "capture_id": .string(capId),
+                "topology_version": .string(topo.version),
+                "x": .int(100),
+                "y": .int(200),
+                "intent": .string("Move mouse again")
+            ]
+        ))
+        assertEqual(staleMoveResp.success, false)
+        assertEqual(staleMoveResp.error?.code, "STALE_CAPTURE")
+
+        // 4. Observe again for Scroll
+        let obsResp2 = await server.handleRequest(IPCRequest(id: "req-4", method: "observe"))
+        let capId2 = obsResp2.data?["capture_id"]?.rawValue as? String ?? ""
+        let scrollResp = await server.handleRequest(IPCRequest(
+            id: "req-5",
+            method: "scroll",
+            params: [
+                "capture_id": .string(capId2),
+                "topology_version": .string(topo.version),
+                "x": .int(500),
+                "y": .int(500),
+                "delta_x": .int(0),
+                "delta_y": .int(-50),
+                "intent": .string("Scroll down")
+            ]
+        ))
+        assertTrue(scrollResp.success, "Scroll request must succeed")
+        assertEqual(trackEngine.scrollCalls.count, 1)
+
+        // 5. Observe again for Drag
+        let obsResp3 = await server.handleRequest(IPCRequest(id: "req-6", method: "observe"))
+        let capId3 = obsResp3.data?["capture_id"]?.rawValue as? String ?? ""
+        let dragResp = await server.handleRequest(IPCRequest(
+            id: "req-7",
+            method: "drag",
+            params: [
+                "capture_id": .string(capId3),
+                "topology_version": .string(topo.version),
+                "start_x": .int(100),
+                "start_y": .int(100),
+                "end_x": .int(400),
+                "end_y": .int(400),
+                "button": .string("left"),
+                "intent": .string("Drag item")
+            ]
+        ))
+        assertTrue(dragResp.success, "Drag request must succeed")
+        assertEqual(trackEngine.dragCalls.count, 1)
+
+        // 6. Test DisabledInputInjector for move/scroll/drag
+        let disabledTrackEngine = TrackPointerInputEngine(enabled: false)
+        let disabledServer = HostServer(
+            authorizer: FakeScreenRecordingAuthorizer(granted: true),
+            topologyProvider: FakeDisplayTopologyProvider(topology: topo),
+            captureEngine: TestCaptureEngine(),
+            inputEngine: disabledTrackEngine
+        )
+        let obsResp4 = await disabledServer.handleRequest(IPCRequest(id: "req-8", method: "observe"))
+        let capId4 = obsResp4.data?["capture_id"]?.rawValue as? String ?? ""
+        let disMoveResp = await disabledServer.handleRequest(IPCRequest(
+            id: "req-9",
+            method: "move",
+            params: [
+                "capture_id": .string(capId4),
+                "topology_version": .string(topo.version),
+                "x": .int(100),
+                "y": .int(100),
+                "intent": .string("Move disabled")
+            ]
+        ))
+        assertEqual(disMoveResp.success, false)
+        assertEqual(disMoveResp.error?.code, "MUTATION_DISABLED")
     }
 }

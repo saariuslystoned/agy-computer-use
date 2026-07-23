@@ -32,11 +32,17 @@ public protocol InputSynthesisEngine: Sendable {
 
     func performClick(gridX: Int, gridY: Int, button: MouseButton, clickCount: Int, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO
     func performMove(gridX: Int, gridY: Int, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO
-    func performDrag(startX: Int, startY: Int, endX: Int, endY: Int, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO
+    func performDrag(startX: Int, startY: Int, endX: Int, endY: Int, button: MouseButton, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO
     func performType(text: String, pressEnter: Bool, captureId: String, currentCaptureId: String) throws -> ActionResultDTO
     func performShortcut(keys: [String], captureId: String, currentCaptureId: String) throws -> ActionResultDTO
     func performScroll(gridX: Int, gridY: Int, deltaX: Int, deltaY: Int, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO
     func releaseHeldInputs()
+}
+
+public extension InputSynthesisEngine {
+    func performDrag(startX: Int, startY: Int, endX: Int, endY: Int, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO {
+        try performDrag(startX: startX, startY: startY, endX: endX, endY: endY, button: .left, captureId: captureId, currentCaptureId: currentCaptureId, display: display)
+    }
 }
 
 public struct DisabledInputInjector: InputSynthesisEngine {
@@ -52,7 +58,7 @@ public struct DisabledInputInjector: InputSynthesisEngine {
         throw ComputerUseError.mutationDisabled
     }
 
-    public func performDrag(startX: Int, startY: Int, endX: Int, endY: Int, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO {
+    public func performDrag(startX: Int, startY: Int, endX: Int, endY: Int, button: MouseButton = .left, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO {
         throw ComputerUseError.mutationDisabled
     }
 

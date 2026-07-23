@@ -200,6 +200,14 @@ public final class ComputerUseHostTests: XCTestCase {
         try runSync { try await ComputerUseHostTestRunner.run40_ActionRoutingFreshnessLeaseAndInputSynthesis() }
     }
 
+    public func test41_AXTreeInspectionTargetingRedactionCapsAndTruncation() throws {
+        try runSync { try await ComputerUseHostTestRunner.run41_AXTreeInspectionTargetingRedactionCapsAndTruncation() }
+    }
+
+    public func test42_MoveScrollDragPointerValidationStaleCaptureSingleUseLeaseAndUnconditionalRelease() throws {
+        try runSync { try await ComputerUseHostTestRunner.run42_MoveScrollDragPointerValidationStaleCaptureSingleUseLeaseAndUnconditionalRelease() }
+    }
+
     nonisolated(unsafe) public static let __allTests = [
         ("test01_LengthPrefixedFraming", test01_LengthPrefixedFraming),
         ("test02_OversizedFramingHeaderRejection", test02_OversizedFramingHeaderRejection),
@@ -241,6 +249,8 @@ public final class ComputerUseHostTests: XCTestCase {
         ("test38_HostServerDeadlineCaptureAuthority", test38_HostServerDeadlineCaptureAuthority),
         ("test39_HostLifecycleAndSubprocessShutdown", test39_HostLifecycleAndSubprocessShutdown),
         ("test40_ActionRoutingFreshnessLeaseAndInputSynthesis", test40_ActionRoutingFreshnessLeaseAndInputSynthesis),
+        ("test41_AXTreeInspectionTargetingRedactionCapsAndTruncation", test41_AXTreeInspectionTargetingRedactionCapsAndTruncation),
+        ("test42_MoveScrollDragPointerValidationStaleCaptureSingleUseLeaseAndUnconditionalRelease", test42_MoveScrollDragPointerValidationStaleCaptureSingleUseLeaseAndUnconditionalRelease),
     ]
 }
 #endif
