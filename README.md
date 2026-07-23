@@ -13,9 +13,9 @@
 
 `agy-computer-use` defines an enterprise-grade Computer Use platform for macOS. It combines native macOS screen perception, display topology management, bounded input synthesis, and Unix domain socket IPC via a native host application and an MCP server bridge.
 
-Building on the completed **Milestone D2 observation & source-hardening foundation**, Milestone M9 implements and physically dogfoods the five-tool MCP surface (`computer_use_status`, `computer_use_observe`, `computer_use_click`, `computer_use_type`, `computer_use_shortcut`) for macOS desktop interactions.
+Building on the completed **Milestone D2 & M9 foundations**, Milestone M10 implements and physically dogfoods the nine-tool MCP surface (`computer_use_status`, `computer_use_observe`, `computer_use_ax_tree`, `computer_use_click`, `computer_use_move`, `computer_use_type`, `computer_use_shortcut`, `computer_use_scroll`, `computer_use_drag`) for macOS desktop interactions.
 
-Local ad-hoc staged-app/TCC operation is proven via `ComputerUseHost.app`. Stable team code signing, distribution, and notarization remain human-gated future work. AX-tree inspection (`ax_tree`) and unbounded input actions (`move`, `drag`, `scroll`) remain disabled and deferred.
+Local ad-hoc staged-app/TCC operation is proven via `ComputerUseHost.app`. Stable team code signing, distribution, and notarization remain human-gated future work.
 
 ### Core Architecture
 
@@ -33,9 +33,9 @@ flowchart TD
 
     subgraph Native ["Staged Background Host (ComputerUseHost)"]
         SocketServer["Unix Domain Socket Listener (0700)"]
-        AXEngine["AXUIElement Inspector (Disabled / Deferred)"]
+        AXEngine["AXUIElement Inspector (Active M10)"]
         CapEngine["Screen Capture Engine (macOS 14+ SCScreenshotManager)"]
-        InputEngine["Input Synthesis Engine (Active M9 Bounded)"]
+        InputEngine["Input Synthesis Engine (Active M10 Bounded)"]
         CoordMapper["Coordinate & Display Scaler"]
     end
 
@@ -51,19 +51,21 @@ flowchart TD
 
 ---
 
-## Tool API Specifications (Milestone M9 Active Bounded Surface)
+## Tool API Specifications (Milestone M10 Active Surface)
 
-The MCP server exposes the following active tools to Gemini 3.6 Flash / Antigravity:
+The MCP server exposes the following nine active tools to Gemini 3.6 Flash / Antigravity:
 
 | Tool Name | Required Parameters | Description |
 |---|---|---|
 | `computer_use_status` | None | Returns host connectivity, active display topology, TCC permission state, and mutation lockout state. |
 | `computer_use_observe` | `display_id?` | Captures primary or target display screenshot, returning `capture_id`, `topology_version` (`top-sha256-...`), and JPEG image payload. |
+| `computer_use_ax_tree` | `app_id?`, `max_depth?` | Inspects accessibility UI element hierarchy (AXUIElement tree) of specified running application or frontmost application. Enforces depth, node, string caps, and secure text redaction. |
 | `computer_use_click` | `x`, `y`, `intent`, `capture_id`, `topology_version`, `button?`, `click_count?` | Dispatches single mouse click at normalized (0..999) coordinates on active display topology. |
+| `computer_use_move` | `x`, `y`, `intent`, `capture_id`, `topology_version` | Dispatches single mouse movement to normalized (0..999) coordinates without clicking. |
 | `computer_use_type` | `text`, `intent`, `capture_id`, `topology_version`, `press_enter?` | Synthesizes Unicode text entry into focused window/element. |
 | `computer_use_shortcut` | `keys`, `intent`, `capture_id`, `topology_version` | Dispatches bounded keyboard shortcut sequence (e.g. `['cmd', 'tab']`). |
-
-*Note: Unbounded continuous actions (`move`, `drag`, `scroll`) and `ax_tree` remain disabled/deferred and fail closed with `MUTATION_DISABLED` or `TARGET_UNREACHABLE`.*
+| `computer_use_scroll` | `x`, `y`, `delta_y`, `intent`, `capture_id`, `topology_version`, `delta_x?` | Dispatches finite scroll wheel input at normalized coordinates. |
+| `computer_use_drag` | `start_x`, `start_y`, `end_x`, `end_y`, `intent`, `capture_id`, `topology_version`, `button?` | Dispatches same-display drag from start to end coordinates with guaranteed button release. |
 
 ---
 

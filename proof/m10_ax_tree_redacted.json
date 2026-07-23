@@ -1,0 +1,38 @@
+{
+  "app_id": "com.apple.Safari",
+  "node_count": 257,
+  "max_depth_reached": 5,
+  "tree": {
+    "role": "AXApplication",
+    "title": "Safari",
+    "children": [
+      {
+        "role": "AXWindow",
+        "title": "M10/D3 Physical Perception & Input Synthesis Fixture",
+        "bounds": {
+          "x": 465,
+          "y": 50,
+          "width": 1324,
+          "height": 941
+        },
+        "children": [
+          {
+            "role": "AXGroup",
+            "children": [
+              {
+                "role": "AXSecureTextField",
+                "value": "<REDACTED_SECURE_TEXT>",
+                "bounds": {
+                  "x": 530,
+                  "y": 250,
+                  "width": 300,
+                  "height": 35
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
