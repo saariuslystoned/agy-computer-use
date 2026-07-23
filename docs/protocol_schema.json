@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "ComputerUseIPCProtocol",
-  "description": "IPC Request and Response Schemas between MCP Server and ComputerUseHost Native App (Milestone D2)",
+  "description": "IPC request and response schemas for the D2 observation foundation and M9 bounded input slice",
   "oneOf": [
     { "$ref": "#/definitions/StatusRequest" },
     { "$ref": "#/definitions/ObserveRequest" },

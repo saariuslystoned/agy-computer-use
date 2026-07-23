@@ -150,7 +150,7 @@ export class MockHostClient implements HostClient {
         success: false,
         error: {
           code: "TARGET_UNREACHABLE",
-          message: "AX tree inspection is disabled in Milestone D2"
+          message: "AX tree inspection is unavailable in the current M9 bounded input slice"
         }
       };
     }

@@ -462,7 +462,7 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
     };
 
     const fixtureFiles = fs.readdirSync(fixturesDir).filter(f => f.endsWith(".json"));
-    assert.ok(fixtureFiles.length >= 5, "Must contain active D2 fixtures");
+    assert.ok(fixtureFiles.length >= 5, "Must contain active protocol fixtures");
 
     for (const file of fixtureFiles) {
       const mapping = FIXTURE_MAPPINGS[file];

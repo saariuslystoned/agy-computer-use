@@ -1,5 +1,11 @@
 # Milestone D2 Source Verification & Proof Packet
 
+> [!NOTE]
+> This packet remains bound to exact historical source
+> `57b0550b1d41588c99783ca7992d49e9e1a486b7`. D2 is now the completed
+> observation/source-hardening foundation; current M9 runtime behavior and
+> media are recorded in `proof/m9_physical_dogfood.md`.
+
 ## 1. Source & Branch Identity
 - **Exact Source Commit ($S$)**: `57b0550b1d41588c99783ca7992d49e9e1a486b7`
 - **Parent Base ($S^\wedge$)**: `53b1433c8c6095e54232ceb770cea36f8e84b356`

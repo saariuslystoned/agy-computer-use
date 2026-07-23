@@ -15,7 +15,7 @@
 
 Building on the completed **Milestone D2 observation & source-hardening foundation**, Milestone M9 implements and physically dogfoods the five-tool MCP surface (`computer_use_status`, `computer_use_observe`, `computer_use_click`, `computer_use_type`, `computer_use_shortcut`) for macOS desktop interactions.
 
-Local ad-hoc staged-app/TCC operation is proven via `ComputerUseHost.app`. Stable team code signing, distribution, and notarization remain un-gated / future work. AX-tree inspection (`ax_tree`) and unbounded input actions (`move`, `drag`, `scroll`) remain disabled and deferred.
+Local ad-hoc staged-app/TCC operation is proven via `ComputerUseHost.app`. Stable team code signing, distribution, and notarization remain human-gated future work. AX-tree inspection (`ax_tree`) and unbounded input actions (`move`, `drag`, `scroll`) remain disabled and deferred.
 
 ### Core Architecture
 

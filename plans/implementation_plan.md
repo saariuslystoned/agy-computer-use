@@ -78,5 +78,5 @@ Work is partitioned into dependency-ordered milestones (M0–M9 & Dogfood D1–D
   - Five-tool active MCP surface (`computer_use_status`, `computer_use_observe`, `computer_use_click`, `computer_use_type`, `computer_use_shortcut`) driven live through Google Antigravity.
   - Proven local ad-hoc staged-app/TCC operation (`ComputerUseHost.app`).
   - Authoritative visual proof packet (`proof/m9_physical_dogfood.md`) and media artifacts (`m9_proof2_before.jpg`, `m9_proof2_after.jpg`, `m9_proof2_recording.mp4`).
-  - Stable team signing, distribution, and notarization remain un-gated / future work.
+  - Stable team signing, distribution, and notarization remain human-gated future work.
   - AX-tree inspection (`ax_tree`) and unbounded input actions (`move`, `drag`, `scroll`) remain disabled/deferred.
