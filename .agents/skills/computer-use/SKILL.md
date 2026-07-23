@@ -15,8 +15,14 @@ This skill teaches Google Antigravity agents (and Gemini models) how to reliably
 ## Operational Core Principles
 
 ### 1. Status & Observation
+- **Host Lifecycle & TCC Staging Workflow**:
+  1. **Stage Once**: `./bin/agy-computer-use stage-host-app` builds and stages the canonical `ComputerUseHost.app` bundle.
+  2. **Grant TCC Authority**: Grant Screen Recording and Accessibility permissions to the exact staged app bundle.
+  3. **Restart Without Restaging**: `./bin/agy-computer-use host-stop && ./bin/agy-computer-use host-start`. Cold starts launch the already-staged app without rebuilding, replacing, or resigning it, preserving stable code-signing identity (CDHash / inode / mtime).
+  4. **Verify MCP Operations**: Call `computer_use_status` and `computer_use_observe` over MCP.
 - **Host Lifecycle Management**:
-  - `./bin/agy-computer-use host-start`: Starts the background native host process.
+  - `./bin/agy-computer-use stage-host-app`: Builds and stages the canonical `ComputerUseHost.app` bundle.
+  - `./bin/agy-computer-use host-start`: Starts the background native host process using the already-staged canonical app.
   - `./bin/agy-computer-use host-status`: Checks if native host is `running`, `stopped`, or `stale`.
   - `./bin/agy-computer-use host-stop`: Stops the native host process cleanly, awaiting exact native child close and terminal owner receipt (`native_closed: true`).
   - *Process Authority & Security*: Host lifecycle commands communicate with the owner control server on `control.sock` (terminal owner correlation) and strictly enforce the non-override canonical runtime directory policy (`/tmp/agy-computer-use-<uid>`).

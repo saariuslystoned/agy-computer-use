@@ -118,7 +118,14 @@ export async function executeHostStart(customSupervisor) {
     }
   }
 
-  // 3. In-process supervisor test path vs production CLI daemon spawn
+  // 3. Validate staged app readiness before daemon spawn or in-process supervisor start
+  try {
+    await supervisor.validateStagedHostApp();
+  } catch (err) {
+    fail(`host-start failed: ${err.message}`, 'error', 'STAGING_REQUIRED', 1);
+  }
+
+  // 4. In-process supervisor test path vs production CLI daemon spawn
   if (customSupervisor) {
     try {
       const res = await supervisor.start();

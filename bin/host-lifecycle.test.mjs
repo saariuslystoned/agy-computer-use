@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import net from 'node:net';
+import crypto from 'node:crypto';
 import { spawn, execFile, execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -796,3 +797,97 @@ test('Commit 2: Unclosed child retains authority and throws terminal failure', {
   );
   assert.equal(supervisor.child, mockChild, 'Child authority must be retained when close is not proved');
 });
+
+test('M9-STABILITY: Explicit stage creates/replaces canonical staged app, and cold start preserves bundle identity without restaging', { timeout: 45000 }, async (t) => {
+  const stagedAppDir = path.join(REPO_ROOT, 'apps/computer-use-host/.build/staged/ComputerUseHost.app');
+  const binaryPath = path.join(stagedAppDir, 'Contents/MacOS/ComputerUseHost');
+
+  // 1. Explicit stage creates/replaces canonical staged app
+  const stageRes = execSync('./bin/agy-computer-use stage-host-app', { cwd: REPO_ROOT, encoding: 'utf-8' });
+  assert.ok(stageRes.includes('Staging ComputerUseHost.app'), 'Explicit stage output must log staging');
+  assert.ok(fs.existsSync(stagedAppDir), 'Canonical staged app directory must exist after stage');
+  assert.ok(fs.existsSync(binaryPath), 'Canonical staged binary must exist after stage');
+
+  const initialAppStat = fs.statSync(stagedAppDir);
+  const initialBinaryStat = fs.statSync(binaryPath);
+  const initialBinaryHash = crypto.createHash('sha256').update(fs.readFileSync(binaryPath)).digest('hex');
+
+  // 2. Cold start -> stop -> cold start preserves staged bundle identity (inode, hash, mtime)
+  const stopRes1 = await runAGYAsync(['host-stop']);
+  assert.equal(stopRes1.code, 0);
+
+  const startRes1 = await runAGYAsync(['host-start']);
+  assert.equal(startRes1.code, 0);
+
+  const midAppStat = fs.statSync(stagedAppDir);
+  const midBinaryStat = fs.statSync(binaryPath);
+  const midBinaryHash = crypto.createHash('sha256').update(fs.readFileSync(binaryPath)).digest('hex');
+
+  assert.equal(initialAppStat.ino, midAppStat.ino, 'App directory inode must remain unchanged after cold start');
+  assert.equal(initialBinaryStat.ino, midBinaryStat.ino, 'Executable binary inode must remain unchanged after cold start');
+  assert.equal(initialBinaryHash, midBinaryHash, 'Executable binary sha256 must remain unchanged after cold start');
+  assert.equal(initialBinaryStat.mtimeMs, midBinaryStat.mtimeMs, 'Executable binary mtime must remain unchanged after cold start');
+
+  const stopRes2 = await runAGYAsync(['host-stop']);
+  assert.equal(stopRes2.code, 0);
+
+  const startRes2 = await runAGYAsync(['host-start']);
+  assert.equal(startRes2.code, 0);
+
+  const finalAppStat = fs.statSync(stagedAppDir);
+  const finalBinaryStat = fs.statSync(binaryPath);
+  const finalBinaryHash = crypto.createHash('sha256').update(fs.readFileSync(binaryPath)).digest('hex');
+
+  assert.equal(initialAppStat.ino, finalAppStat.ino, 'App directory inode must remain unchanged across second cold start');
+  assert.equal(initialBinaryStat.ino, finalBinaryStat.ino, 'Executable binary inode must remain unchanged across second cold start');
+  assert.equal(initialBinaryHash, finalBinaryHash, 'Executable binary sha256 must remain unchanged across second cold start');
+  assert.equal(initialBinaryStat.mtimeMs, finalBinaryStat.mtimeMs, 'Executable binary mtime must remain unchanged across second cold start');
+
+  await runAGYAsync(['host-stop']);
+});
+
+test('M9-STABILITY: Missing or invalid staged app fails closed before daemon launch with actionable diagnostic and no residue', { timeout: 15000 }, async (t) => {
+  const testDir = createTestHarnessDir();
+  const paths = getCanonicalSocketPaths(testDir);
+  t.after(() => cleanupTestDir(testDir));
+
+  // 1. Missing staged app
+  const missingAppDir = path.join(testDir, 'Nonexistent.app');
+  const supervisorMissing = new ProductionHostSupervisor({
+    runtimeDir: testDir,
+    stagedAppDir: missingAppDir
+  });
+
+  await assert.rejects(
+    supervisorMissing.start(),
+    /Staged host application is absent.*stage-host-app/i,
+    'Start with missing staged app must reject with actionable diagnostic directing to stage-host-app'
+  );
+
+  assert.equal(fs.existsSync(paths.controlSocketPath), false, 'No control socket residue after missing app start failure');
+  assert.equal(fs.existsSync(paths.hostSocketPath), false, 'No host socket residue after missing app start failure');
+  assert.equal(supervisorMissing.controlServer, null, 'Control server must be null');
+
+  // 2. Invalid/unsigned staged app
+  const invalidAppDir = path.join(testDir, 'InvalidHost.app');
+  const contentsMac = path.join(invalidAppDir, 'Contents/MacOS');
+  fs.mkdirSync(contentsMac, { recursive: true });
+  fs.writeFileSync(path.join(invalidAppDir, 'Contents/Info.plist'), 'invalid plist data');
+  fs.writeFileSync(path.join(contentsMac, 'ComputerUseHost'), '#!/bin/sh\nexit 0', { mode: 0o755 });
+
+  const supervisorInvalid = new ProductionHostSupervisor({
+    runtimeDir: testDir,
+    stagedAppDir: invalidAppDir
+  });
+
+  await assert.rejects(
+    supervisorInvalid.start(),
+    /stage-host-app/i,
+    'Start with invalid staged app must reject with actionable diagnostic directing to stage-host-app'
+  );
+
+  assert.equal(fs.existsSync(paths.controlSocketPath), false, 'No control socket residue after invalid app start failure');
+  assert.equal(fs.existsSync(paths.hostSocketPath), false, 'No host socket residue after invalid app start failure');
+  assert.equal(supervisorInvalid.controlServer, null, 'Control server must be null');
+});
+

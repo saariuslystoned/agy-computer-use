@@ -5,7 +5,7 @@ import net from 'node:net';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { stageHostApp } from './host-app.mjs';
+import { stageHostApp, classifyPrincipal } from './host-app.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -295,6 +295,8 @@ export class ProductionHostSupervisor {
     this.cleanupPromise = null;
     this.stoppingFromSignal = false;
     this.killEscalated = false;
+    this.stagedAppDir = options.stagedAppDir || null;
+    this.binaryPath = options.binaryPath || null;
     this.state = 'stopped';
   }
 
@@ -661,6 +663,32 @@ export class ProductionHostSupervisor {
     };
   }
 
+  async validateStagedHostApp(stagedAppDir = null, binaryPath = null) {
+    const targetAppDir = stagedAppDir || this.stagedAppDir || (binaryPath || this.binaryPath ? null : path.join(REPO_ROOT, 'apps/computer-use-host/.build/staged/ComputerUseHost.app'));
+    const targetBinaryPath = binaryPath || this.binaryPath || (targetAppDir ? path.join(targetAppDir, 'Contents/MacOS/ComputerUseHost') : null);
+
+    if (!targetAppDir && targetBinaryPath) {
+      if (!fs.existsSync(targetBinaryPath)) {
+        throw new Error(`Staged binary does not exist at ${targetBinaryPath}. Please stage the host application first using './bin/agy-computer-use stage-host-app'.`);
+      }
+      return;
+    }
+
+    if (!targetAppDir || !fs.existsSync(targetAppDir)) {
+      throw new Error(`Staged host application is absent at ${targetAppDir || 'unknown path'}. Please stage the host application first using './bin/agy-computer-use stage-host-app'.`);
+    }
+
+    const infoPlist = path.join(targetAppDir, 'Contents/Info.plist');
+    if (!fs.existsSync(targetBinaryPath) || !fs.existsSync(infoPlist)) {
+      throw new Error(`Staged host application at ${targetAppDir} is missing executable binary or Info.plist. Please stage the host application first using './bin/agy-computer-use stage-host-app'.`);
+    }
+
+    const principal = await classifyPrincipal(targetAppDir);
+    if (principal.classification === 'unsigned_or_invalid') {
+      throw new Error(`Staged host application at ${targetAppDir} is invalid or unsigned (${principal.details || 'codesign failed'}). Please stage the host application first using './bin/agy-computer-use stage-host-app'.`);
+    }
+  }
+
   async start(options = {}) {
     if (this.state === 'running' && this.child) {
       const native = await this.checkNativeStatus(500);
@@ -677,6 +705,11 @@ export class ProductionHostSupervisor {
         };
       }
     }
+
+    const stagedAppDir = options.stagedAppDir || this.stagedAppDir || (options.binaryPath || this.binaryPath ? null : path.join(REPO_ROOT, 'apps/computer-use-host/.build/staged/ComputerUseHost.app'));
+    const binaryPath = options.binaryPath || this.binaryPath || (stagedAppDir ? path.join(stagedAppDir, 'Contents/MacOS/ComputerUseHost') : null);
+
+    await this.validateStagedHostApp(stagedAppDir, binaryPath);
 
     await this.startControlServer();
     this.state = 'starting';
@@ -696,18 +729,6 @@ export class ProductionHostSupervisor {
     process.once('SIGHUP', this.signalCleanup);
 
     try {
-      const stageOpts = options.build !== undefined ? { build: options.build } : {};
-      let binaryPath = options.binaryPath;
-
-      if (!binaryPath) {
-        const stagedResult = await stageHostApp(stageOpts);
-        binaryPath = stagedResult.binaryPath;
-      }
-
-      if (!fs.existsSync(binaryPath)) {
-        throw new Error(`Staged binary does not exist at ${binaryPath}`);
-      }
-
       let childClosed = false;
       this.childClosedPromise = new Promise((resolve) => {
         this.childClosedResolver = resolve;
