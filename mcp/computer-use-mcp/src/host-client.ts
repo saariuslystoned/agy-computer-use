@@ -50,6 +50,7 @@ export class MockHostClient implements HostClient {
           tcc_permission_state: this.tccState,
           accessibility_available: this.axAvailable,
           accessibility_trusted: this.axTrusted,
+          ax_tree_inspection_available: this.axAvailable,
           input_mutation_state: this.inputMutationState,
           topology_version: topVer,
           primary_display_id: this.mockDisplayId,

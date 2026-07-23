@@ -3,13 +3,26 @@ import path from 'node:path';
 import os from 'node:os';
 import net from 'node:net';
 import crypto from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { classifyPrincipal } from './host-app.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const REPO_ROOT = path.resolve(__dirname, '..');
+
+export function findStagedNativePid(stagedAppDir) {
+  if (!stagedAppDir) return null;
+  try {
+    const targetBinary = path.join(stagedAppDir, 'Contents/MacOS/ComputerUseHost');
+    const out = execFileSync('/usr/bin/pgrep', ['-f', targetBinary], { encoding: 'utf8' });
+    const pids = out.trim().split('\n').map((p) => parseInt(p.trim(), 10)).filter((p) => !isNaN(p) && p > 0);
+    if (pids.length > 0) {
+      return pids[pids.length - 1];
+    }
+  } catch {}
+  return null;
+}
 
 export function getCanonicalRuntimeDir(customDir = null, isMutation = false) {
   const uid = process.getuid ? process.getuid() : 501;
@@ -269,6 +282,7 @@ export function validateStatusResponseSchema(res) {
   if (typeof d.accessibility_available !== 'boolean') return false;
   if (typeof d.accessibility_trusted !== 'boolean') return false;
   if (typeof d.input_mutation_state !== 'string') return false;
+  if (d.pid !== undefined && typeof d.pid !== 'number') return false;
   return true;
 }
 
@@ -297,6 +311,7 @@ export class ProductionHostSupervisor {
     this.killEscalated = false;
     this.stagedAppDir = options.stagedAppDir || null;
     this.binaryPath = options.binaryPath || null;
+    this.nativePid = null;
     this.state = 'stopped';
   }
 
@@ -632,6 +647,7 @@ export class ProductionHostSupervisor {
 
     if (method === 'status') {
       const native = await this.checkNativeStatus(1000);
+      const effectiveNativePid = (native.data && typeof native.data.pid === 'number') ? native.data.pid : (this.nativePid || (this.child?.pid || null));
       return {
         id: reqId,
         success: true,
@@ -639,8 +655,8 @@ export class ProductionHostSupervisor {
           status: this.state,
           generation: this.generation,
           daemonPid: process.pid,
-          pid: this.child?.pid || null,
-          nativePid: this.child?.pid || null,
+          pid: effectiveNativePid,
+          nativePid: effectiveNativePid,
           native: native.data || null,
           killEscalated: this.killEscalated
         }
@@ -693,13 +709,14 @@ export class ProductionHostSupervisor {
     if (this.state === 'running' && this.child) {
       const native = await this.checkNativeStatus(500);
       if (native.alive) {
+        const effectiveNativePid = (native.data && typeof native.data.pid === 'number') ? native.data.pid : (this.nativePid || (this.child.pid || null));
         return {
           status: 'running',
           idempotent: true,
           generation: this.generation,
           daemonPid: process.pid,
-          pid: this.child.pid,
-          nativePid: this.child.pid,
+          pid: effectiveNativePid,
+          nativePid: effectiveNativePid,
           socketPath: this.hostSocketPath,
           tcc_permission_state: native.data.tcc_permission_state
         };
@@ -735,12 +752,29 @@ export class ProductionHostSupervisor {
       });
 
       const childEnv = { ...process.env, COMPUTER_USE_SOCKET_PATH: this.hostSocketPath, AGY_SOCKET_PATH: this.hostSocketPath };
-      const binaryArgs = options.binaryArgs || [];
-      const proc = spawn(binaryPath, binaryArgs, {
-        cwd: REPO_ROOT,
-        env: childEnv,
-        stdio: ['ignore', 'pipe', 'pipe']
-      });
+      let proc;
+
+      if (stagedAppDir) {
+        const openBin = options.openBinary || '/usr/bin/open';
+        const openArgs = [
+          '-n', '-g', '-W',
+          stagedAppDir,
+          '--env', `COMPUTER_USE_SOCKET_PATH=${this.hostSocketPath}`,
+          '--env', `AGY_SOCKET_PATH=${this.hostSocketPath}`
+        ];
+        proc = spawn(openBin, openArgs, {
+          cwd: REPO_ROOT,
+          env: childEnv,
+          stdio: ['ignore', 'pipe', 'pipe']
+        });
+      } else {
+        const binaryArgs = options.binaryArgs || [];
+        proc = spawn(binaryPath, binaryArgs, {
+          cwd: REPO_ROOT,
+          env: childEnv,
+          stdio: ['ignore', 'pipe', 'pipe']
+        });
+      }
 
       this.child = proc;
 
@@ -748,12 +782,14 @@ export class ProductionHostSupervisor {
       if (proc.stderr) proc.stderr.resume();
 
       proc.on('close', (code, signal) => {
-        childClosed = true;
-        if (this.childClosedResolver) {
-          this.childClosedResolver({ code, signal });
-        }
-        if (this.state === 'running' && !this.cleanupPromise) {
-          this.stop().then(() => this.finalizeDaemonTeardown()).catch(() => this.finalizeDaemonTeardown());
+        if (!stagedAppDir) {
+          childClosed = true;
+          if (this.childClosedResolver) {
+            this.childClosedResolver({ code, signal });
+          }
+          if (this.state === 'running' && !this.cleanupPromise) {
+            this.stop().then(() => this.finalizeDaemonTeardown()).catch(() => this.finalizeDaemonTeardown());
+          }
         }
       });
 
@@ -761,24 +797,42 @@ export class ProductionHostSupervisor {
         // Record error without replacing close as authority
       });
 
-      const readinessTimeoutMs = options.readinessTimeoutMs || 5000;
+      const readinessTimeoutMs = options.readinessTimeoutMs || 10000;
       const startTime = Date.now();
       let ready = false;
       let lastNativeData = null;
+      let discoveredNativePid = null;
 
       while (Date.now() - startTime < readinessTimeoutMs) {
-        if (childClosed) break;
+        if (!stagedAppDir && childClosed) break;
         const probe = await this.checkNativeStatus(500);
-        if (probe.alive) {
+        if (probe.alive && probe.data) {
           ready = true;
           lastNativeData = probe.data;
+          if (typeof probe.data.pid === 'number' && probe.data.pid > 0) {
+            discoveredNativePid = probe.data.pid;
+          }
           break;
         }
         await new Promise((r) => setTimeout(r, 100));
       }
 
-      if (!ready || childClosed) {
-        throw new Error(childClosed ? 'Host child process exited during startup' : `Readiness check timed out after ${readinessTimeoutMs}ms`);
+      if (!ready || (!stagedAppDir && childClosed)) {
+        throw new Error((!stagedAppDir && childClosed) ? 'Host child process exited during startup' : `Readiness check timed out after ${readinessTimeoutMs}ms`);
+      }
+
+      this.nativePid = discoveredNativePid || (stagedAppDir ? findStagedNativePid(stagedAppDir) : proc.pid);
+
+      if (stagedAppDir && (!this.nativePid || this.nativePid <= 0)) {
+        throw new Error('Host process passed status probe but failed to return a valid native PID');
+      }
+
+      if (this.nativePid) {
+        let isAlive = true;
+        try { process.kill(this.nativePid, 0); } catch { isAlive = false; }
+        if (!isAlive) {
+          throw new Error(`Native host process ${this.nativePid} reported in status probe is not alive`);
+        }
       }
 
       const hostSt = fs.lstatSync(this.hostSocketPath);
@@ -791,8 +845,8 @@ export class ProductionHostSupervisor {
         idempotent: false,
         generation: this.generation,
         daemonPid: process.pid,
-        pid: proc.pid,
-        nativePid: proc.pid,
+        pid: this.nativePid,
+        nativePid: this.nativePid,
         socketPath: this.hostSocketPath,
         tcc_permission_state: lastNativeData.tcc_permission_state
       };
@@ -815,60 +869,58 @@ export class ProductionHostSupervisor {
     this.removeSignalListeners();
     this.state = 'stopping';
 
-    const nativePid = this.child?.pid || null;
+    const targetNativePid = this.nativePid || (this.child?.pid || null);
     let nativeClosed = false;
     let killEscalated = false;
 
-    if (this.child) {
-      const proc = this.child;
+    if (targetNativePid) {
+      let nativeAlive = true;
+      try { process.kill(targetNativePid, 0); } catch { nativeAlive = false; }
 
-      let childPromise = this.childClosedPromise;
-      if (!childPromise) {
-        childPromise = new Promise((resolve) => {
-          proc.on('close', (code, signal) => resolve({ code, signal }));
-        });
-      }
+      if (nativeAlive) {
+        try { process.kill(targetNativePid, 'SIGTERM'); } catch {}
 
-      let graceTimer = null;
-      const timeoutPromise = new Promise((r) => {
-        graceTimer = setTimeout(() => r('timed_out'), Math.min(stopTimeoutMs, 2000));
-      });
-
-      try {
-        proc.kill('SIGTERM');
-      } catch {}
-
-      const res = await Promise.race([childPromise, timeoutPromise]);
-      if (graceTimer) clearTimeout(graceTimer);
-
-      if (res === 'timed_out') {
-        killEscalated = true;
-        this.killEscalated = true;
-        try {
-          proc.kill('SIGKILL');
-        } catch {}
-
-        let killTimer = null;
-        const killTimeoutPromise = new Promise((r) => {
-          killTimer = setTimeout(() => r('kill_timed_out'), 100);
-        });
-        const killRes = await Promise.race([childPromise, killTimeoutPromise]);
-        if (killTimer) clearTimeout(killTimer);
-        if (killRes === 'kill_timed_out') {
-          nativeClosed = false;
-        } else {
-          nativeClosed = true;
+        const termWaitBegin = Date.now();
+        const graceTimeout = Math.min(stopTimeoutMs, 2000);
+        while (Date.now() - termWaitBegin < graceTimeout) {
+          try { process.kill(targetNativePid, 0); } catch { nativeAlive = false; break; }
+          await new Promise((r) => setTimeout(r, 40));
         }
-      } else {
-        nativeClosed = true;
+
+        if (nativeAlive) {
+          killEscalated = true;
+          this.killEscalated = true;
+          try { process.kill(targetNativePid, 'SIGKILL'); } catch {}
+
+          const killWaitBegin = Date.now();
+          while (Date.now() - killWaitBegin < 500) {
+            try { process.kill(targetNativePid, 0); } catch { nativeAlive = false; break; }
+            await new Promise((r) => setTimeout(r, 20));
+          }
+        }
       }
-      if (!nativeClosed) {
-        this.cleanupPromise = null;
-        throw new Error('Native child process failed to close after bounded TERM/KILL waits');
-      }
-      this.child = null;
+      nativeClosed = !nativeAlive;
     } else {
       nativeClosed = true;
+    }
+
+    if (this.child) {
+      try { this.child.kill('SIGTERM'); } catch {}
+      if (this.childClosedPromise) {
+        await Promise.race([
+          this.childClosedPromise,
+          new Promise((r) => setTimeout(r, 200))
+        ]);
+      }
+      try { this.child.kill('SIGKILL'); } catch {}
+      this.child = null;
+    }
+
+    this.nativePid = null;
+
+    if (!nativeClosed) {
+      this.cleanupPromise = null;
+      throw new Error('Native child process failed to close after bounded TERM/KILL waits');
     }
 
     let hostSocketClean = true;
@@ -910,7 +962,7 @@ export class ProductionHostSupervisor {
       status: 'stopped',
       generation: this.generation,
       daemonPid: process.pid,
-      nativePid: nativePid,
+      nativePid: targetNativePid,
       native_closed: nativeClosed,
       killEscalated: killEscalated || this.killEscalated || false,
       residueState: {

@@ -827,4 +827,32 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
     assert.notEqual(misExitCode, 0, "Mismatched version launcher execution must exit nonzero");
     assert.match(misOutput, /does not match pinned versions/, "Mismatched version launcher output must contain version diagnostic error");
   });
+
+  test("M9-ACCESSIBILITY-TRUTH: Trusted CGEvent input works when AX tree inspection is unavailable (accessibility_trusted=true, ax_tree_inspection_available=false)", async () => {
+    const mockHost = new MockHostClient();
+    mockHost.tccState = "granted";
+    mockHost.axTrusted = true;
+    mockHost.axAvailable = false;
+    mockHost.inputMutationState = "enabled";
+
+    const server = createComputerUseServer(mockHost);
+    const client = new Client({ name: "test-client", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport)
+    ]);
+
+    const statusCall = await client.callTool({ name: "computer_use_status", arguments: {} });
+    assert.equal((statusCall as any).isError, undefined);
+    const statusData = JSON.parse(((statusCall.content as any[])[0] as any).text);
+    assert.equal(statusData.accessibility_trusted, true, "accessibility_trusted must be true when process has OS trust");
+    assert.equal(statusData.accessibility_available, false, "accessibility_available reflects axEngine availability");
+    assert.equal(statusData.ax_tree_inspection_available, false, "ax_tree_inspection_available reflects axEngine availability");
+    assert.equal(statusData.input_mutation_state, "enabled", "input_mutation_state must be enabled");
+
+    await client.close();
+    await server.close();
+  });
 });

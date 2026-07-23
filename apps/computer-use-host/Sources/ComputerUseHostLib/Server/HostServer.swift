@@ -1,4 +1,5 @@
 import Foundation
+import ApplicationServices
 
 public typealias BudgetCountObserver = @Sendable (Int) -> Void
 
@@ -244,6 +245,7 @@ public actor HostServer {
                 let currentTopology = try topologyProvider.getTopology()
                 self.activeTopology = currentTopology
                 let isGranted = authorizer.isScreenCaptureAccessGranted
+                let osAxTrusted = AXIsProcessTrusted()
 
                 let topologyDict: [String: AnyCodable] = [
                     "version": .string(currentTopology.version),
@@ -268,9 +270,11 @@ public actor HostServer {
                     success: true,
                     data: [
                         "connected": .bool(isConnected),
+                        "pid": .int(Int(ProcessInfo.processInfo.processIdentifier)),
                         "tcc_permission_state": .string(isGranted ? "granted" : "denied"),
                         "accessibility_available": .bool(axEngine.isAvailable),
-                        "accessibility_trusted": .bool(axEngine.isAvailable && axEngine.isAccessibilityTrusted()),
+                        "accessibility_trusted": .bool(osAxTrusted),
+                        "ax_tree_inspection_available": .bool(axEngine.isAvailable),
                         "input_mutation_state": .string(inputEngine.isMutationEnabled ? "enabled" : "disabled"),
                         "topology_version": .string(currentTopology.version),
                         "primary_display_id": .int(currentTopology.primaryDisplayId),

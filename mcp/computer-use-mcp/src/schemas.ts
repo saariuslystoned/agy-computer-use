@@ -87,6 +87,7 @@ export const StatusDataSchema = z.object({
   tcc_permission_state: z.enum(["granted", "denied"]),
   accessibility_available: z.boolean(),
   accessibility_trusted: z.boolean(),
+  ax_tree_inspection_available: z.boolean().optional(),
   input_mutation_state: z.enum(["enabled", "disabled"]),
   topology_version: TopologyVersionSchema,
   primary_display_id: z.number().int().positive().finite(),

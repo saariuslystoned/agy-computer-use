@@ -890,3 +890,86 @@ test('M9-STABILITY: Missing or invalid staged app fails closed before daemon lau
   assert.equal(fs.existsSync(paths.hostSocketPath), false, 'No host socket residue after invalid app start failure');
   assert.equal(supervisorInvalid.controlServer, null, 'Control server must be null');
 });
+
+test('M9-LAUNCHSERVICES: Staged app launch uses LaunchServices open with exact flags and extracts nativePid', async (t) => {
+  const testDir = createTestHarnessDir();
+  const paths = getCanonicalSocketPaths(testDir);
+  t.after(() => cleanupTestDir(testDir));
+
+  const validAppDir = path.join(REPO_ROOT, 'apps/computer-use-host/.build/staged/ComputerUseHost.app');
+  const openLogFile = path.join(testDir, 'open-args.json');
+  const mockOpenBin = path.join(testDir, 'mock-open.js');
+  const scriptContent = `#!/usr/bin/env node
+import fs from 'node:fs';
+import net from 'node:net';
+
+const args = process.argv.slice(2);
+fs.writeFileSync(${JSON.stringify(openLogFile)}, JSON.stringify(args));
+
+let socketPath = null;
+for (let i = 0; i < args.length; i++) {
+  if (args[i] === '--env' && args[i+1] && args[i+1].startsWith('COMPUTER_USE_SOCKET_PATH=')) {
+    socketPath = args[i+1].split('=')[1];
+  }
+}
+
+if (socketPath) {
+  const server = net.createServer((socket) => {
+    let rxBuf = Buffer.alloc(0);
+    socket.on('data', (chunk) => {
+      rxBuf = Buffer.concat([rxBuf, chunk]);
+      if (rxBuf.length >= 4) {
+        const len = rxBuf.readUInt32BE(0);
+        if (rxBuf.length >= 4 + len) {
+          const req = JSON.parse(rxBuf.subarray(4, 4 + len).toString());
+          const resp = {
+            id: req.id,
+            success: true,
+            data: {
+              connected: true,
+              pid: process.pid,
+              tcc_permission_state: 'granted',
+              accessibility_available: true,
+              accessibility_trusted: true,
+              input_mutation_state: 'enabled'
+            }
+          };
+          const payload = Buffer.from(JSON.stringify(resp));
+          const head = Buffer.alloc(4);
+          head.writeUInt32BE(payload.length, 0);
+          socket.write(Buffer.concat([head, payload]));
+        }
+      }
+    });
+  });
+  server.listen(socketPath);
+  process.on('SIGTERM', () => { server.close(); process.exit(0); });
+  process.on('SIGINT', () => { server.close(); process.exit(0); });
+  setTimeout(() => {}, 10000);
+}
+`;
+  fs.writeFileSync(mockOpenBin, scriptContent, { mode: 0o755 });
+
+  const supervisor = new ProductionHostSupervisor({
+    runtimeDir: testDir,
+    stagedAppDir: validAppDir
+  });
+
+  const startRes = await supervisor.start({
+    openBinary: mockOpenBin
+  });
+
+  assert.equal(startRes.status, 'running');
+  assert.ok(typeof startRes.nativePid === 'number' && startRes.nativePid > 0, 'start result must include positive nativePid');
+
+  const loggedArgs = JSON.parse(fs.readFileSync(openLogFile, 'utf8'));
+  assert.equal(loggedArgs[0], '-n', 'Must use LaunchServices -n flag');
+  assert.equal(loggedArgs[1], '-g', 'Must use LaunchServices -g flag');
+  assert.equal(loggedArgs[2], '-W', 'Must use LaunchServices -W flag');
+  assert.equal(loggedArgs[3], validAppDir, 'Must target staged app bundle');
+  assert.ok(loggedArgs.includes('--env'), 'Must pass --env flags');
+
+  const stopRes = await supervisor.stop();
+  assert.equal(stopRes.status, 'stopped');
+  assert.equal(stopRes.native_closed, true);
+});

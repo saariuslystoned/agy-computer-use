@@ -152,7 +152,7 @@ export async function executeHostStart(customSupervisor) {
   daemon.on('error', (err) => { daemonError = err; daemonClosed = true; });
 
   // 4. Handshake loop: poll control + native readiness
-  const timeoutMs = 7000;
+  const timeoutMs = 12000;
   const startTime = Date.now();
   let ctrlReady = false;
   let nativeData = null;
