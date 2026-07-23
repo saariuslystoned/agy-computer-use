@@ -1,4 +1,3 @@
-process.env.AGY_TEST_SUITE = '1';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -6,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import net from 'node:net';
 import crypto from 'node:crypto';
-import { spawn, execFile, execSync } from 'node:child_process';
+import { spawn, execFile, execFileSync, execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -892,10 +891,9 @@ test('M9-STABILITY: Missing or invalid staged app fails closed before daemon lau
   assert.equal(supervisorInvalid.controlServer, null, 'Control server must be null');
 });
 
-test('M9-LAUNCHSERVICES: Staged app launch uses LaunchServices open with exact flags and extracts nativePid', async (t) => {
+test('M9-LAUNCHSERVICES: Staged app launch uses LaunchServices open with exact flags and extracts nativePid', { timeout: 15000 }, async (t) => {
   const testDir = createTestHarnessDir();
   const paths = getCanonicalSocketPaths(testDir);
-  t.after(() => cleanupTestDir(testDir));
 
   const validAppDir = path.join(REPO_ROOT, 'apps/computer-use-host/.build/staged/ComputerUseHost.app');
   const openLogFile = path.join(testDir, 'open-args.json');
@@ -906,15 +904,42 @@ test('M9-LAUNCHSERVICES: Staged app launch uses LaunchServices open with exact f
 
   const stagedBinaryPath = path.resolve(path.join(validAppDir, 'Contents/MacOS/ComputerUseHost'));
 
-  t.after(() => {
+  let supervisor = null;
+  let spawnedChildPid = null;
+  const expectedMockCommand = () => (
+    spawnedChildPid
+      ? `${process.execPath} ${mockNativeBin} ${paths.hostSocketPath}`
+      : null
+  );
+  const ownedMockChildIsAlive = () => {
+    if (!spawnedChildPid || !expectedMockCommand()) return false;
     try {
-      if (fs.existsSync(childPidFile)) {
-        const childPid = parseInt(fs.readFileSync(childPidFile, 'utf8'), 10);
-        if (childPid > 0) {
-          try { process.kill(childPid, 'SIGKILL'); } catch {}
-        }
+      const args = execFileSync(
+        '/bin/ps',
+        ['-p', String(spawnedChildPid), '-o', 'args='],
+        { encoding: 'utf8' }
+      ).trim();
+      return args === expectedMockCommand();
+    } catch {
+      return false;
+    }
+  };
+
+  t.after(async () => {
+    if (supervisor) {
+      try { await supervisor.stop(); } catch {}
+      try { await supervisor.finalizeDaemonTeardown(); } catch {}
+    }
+    if (ownedMockChildIsAlive()) {
+      try { process.kill(spawnedChildPid, 'SIGTERM'); } catch {}
+      const waitStarted = Date.now();
+      while (ownedMockChildIsAlive() && Date.now() - waitStarted < 1000) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
       }
-    } catch {}
+      if (ownedMockChildIsAlive()) {
+        try { process.kill(spawnedChildPid, 'SIGKILL'); } catch {}
+      }
+    }
     cleanupTestDir(testDir);
   });
 
@@ -985,7 +1010,6 @@ process.exit(0);
 `;
   fs.writeFileSync(mockOpenBin, openScriptContent, { mode: 0o755 });
 
-  let spawnedChildPid = null;
   const mockProcessInspector = () => {
     if (fs.existsSync(childPidFile)) {
       spawnedChildPid = parseInt(fs.readFileSync(childPidFile, 'utf8'), 10);
@@ -996,14 +1020,15 @@ process.exit(0);
     return [];
   };
 
-  const supervisor = new ProductionHostSupervisor({
+  supervisor = new ProductionHostSupervisor({
     runtimeDir: testDir,
     stagedAppDir: validAppDir,
     processInspector: mockProcessInspector
   });
 
   const startRes = await supervisor.start({
-    openBinary: mockOpenBin
+    openBinary: mockOpenBin,
+    readinessTimeoutMs: 3000
   });
 
   assert.equal(startRes.status, 'running');
@@ -1026,14 +1051,35 @@ process.exit(0);
   assert.equal(loggedArgs[7], validAppDir, 'Flag 8 (last arg) must be app path');
 
   const stopRes = await supervisor.stop();
+  await supervisor.finalizeDaemonTeardown();
   assert.equal(stopRes.status, 'stopped');
   assert.equal(stopRes.native_closed, true);
 
   if (spawnedChildPid) {
-    let alive = true;
-    try { process.kill(spawnedChildPid, 0); } catch { alive = false; }
-    assert.equal(alive, false, 'Fixture child process MUST be terminated by supervisor stop with zero leak');
+    assert.equal(ownedMockChildIsAlive(), false, 'Fixture child process MUST be terminated by supervisor stop with zero leak');
   }
+});
+
+test('M9-LAUNCHSERVICES-TEST-GUARD: Unit-test supervisor refuses real LaunchServices', async (t) => {
+  const testDir = createTestHarnessDir();
+  const paths = getCanonicalSocketPaths(testDir);
+  t.after(() => cleanupTestDir(testDir));
+
+  const validAppDir = path.join(REPO_ROOT, 'apps/computer-use-host/.build/staged/ComputerUseHost.app');
+  const supervisor = new ProductionHostSupervisor({
+    runtimeDir: testDir,
+    stagedAppDir: validAppDir,
+    processInspector: () => [],
+    forbidRealLaunchServices: true
+  });
+
+  await assert.rejects(
+    supervisor.start({ readinessTimeoutMs: 100 }),
+    /Refusing to invoke real.*open/
+  );
+  assert.equal(supervisor.controlServer, null, 'Rejected real-open path must close the control server');
+  assert.equal(fs.existsSync(paths.controlSocketPath), false, 'Rejected real-open path must leave no control socket');
+  assert.equal(fs.existsSync(paths.hostSocketPath), false, 'Rejected real-open path must leave no host socket');
 });
 
 test('M9-LAUNCHSERVICES-REJECT-PREEXISTING: Rejects launch if pre-existing staged native process exists before launch', async (t) => {

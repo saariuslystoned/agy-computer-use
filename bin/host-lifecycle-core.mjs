@@ -11,34 +11,85 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const REPO_ROOT = path.resolve(__dirname, '..');
 
+function readPsProcessSnapshot() {
+  const out = execFileSync(
+    '/bin/ps',
+    ['-ww', '-A', '-o', 'pid=,lstart=,command='],
+    {
+      encoding: 'utf8',
+      env: { ...process.env, LC_ALL: 'C' }
+    }
+  );
+  const snapshot = new Map();
+  for (const rawLine of out.trim().split('\n')) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const parts = line.split(/\s+/);
+    if (parts.length < 7) continue;
+    const pid = Number.parseInt(parts[0], 10);
+    if (!Number.isInteger(pid) || pid <= 0) continue;
+    const lstart = `${parts[1]} ${parts[2]} ${parts[3]} ${parts[4]} ${parts[5]}`;
+    const afterPid = line.substring(parts[0].length).trim();
+    const yearOffset = afterPid.indexOf(parts[5]);
+    if (yearOffset < 0) continue;
+    const command = afterPid.substring(yearOffset + parts[5].length).trim();
+    if (!command) continue;
+    snapshot.set(pid, { pid, lstart, command });
+  }
+  return snapshot;
+}
+
+function readLsofExecutableSnapshot() {
+  const out = execFileSync(
+    '/usr/sbin/lsof',
+    ['-nP', '-d', 'txt', '-Fn'],
+    {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore']
+    }
+  );
+  const executables = new Map();
+  let currentPid = null;
+  for (const line of out.split('\n')) {
+    if (line.startsWith('p')) {
+      const pid = Number.parseInt(line.substring(1), 10);
+      currentPid = Number.isInteger(pid) && pid > 0 ? pid : null;
+      continue;
+    }
+    if (currentPid && line.startsWith('n') && !executables.has(currentPid)) {
+      const executable = line.substring(1);
+      if (executable.startsWith('/')) {
+        executables.set(currentPid, path.resolve(executable));
+      }
+    }
+  }
+  return executables;
+}
+
 export function defaultProcessInspector() {
   try {
-    const out = execFileSync('/bin/ps', ['-A', '-o', 'pid=,lstart=,args='], { encoding: 'utf8' });
-    const lines = out.trim().split('\n');
-    const procs = [];
-    for (const rawLine of lines) {
-      const line = rawLine.trim();
-      if (!line) continue;
-
-      const parts = line.split(/\s+/);
-      const pid = parseInt(parts[0], 10);
-      if (isNaN(pid) || pid <= 0) continue;
-      if (parts.length < 6) continue;
-
-      const lstart = `${parts[1]} ${parts[2]} ${parts[3]} ${parts[4]} ${parts[5]}`;
-      const rest = line.substring(parts[0].length).trim();
-      const argsStartIndex = rest.indexOf(parts[5]) + parts[5].length;
-      const fullArgs = rest.substring(argsStartIndex).trim();
-      if (!fullArgs) continue;
-
-      const argSpace = fullArgs.indexOf(' ');
-      const rawBinary = argSpace === -1 ? fullArgs : fullArgs.substring(0, argSpace);
-      if (!rawBinary) continue;
-
-      const executable = rawBinary.includes('/') ? path.resolve(rawBinary) : rawBinary;
-      procs.push({ pid, executable, lstart });
+    const before = readPsProcessSnapshot();
+    const executables = readLsofExecutableSnapshot();
+    const after = readPsProcessSnapshot();
+    const identities = [];
+    for (const [pid, finalSnapshot] of after) {
+      const initialSnapshot = before.get(pid);
+      const executable = executables.get(pid);
+      if (!initialSnapshot || !executable) continue;
+      if (
+        initialSnapshot.lstart !== finalSnapshot.lstart ||
+        initialSnapshot.command !== finalSnapshot.command
+      ) {
+        continue;
+      }
+      identities.push({
+        pid,
+        executable,
+        lstart: finalSnapshot.lstart,
+        command: finalSnapshot.command
+      });
     }
-    return procs;
+    return identities;
   } catch {}
   return [];
 }
@@ -370,6 +421,7 @@ export class ProductionHostSupervisor {
     this.binaryPath = options.binaryPath || null;
     this.customOpenBinary = options.openBinary || null;
     this.processInspector = options.processInspector || defaultProcessInspector;
+    this.forbidRealLaunchServices = options.forbidRealLaunchServices ?? false;
     this.nativePid = null;
     this.state = 'stopped';
   }
@@ -826,8 +878,8 @@ export class ProductionHostSupervisor {
       let proc;
 
       if (stagedAppDir) {
-        const openBin = options.openBinary || process.env.AGY_TEST_OPEN_BINARY || '/usr/bin/open';
-        if ((process.env.NODE_ENV === 'test' || process.env.AGY_TEST_SUITE === '1') && openBin === '/usr/bin/open') {
+        const openBin = options.openBinary || '/usr/bin/open';
+        if (this.forbidRealLaunchServices && openBin === '/usr/bin/open') {
           throw new Error('Refusing to invoke real /usr/bin/open in unit-test environment');
         }
         const openArgs = [
