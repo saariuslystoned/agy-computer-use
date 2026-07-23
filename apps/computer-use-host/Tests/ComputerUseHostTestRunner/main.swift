@@ -5608,5 +5608,14 @@ public struct ComputerUseHostTestRunner {
         // CGEventInputSynthesisEngine sanity check
         let cgeEngine = CGEventInputSynthesisEngine()
         cgeEngine.releaseHeldInputs()
+
+        // Production app main.swift composition discriminator: verifies main.swift constructs CGEventInputSynthesisEngine, NOT DisabledInputInjector
+        let pwd = FileManager.default.currentDirectoryPath
+        let relPath = FileManager.default.fileExists(atPath: "\(pwd)/Sources/ComputerUseHost/main.swift")
+            ? "\(pwd)/Sources/ComputerUseHost/main.swift"
+            : "\(pwd)/apps/computer-use-host/Sources/ComputerUseHost/main.swift"
+        let mainContent = try String(contentsOfFile: relPath, encoding: .utf8)
+        assertTrue(mainContent.contains("let inputEngine = CGEventInputSynthesisEngine()"), "ComputerUseHost main.swift must construct CGEventInputSynthesisEngine")
+        assertTrue(!mainContent.contains("DisabledInputInjector()"), "ComputerUseHost main.swift MUST NOT construct DisabledInputInjector")
     }
 }
