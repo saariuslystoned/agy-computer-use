@@ -5,8 +5,14 @@ import * as path from "path";
 import * as net from "net";
 import * as crypto from "crypto";
 import AjvModule from "ajv";
+import { execSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 import { createComputerUseServer, validateAndDecodeBase64JPEG, parseJPEGDimensions } from "../src/index.js";
 import { validatePixelDimensions } from "../src/schemas.js";
 import { MockHostClient, UnixSocketHostClient, IPCResponseSchema } from "../src/host-client.js";
@@ -712,5 +718,75 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
     assert.equal(validatePixelDimensions(1e12, 1e12), false, "Unsafe integer overflow must be rejected");
     assert.equal(validatePixelDimensions(5213, 12277), false, "Exact 64M+1 (64,000,001) must be rejected");
     assert.equal(validatePixelDimensions(8000, 8000), true, "Exact 64M (64,000,000) must be accepted");
+  });
+
+  test("Deterministic Configured Launcher: Stdio transport launcher under minimal ambient PATH and missing toolchain negative discriminator", async () => {
+    let curDir = __dirname;
+    let rootDir = "";
+    while (curDir !== path.dirname(curDir)) {
+      if (fs.existsSync(path.join(curDir, ".agents/mcp_config.json"))) {
+        rootDir = curDir;
+        break;
+      }
+      curDir = path.dirname(curDir);
+    }
+    if (!rootDir) {
+      throw new Error(`Could not find repo root from ${__dirname}`);
+    }
+
+    const mcpConfigPath = path.join(rootDir, ".agents/mcp_config.json");
+    const mcpConfig = JSON.parse(fs.readFileSync(mcpConfigPath, "utf-8"));
+    const prodServer = mcpConfig.mcpServers["computer-use"];
+
+    assert.equal(prodServer.command, "./bin/mcp-server.sh", "Configured launcher command must be ./bin/mcp-server.sh");
+    assert.deepEqual(prodServer.args, []);
+    assert.equal(prodServer.cwd, ".");
+
+    const minimalPathEnv = {
+      PATH: "/usr/bin:/bin",
+      HOME: process.env.HOME || "",
+      USER: process.env.USER || "",
+      SHELL: process.env.SHELL || "/bin/sh"
+    };
+
+    const transport = new StdioClientTransport({
+      command: prodServer.command,
+      args: prodServer.args,
+      cwd: rootDir,
+      env: minimalPathEnv
+    });
+
+    const client = new Client(
+      { name: "launcher-test-client", version: "1.0.0" },
+      { capabilities: {} }
+    );
+
+    await client.connect(transport);
+
+    const toolsResult = await client.listTools();
+    assert.ok(toolsResult.tools);
+    assert.equal(toolsResult.tools.length, 5);
+    const toolNames = toolsResult.tools.map(t => t.name).sort();
+    assert.deepEqual(toolNames, ["computer_use_click", "computer_use_observe", "computer_use_shortcut", "computer_use_status", "computer_use_type"]);
+
+    await client.close();
+
+    const launcherAbsPath = path.join(rootDir, prodServer.command);
+    let output = "";
+    let exitCode = 0;
+    try {
+      execSync(`"${launcherAbsPath}"`, {
+        cwd: rootDir,
+        env: { PATH: "/nonexistent_dir_12345", HOME: "/nonexistent_home_12345", TEST_FORCE_MISSING_MISE: "1" },
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+    } catch (err: any) {
+      exitCode = err.status || 1;
+      output = (err.stderr || "") + "\n" + (err.stdout || "");
+    }
+
+    assert.notEqual(exitCode, 0, "Missing toolchain launcher execution must exit nonzero");
+    assert.match(output, /\[mcp-server-launcher\] ERROR: 'mise' CLI not found/, "Missing toolchain launcher output must contain diagnostic error");
   });
 });

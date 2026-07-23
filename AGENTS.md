@@ -6,7 +6,7 @@ This repository defines the production architecture, protocol specifications, Sw
 ## Depth & Quality Standards
 - **Production Architecture & Bounded Contracts**: Screen capture, AX DOM extraction, coordinate normalization, and input synthesis are bound by strict schemas, error handling, depth limits, and security redaction rules.
 - **Native OS Integration & Security Principal**: A staged background macOS app (`ComputerUseHost.app`, currently staged as an `ad_hoc_ephemeral` bundle) serves as the TCC principal for Screen Recording and Accessibility permissions. A future non-ad-hoc team-signed candidate may become the durable TCC principal only after separately gated signing, installation, launch, and TCC proof. The MCP server connects to the host over a local Unix domain socket in an owner-only runtime directory (`chmod 0700`).
-- **Antigravity Tooling**: Exposes clean MCP server tools (`computer_use_status`, `computer_use_observe`) alongside skill definitions compatible with Google Antigravity / Gemini 3.6 Flash in Milestone D2.
+- **Antigravity Tooling**: Exposes clean MCP server tools (`computer_use_status`, `computer_use_observe`, `computer_use_click`, `computer_use_type`, `computer_use_shortcut`) alongside skill definitions compatible with Google Antigravity / Gemini 3.6 Flash in Milestone D2.
 
 ## Execution Rules & Safety Policy
 - **Proof Policy**: Every feature milestone requires verifiable empirical proof (unit/integration test run outputs, deterministic test host validation, schema validation, and tracked verification reports in `proof/`).

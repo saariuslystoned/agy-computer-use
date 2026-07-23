@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "computer-use": {
-      "command": "./bin/mcp-server.mjs",
+      "command": "./bin/mcp-server.sh",
       "args": [],
       "cwd": "."
     }

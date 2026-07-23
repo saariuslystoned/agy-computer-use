@@ -47,8 +47,8 @@ function validateMcpConfigStruct() {
     }
   }
 
-  if (prodServer.command !== "./bin/mcp-server.mjs") {
-    throw new Error(`computer-use server command must be './bin/mcp-server.mjs'`);
+  if (prodServer.command !== "./bin/mcp-server.sh") {
+    throw new Error(`computer-use server command must be './bin/mcp-server.sh'`);
   }
   if (!Array.isArray(prodServer.args) || prodServer.args.length !== 0) {
     throw new Error(`computer-use server args must be strictly []`);
@@ -62,7 +62,7 @@ function validateMcpConfigStruct() {
   }
 }
 
-async function verifyProductionMcpConfiguredStdio() {
+async function verifyProductionMcpConfiguredStdio(envOverride) {
   const clientSdkPath = path.join(mcpPkgDir, "node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js");
   const stdioSdkPath = path.join(mcpPkgDir, "node_modules/@modelcontextprotocol/sdk/dist/esm/client/stdio.js");
 
@@ -73,10 +73,13 @@ async function verifyProductionMcpConfiguredStdio() {
   const mcpConfig = JSON.parse(fs.readFileSync(mcpConfigPath, "utf-8"));
   const prodServer = mcpConfig.mcpServers["computer-use"];
 
+  const envOptions = envOverride ? { env: envOverride } : {};
+
   const transport = new StdioClientTransport({
     command: prodServer.command,
     args: prodServer.args,
-    cwd: rootDir
+    cwd: rootDir,
+    ...envOptions
   });
 
   const client = new Client(
@@ -124,6 +127,47 @@ async function verifyProductionMcpConfiguredStdio() {
   } finally {
     await cleanup();
   }
+}
+
+async function verifyMinimalPathConfiguredLaunch() {
+  const minimalPathEnv = {
+    PATH: "/usr/bin:/bin",
+    HOME: process.env.HOME || "",
+    USER: process.env.USER || "",
+    SHELL: process.env.SHELL || "/bin/sh"
+  };
+  return await verifyProductionMcpConfiguredStdio(minimalPathEnv);
+}
+
+function verifyMissingToolchainFailure() {
+  const mcpConfigPath = path.join(rootDir, ".agents/mcp_config.json");
+  const mcpConfig = JSON.parse(fs.readFileSync(mcpConfigPath, "utf-8"));
+  const prodServer = mcpConfig.mcpServers["computer-use"];
+  const launcherPath = path.join(rootDir, prodServer.command);
+
+  let output = "";
+  let exitCode = 0;
+  try {
+    output = execSync(`"${launcherPath}"`, {
+      cwd: rootDir,
+      env: { PATH: "/nonexistent_path_dir_12345", HOME: "/nonexistent_home_dir_12345", TEST_FORCE_MISSING_MISE: "1" },
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+  } catch (err) {
+    exitCode = err.status || 1;
+    output = (err.stderr || "") + "\n" + (err.stdout || "");
+  }
+
+  if (exitCode === 0) {
+    throw new Error("Missing-toolchain launcher test expected nonzero exit code, but exited 0");
+  }
+
+  if (!output.includes("[mcp-server-launcher] ERROR: 'mise' CLI not found")) {
+    throw new Error(`Missing-toolchain launcher test expected diagnostic stderr message, got: ${output}`);
+  }
+
+  return true;
 }
 
 async function main() {
@@ -251,6 +295,20 @@ async function main() {
       log(`Verified production configured stdio MCP tool inventory: Exactly ${toolNames.length} tools (${toolNames.join(", ")})`);
     } catch (err) {
       fail(`Configured stdio MCP tool inventory check failed: ${err.message}`);
+    }
+
+    try {
+      const minimalTools = await verifyMinimalPathConfiguredLaunch();
+      log(`Verified minimal PATH configured launcher tool inventory: Exactly ${minimalTools.length} tools (${minimalTools.join(", ")})`);
+    } catch (err) {
+      fail(`Minimal PATH configured launch check failed: ${err.message}`);
+    }
+
+    try {
+      verifyMissingToolchainFailure();
+      log("Verified missing-toolchain negative launcher failure diagnostic.");
+    } catch (err) {
+      fail(`Missing-toolchain negative launcher check failed: ${err.message}`);
     }
 
     log("ALL PRODUCTION CONFIGURED STDIO READINESS CHECKS PASSED!");
