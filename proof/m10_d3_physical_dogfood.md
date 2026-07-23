@@ -1,8 +1,10 @@
 # Computer Use M10/D3 Physical Dogfood Verification Proof
 
 - **Run ID**: `agy-cu-m10-d3-ax-pointer-01-20260723`
-- **Staged Source Candidate HEAD**: `e1b06f1adb2186ef6d47c4ee2d93c45d864f22f1` (CI Push [#30035943899](https://github.com/saariuslystoned/agy-computer-use/actions/runs/30035943899), CI PR [#30035946527](https://github.com/saariuslystoned/agy-computer-use-m10-d3-20260723/actions/runs/30035946527))
-- **Current Proof & Docs HEAD**: `6e61bbc9be4ec3c271891d4e2fb6fb8b4226f30e`
+- **Staged Source Candidate HEAD**: `e1b06f1adb2186ef6d47c4ee2d93c45d864f22f1` (CI Push [#30035943899](https://github.com/saariuslystoned/agy-computer-use/actions/runs/30035943899), CI PR [#30035946527](https://github.com/saariuslystoned/agy-computer-use/actions/runs/30035946527))
+- **Evidence Bundle Commit**: `6e61bbc9be4ec3c271891d4e2fb6fb8b4226f30e`
+- **Metadata Follow-up Commit**: `18a4a7d6eecbeebf0a7eec1ca5a2f5dd831969a5`
+- **Note**: The final exact head SHA and GitHub Actions CI run IDs live in the terminal `m10_d3_final_ready` event and PR status after this correction commit.
 
 - **Worktree Path**: `/Users/aiworker02/Developer/worktrees/agy-computer-use-m10-d3-20260723`
 - **Host Machine**: `aiworker-02.local`
@@ -88,5 +90,5 @@
 - **Raw Controller Video Recording (`/Users/aiworker02/Desktop/Screen Recording 2026-07-23 at 4.15.18 PM.mov`)**:
   - Size: `10,395,349` bytes, Duration: `138.525` seconds, 3840x2160, 60 fps, 1 H.264 video stream, no audio. Preserved on Desktop per controller authority.
 - **Transcoded End-to-End Proof Video (`proof/m10_d3_end_to_end.mp4`)**:
-  - Transcoded at 10x speed, 1920x1080, 30 fps, H.264/yuv420p, faststart, no audio.
-  - Size: `316,251` bytes, Duration: `15.233333` seconds, SHA-256: `fb7dd5c64d7bb993dbb32824349e4fc7f03125e03491dfcf9f01b4410e245864`.
+  - Transcoded at 10x speed with STARTPTS subtraction, 1920x1080, 30 fps, H.264/yuv420p, faststart, no audio.
+  - Size: `310,107` bytes, Duration: `13.866667` seconds (within 10.0–14.5s requirement), SHA-256: `7773d1c75b2bb76e2c50f00570ebd86bab5369b132cf8c68ebb7dec1aea35869`.
