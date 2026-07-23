@@ -1,13 +1,8 @@
 {
   "mcpServers": {
     "computer-use": {
-      "command": "mise",
-      "args": [
-        "exec",
-        "--",
-        "node",
-        "./mcp/computer-use-mcp/dist/src/index.js"
-      ],
+      "command": "./bin/mcp-server.mjs",
+      "args": [],
       "cwd": "."
     }
   }

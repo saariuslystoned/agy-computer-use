@@ -47,19 +47,18 @@ function validateMcpConfigStruct() {
     }
   }
 
-  if (prodServer.command !== "mise") {
-    throw new Error(`computer-use server command must be 'mise'`);
+  if (prodServer.command !== "./bin/mcp-server.mjs") {
+    throw new Error(`computer-use server command must be './bin/mcp-server.mjs'`);
   }
-  const expectedArgs = ["exec", "--", "node", "./mcp/computer-use-mcp/dist/src/index.js"];
-  if (!Array.isArray(prodServer.args) || prodServer.args.length !== 4 || !expectedArgs.every((a, idx) => prodServer.args[idx] === a)) {
-    throw new Error(`computer-use server args must be strictly ${JSON.stringify(expectedArgs)}`);
+  if (!Array.isArray(prodServer.args) || prodServer.args.length !== 0) {
+    throw new Error(`computer-use server args must be strictly []`);
   }
   if (prodServer.cwd !== ".") {
     throw new Error(`computer-use server cwd must be '.'`);
   }
-  const distFile = prodServer.args[3];
-  if (!fs.existsSync(path.join(rootDir, distFile))) {
-    throw new Error(`Target dist file for computer-use does not exist at ${distFile}`);
+  const launcherPath = path.join(rootDir, prodServer.command);
+  if (!fs.existsSync(launcherPath)) {
+    throw new Error(`Target MCP server launcher does not exist at ${launcherPath}`);
   }
 }
 
