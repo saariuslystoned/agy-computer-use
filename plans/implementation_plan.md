@@ -2,7 +2,7 @@
 
 ## Architecture Overview & Scope Boundary
 This implementation plan establishes the architectural foundation (v0.1) and deterministic test suite for `agy-computer-use`.
-Work is partitioned into dependency-ordered milestones (M0–M9 & Dogfood D1–D2), strictly distinguishing **Implemented & Tested**, **Designed / Bounded Foundation**, and **Gated / Future Work (M9)**.
+Work is partitioned into dependency-ordered milestones (M0–M10 and Dogfood D1–D3), strictly distinguishing **Implemented & Tested**, **Designed / Bounded Foundation**, and **Gated / Future Work (post-v0.1)**.
 
 ---
 

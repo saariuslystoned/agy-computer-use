@@ -3,9 +3,9 @@
 [![macOS](https://img.shields.io/badge/OS-macOS%2014%2B-blue.svg)](https://apple.com)
 [![Gemini](https://img.shields.io/badge/Model-Gemini%203.6%20Flash-orange.svg)](https://deepmind.google/technologies/gemini/)
 [![Antigravity](https://img.shields.io/badge/Platform-Google%20Antigravity-green.svg)](https://antigravity.google)
-[![Build Status](https://img.shields.io/badge/v0.1-M9%20Dogfood-blue.svg)](#)
+[![Build Status](https://img.shields.io/badge/v0.1-M10%2FD3%20Dogfood-blue.svg)](#)
 
-> Architecture specification and production-bounded M9 computer use surface for Google Antigravity & Gemini 3.6 Flash on macOS.
+> Architecture specification and production-bounded M10/D3 nine-tool computer-use surface for Google Antigravity & Gemini 3.6 Flash on macOS.
 
 ---
 
@@ -98,7 +98,7 @@ The MCP server exposes the following nine active tools to Gemini 3.6 Flash / Ant
   - **Non-Override Runtime Directory Policy**: Public CLI host commands operate strictly on the canonical runtime directory (`/tmp/agy-computer-use-<uid>`), enforcing single-owner Unix domain socket permissions (`0700`) and inode identity validation to prevent socket hijacking or symlink attacks. Custom runtime directory overrides (`COMPUTER_USE_RUNTIME_DIR`) are restricted to isolated test harnesses and rejected or fail-closed in public production CLI operations.
 
 > [!NOTE]
-> Milestone D2 established the completed native observation and source-hardening foundation. Milestone M9 implements and physically dogfoods bounded input synthesis (`click`, `type`, `shortcut`) driven live via Google Antigravity. Local ad-hoc staged-app/TCC operation is proven; team signing/notarization remains future work. A denied Screen Recording or Accessibility state remains a human TCC gate.
+> Milestones D2 and M9 established the native observation foundation and bounded click/type/shortcut loop. Milestone M10/D3 implements and physically dogfoods the complete nine-tool v0.1 surface, including bounded AX inspection, pointer movement, scrolling, and same-display left-button dragging driven live via Google Antigravity. Local ad-hoc staged-app/TCC operation is proven; team signing/notarization remains future work. A denied Screen Recording or Accessibility state remains a human TCC gate.
 
 - **Authoritative Native Swift Test Authority**:
   ```bash
