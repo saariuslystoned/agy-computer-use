@@ -259,7 +259,10 @@ function validateStageOptions(options, allowedKeys = ['build', 'harness', 'relat
     return { hasBuild, build, hasHarness, harness, hasRelativeTarget, relativeTarget };
 }
 
-export async function buildHostRelease() {
+export async function buildHostRelease(...args) {
+    if (args.length > 0) {
+        throw new Error('buildHostRelease accepts no arguments');
+    }
     const hostPackageDir = path.join(REPO_ROOT, 'apps/computer-use-host');
     const releaseBinarySource = path.join(hostPackageDir, '.build/release/ComputerUseHost');
     const infoPlistSource = path.join(hostPackageDir, 'Info.plist');

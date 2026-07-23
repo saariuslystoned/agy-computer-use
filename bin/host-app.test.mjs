@@ -1788,3 +1788,53 @@ test('ARP3-G1: Strict stageHostApp public option grammar and obsolete-hook rejec
         }
     });
 });
+
+test('ARP3-BUILD-ARG: buildHostRelease strict argument rejection and state immutability matrix', async () => {
+    const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+    const hostPackageDir = path.join(repoRoot, 'apps/computer-use-host');
+    const releaseBinaryPath = path.join(hostPackageDir, '.build/release/ComputerUseHost');
+    const infoPlistPath = path.join(hostPackageDir, 'Info.plist');
+    const stagingRoot = path.join(hostPackageDir, '.build/staged');
+
+    function captureStateIdentity() {
+        return {
+            stagingExists: fs.existsSync(stagingRoot),
+            stagingSnapshot: fs.existsSync(stagingRoot) ? snapshotTree(stagingRoot) : null,
+            releaseBinExists: fs.existsSync(releaseBinaryPath),
+            releaseBinStat: fs.existsSync(releaseBinaryPath) ? (({ mode, size, dev, ino }) => ({ mode: mode & 0o777, size, dev, ino }))(fs.statSync(releaseBinaryPath)) : null,
+            releaseBinHash: fs.existsSync(releaseBinaryPath) ? crypto.createHash('sha256').update(fs.readFileSync(releaseBinaryPath)).digest('hex') : null,
+            infoPlistExists: fs.existsSync(infoPlistPath),
+            infoPlistStat: fs.existsSync(infoPlistPath) ? (({ mode, size, dev, ino }) => ({ mode: mode & 0o777, size, dev, ino }))(fs.statSync(infoPlistPath)) : null,
+            infoPlistHash: fs.existsSync(infoPlistPath) ? crypto.createHash('sha256').update(fs.readFileSync(infoPlistPath)).digest('hex') : null,
+        };
+    }
+
+    const stateBeforeAll = captureStateIdentity();
+
+    const invalidArgsMatrix = [
+        ['empty object {}', {}],
+        ['caller runner { runner: "custom" }', { runner: 'custom' }],
+        ['caller project root { projectRoot: "/tmp" }', { projectRoot: '/tmp' }],
+        ['explicit undefined', undefined],
+    ];
+
+    for (const [label, arg] of invalidArgsMatrix) {
+        const stateBefore = captureStateIdentity();
+
+        await assert.rejects(
+            async () => await buildHostRelease(arg),
+            (err) => {
+                assert.equal(err instanceof Error, true);
+                assert.equal(err.message, 'buildHostRelease accepts no arguments');
+                return true;
+            },
+            `buildHostRelease with ${label} must reject with exact error message`
+        );
+
+        const stateAfter = captureStateIdentity();
+        assert.deepStrictEqual(stateAfter, stateBefore, `State identity must be invariant across ${label} rejection`);
+    }
+
+    assert.deepStrictEqual(captureStateIdentity(), stateBeforeAll, 'Overall state identity must be invariant across full matrix');
+});
+
