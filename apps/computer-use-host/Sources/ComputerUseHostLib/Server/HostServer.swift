@@ -402,7 +402,9 @@ public actor HostServer {
                 guard let reqCapId = request.params?["capture_id"]?.rawValue as? String, !reqCapId.isEmpty else {
                     throw ComputerUseError.ipcError(reason: "capture_id parameter is required")
                 }
-                guard let activeCap = self.latestCapture, activeCap.captureId == reqCapId else {
+                guard let activeCap = self.latestCapture,
+                      activeCap.captureId == reqCapId,
+                      activeCap.topologyVersion == reqTopVer else {
                     throw ComputerUseError.staleCapture(current: self.latestCapture?.captureId ?? "", received: reqCapId)
                 }
                 guard let x = request.params?["x"]?.rawValue as? Int,
@@ -458,7 +460,9 @@ public actor HostServer {
                 guard let reqCapId = request.params?["capture_id"]?.rawValue as? String, !reqCapId.isEmpty else {
                     throw ComputerUseError.ipcError(reason: "capture_id parameter is required")
                 }
-                guard let activeCap = self.latestCapture, activeCap.captureId == reqCapId else {
+                guard let activeCap = self.latestCapture,
+                      activeCap.captureId == reqCapId,
+                      activeCap.topologyVersion == reqTopVer else {
                     throw ComputerUseError.staleCapture(current: self.latestCapture?.captureId ?? "", received: reqCapId)
                 }
                 guard let text = request.params?["text"]?.rawValue as? String, !text.isEmpty, text.count <= 1000 else {
@@ -500,7 +504,9 @@ public actor HostServer {
                 guard let reqCapId = request.params?["capture_id"]?.rawValue as? String, !reqCapId.isEmpty else {
                     throw ComputerUseError.ipcError(reason: "capture_id parameter is required")
                 }
-                guard let activeCap = self.latestCapture, activeCap.captureId == reqCapId else {
+                guard let activeCap = self.latestCapture,
+                      activeCap.captureId == reqCapId,
+                      activeCap.topologyVersion == reqTopVer else {
                     throw ComputerUseError.staleCapture(current: self.latestCapture?.captureId ?? "", received: reqCapId)
                 }
                 guard let rawKeys = request.params?["keys"]?.rawValue as? [Any] else {

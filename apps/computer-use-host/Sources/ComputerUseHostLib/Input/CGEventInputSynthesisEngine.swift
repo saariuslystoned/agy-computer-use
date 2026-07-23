@@ -6,6 +6,7 @@ public final class CGEventInputSynthesisEngine: InputSynthesisEngine, @unchecked
     private let lock = NSLock()
     private var heldModifiers: Set<CGKeyCode> = []
     private var heldMouseButton: MouseButton? = nil
+    private var heldBaseKey: CGKeyCode? = nil
 
     public init() {}
 
@@ -17,8 +18,10 @@ public final class CGEventInputSynthesisEngine: InputSynthesisEngine, @unchecked
         lock.lock()
         let currentButton = heldMouseButton
         let currentModifiers = heldModifiers
+        let currentBaseKey = heldBaseKey
         heldMouseButton = nil
         heldModifiers.removeAll()
+        heldBaseKey = nil
         lock.unlock()
 
         if let btn = currentButton {
@@ -33,6 +36,11 @@ public final class CGEventInputSynthesisEngine: InputSynthesisEngine, @unchecked
                 let upEvent = CGEvent(mouseEventSource: nil, mouseType: eventType, mouseCursorPosition: location, mouseButton: btnToCGButton(btn))
                 upEvent?.post(tap: .cghidEventTap)
             }
+        }
+
+        if let baseKey = currentBaseKey {
+            let keyUp = CGEvent(keyboardEventSource: nil, virtualKey: baseKey, keyDown: false)
+            keyUp?.post(tap: .cghidEventTap)
         }
 
         for keyCode in currentModifiers {
@@ -153,12 +161,23 @@ public final class CGEventInputSynthesisEngine: InputSynthesisEngine, @unchecked
 
         if pressEnter {
             let returnKeyCode: CGKeyCode = 0x24
-            if let enterDown = CGEvent(keyboardEventSource: nil, virtualKey: returnKeyCode, keyDown: true) {
-                enterDown.post(tap: .cghidEventTap)
+            lock.lock()
+            heldBaseKey = returnKeyCode
+            lock.unlock()
+
+            guard let enterDown = CGEvent(keyboardEventSource: nil, virtualKey: returnKeyCode, keyDown: true) else {
+                throw ComputerUseError.ipcError(reason: "Failed to create enter down CGEvent")
             }
-            if let enterUp = CGEvent(keyboardEventSource: nil, virtualKey: returnKeyCode, keyDown: false) {
-                enterUp.post(tap: .cghidEventTap)
+            enterDown.post(tap: .cghidEventTap)
+
+            guard let enterUp = CGEvent(keyboardEventSource: nil, virtualKey: returnKeyCode, keyDown: false) else {
+                throw ComputerUseError.ipcError(reason: "Failed to create enter up CGEvent")
             }
+            enterUp.post(tap: .cghidEventTap)
+
+            lock.lock()
+            heldBaseKey = nil
+            lock.unlock()
         }
 
         let elapsed = ContinuousClock().now - startClock
@@ -191,68 +210,85 @@ public final class CGEventInputSynthesisEngine: InputSynthesisEngine, @unchecked
         let startClock = ContinuousClock().now
 
         var modKeyCodes: [CGKeyCode] = []
-        var baseKeyCode: CGKeyCode? = nil
+        var baseKeyCodes: [CGKeyCode] = []
 
         for keyStr in keys {
             let k = keyStr.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
             switch k {
             case "cmd", "command":
-                modKeyCodes.append(0x37)
+                if !modKeyCodes.contains(0x37) { modKeyCodes.append(0x37) }
             case "shift":
-                modKeyCodes.append(0x38)
+                if !modKeyCodes.contains(0x38) { modKeyCodes.append(0x38) }
             case "alt", "option":
-                modKeyCodes.append(0x3A)
+                if !modKeyCodes.contains(0x3A) { modKeyCodes.append(0x3A) }
             case "ctrl", "control":
-                modKeyCodes.append(0x3B)
+                if !modKeyCodes.contains(0x3B) { modKeyCodes.append(0x3B) }
             case "tab":
-                baseKeyCode = 0x30
+                baseKeyCodes.append(0x30)
             case "enter", "return":
-                baseKeyCode = 0x24
+                baseKeyCodes.append(0x24)
             case "escape", "esc":
-                baseKeyCode = 0x35
+                baseKeyCodes.append(0x35)
             case "left":
-                baseKeyCode = 0x7B
+                baseKeyCodes.append(0x7B)
             case "right":
-                baseKeyCode = 0x7C
+                baseKeyCodes.append(0x7C)
             case "down":
-                baseKeyCode = 0x7D
+                baseKeyCodes.append(0x7D)
             case "up":
-                baseKeyCode = 0x7E
+                baseKeyCodes.append(0x7E)
             case "home":
-                baseKeyCode = 0x73
+                baseKeyCodes.append(0x73)
             case "end":
-                baseKeyCode = 0x77
+                baseKeyCodes.append(0x77)
             case "pageup":
-                baseKeyCode = 0x74
+                baseKeyCodes.append(0x74)
             case "pagedown":
-                baseKeyCode = 0x79
+                baseKeyCodes.append(0x79)
             default:
                 throw ComputerUseError.ipcError(reason: "Unsupported shortcut key '\(keyStr)'")
             }
         }
 
+        guard baseKeyCodes.count == 1 else {
+            throw ComputerUseError.ipcError(reason: "Shortcut must contain exactly one supported base navigation key, got \(baseKeyCodes.count)")
+        }
+
+        let baseKeyCode = baseKeyCodes[0]
+
         for modCode in modKeyCodes {
             lock.lock()
             heldModifiers.insert(modCode)
             lock.unlock()
-            if let modDown = CGEvent(keyboardEventSource: nil, virtualKey: modCode, keyDown: true) {
-                modDown.post(tap: .cghidEventTap)
+            guard let modDown = CGEvent(keyboardEventSource: nil, virtualKey: modCode, keyDown: true) else {
+                throw ComputerUseError.ipcError(reason: "Failed to create modifier down CGEvent")
             }
+            modDown.post(tap: .cghidEventTap)
         }
 
-        if let bCode = baseKeyCode {
-            if let baseDown = CGEvent(keyboardEventSource: nil, virtualKey: bCode, keyDown: true) {
-                baseDown.post(tap: .cghidEventTap)
-            }
-            if let baseUp = CGEvent(keyboardEventSource: nil, virtualKey: bCode, keyDown: false) {
-                baseUp.post(tap: .cghidEventTap)
-            }
+        lock.lock()
+        heldBaseKey = baseKeyCode
+        lock.unlock()
+
+        guard let baseDown = CGEvent(keyboardEventSource: nil, virtualKey: baseKeyCode, keyDown: true) else {
+            throw ComputerUseError.ipcError(reason: "Failed to create base key down CGEvent")
         }
+        baseDown.post(tap: .cghidEventTap)
+
+        guard let baseUp = CGEvent(keyboardEventSource: nil, virtualKey: baseKeyCode, keyDown: false) else {
+            throw ComputerUseError.ipcError(reason: "Failed to create base key up CGEvent")
+        }
+        baseUp.post(tap: .cghidEventTap)
+
+        lock.lock()
+        heldBaseKey = nil
+        lock.unlock()
 
         for modCode in modKeyCodes.reversed() {
-            if let modUp = CGEvent(keyboardEventSource: nil, virtualKey: modCode, keyDown: false) {
-                modUp.post(tap: .cghidEventTap)
+            guard let modUp = CGEvent(keyboardEventSource: nil, virtualKey: modCode, keyDown: false) else {
+                throw ComputerUseError.ipcError(reason: "Failed to create modifier up CGEvent")
             }
+            modUp.post(tap: .cghidEventTap)
             lock.lock()
             heldModifiers.remove(modCode)
             lock.unlock()

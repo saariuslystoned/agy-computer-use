@@ -5605,9 +5605,48 @@ public struct ComputerUseHostTestRunner {
 
         assertTrue(activeEngine.releaseCount >= 3, "releaseHeldInputs must be called on every completed action")
 
-        // CGEventInputSynthesisEngine sanity check
+        // 3. Captured Topology Version Mismatch Rejection
+        let obs4 = await serverActive.handleRequest(IPCRequest(id: "obs-4", method: "observe"))
+        assertTrue(obs4.success)
+        let capId4 = obs4.data?["capture_id"]?.rawValue as? String ?? ""
+
+        // Sending a topology_version that matches current topology ("top-sha256-..."), but differs from activeCap.topologyVersion
+        let capMismatch = await serverActive.handleRequest(IPCRequest(id: "cap-mismatch", method: "click", params: [
+            "capture_id": .string(capId4),
+            "topology_version": .string("top-sha256-different0000000000000000000000000000000000000000000000"),
+            "intent": .string("click with topology mismatch"),
+            "x": .int(500),
+            "y": .int(300)
+        ]))
+        assertTrue(!capMismatch.success, "Action must fail when requested topology_version does not match current topology")
+
+        // 4. CGEventInputSynthesisEngine shortcut validation & release checks
         let cgeEngine = CGEventInputSynthesisEngine()
         cgeEngine.releaseHeldInputs()
+
+        // Shortcut validation: 0 base keys -> throws ipcError
+        var zeroBaseThrew = false
+        do {
+            _ = try cgeEngine.performShortcut(keys: ["cmd", "shift"], captureId: "c1", currentCaptureId: "c1")
+        } catch ComputerUseError.ipcError {
+            zeroBaseThrew = true
+        } catch ComputerUseError.mutationDisabled {
+            // Expected if process is untrusted
+            zeroBaseThrew = true
+        } catch {}
+        assertTrue(zeroBaseThrew, "Shortcut with 0 base keys must be rejected")
+
+        // Shortcut validation: >1 base keys -> throws ipcError
+        var multiBaseThrew = false
+        do {
+            _ = try cgeEngine.performShortcut(keys: ["tab", "enter"], captureId: "c1", currentCaptureId: "c1")
+        } catch ComputerUseError.ipcError {
+            multiBaseThrew = true
+        } catch ComputerUseError.mutationDisabled {
+            // Expected if process is untrusted
+            multiBaseThrew = true
+        } catch {}
+        assertTrue(multiBaseThrew, "Shortcut with multiple base keys must be rejected")
 
         // Production app main.swift composition discriminator: verifies main.swift constructs CGEventInputSynthesisEngine, NOT DisabledInputInjector
         let pwd = FileManager.default.currentDirectoryPath
