@@ -796,6 +796,3 @@ test('Commit 2: Unclosed child retains authority and throws terminal failure', {
   );
   assert.equal(supervisor.child, mockChild, 'Child authority must be retained when close is not proved');
 });
-
-
-
