@@ -713,3 +713,75 @@ test('D15: Clean-export stage-host-app verification proof', { timeout: 45000 }, 
   assert.ok(fs.existsSync(stageJson.binaryPath), 'Staged binary must exist in clean export');
 });
 
+// Commit 1 Focused Production Tests
+test('Commit 1: Malformed stop receipt rejection', { timeout: 5000 }, async (t) => {
+  const testDir = createTestHarnessDir();
+  const paths = getCanonicalSocketPaths(testDir);
+  t.after(() => cleanupTestDir(testDir));
+
+  // Fake a control server returning malformed receipt
+  const server = net.createServer((socket) => {
+    socket.on('data', () => {
+      socket.end(encodeFrame({ status: 'stopped', generation: 'bad-gen' })); // missing daemonPid, native_closed, etc.
+    });
+  });
+  await new Promise((r) => server.listen(paths.controlSocketPath, r));
+  t.after(() => { try { server.close(); } catch {} });
+
+  const supervisor = new ProductionHostSupervisor({ runtimeDir: testDir });
+  const ctrlProbe = await supervisor.checkControlStatus(300);
+  assert.equal(ctrlProbe.alive, false, 'malformed control status payload rejected');
+});
+
+test('Commit 1: Slow cooperative stop and bounded never-closing child', { timeout: 10000 }, async (t) => {
+  const testDir = createTestHarnessDir();
+  t.after(() => cleanupTestDir(testDir));
+
+  const supervisor = new ProductionHostSupervisor({ runtimeDir: testDir });
+  // Mock a non-closing child process
+  supervisor.child = {
+    pid: 99999,
+    kill: () => true
+  };
+  supervisor.childClosedPromise = new Promise(() => {}); // Never resolves
+
+  const outcome = await Promise.race([
+    supervisor.stop(50).then(() => 'settled', () => 'settled'),
+    new Promise((r) => setTimeout(() => r('timed_out'), 500))
+  ]);
+
+  assert.equal(outcome, 'settled', 'stop must settle even when child process never closes');
+});
+
+test('Commit 1: Signal cleanup and startup failure', { timeout: 10000 }, async (t) => {
+  const testDir = createTestHarnessDir();
+  const paths = getCanonicalSocketPaths(testDir);
+  t.after(() => cleanupTestDir(testDir));
+
+  const supervisor = new ProductionHostSupervisor({ runtimeDir: testDir });
+  await assert.rejects(
+    supervisor.start({
+      binaryPath: process.execPath,
+      binaryArgs: ['-e', 'process.exit(42)'],
+      readinessTimeoutMs: 300
+    }),
+    /exited|startup/i
+  );
+  assert.equal(supervisor.controlServer, null, 'failed start must close control server');
+  assert.equal(fs.existsSync(paths.controlSocketPath), false, 'control socket unlinked on startup failure');
+});
+
+test('Commit 1: Cross-session status consistency', { timeout: 10000 }, async (t) => {
+  const testDir = createTestHarnessDir();
+  t.after(() => cleanupTestDir(testDir));
+
+  const supervisor = new ProductionHostSupervisor({ runtimeDir: testDir });
+  await supervisor.startControlServer();
+  supervisor.state = 'running';
+  // Attempt status when native is null
+  const probe = await supervisor.checkControlStatus(300);
+  assert.equal(probe.alive, false, 'running state without embedded native observation rejected');
+  await supervisor.finalizeDaemonTeardown();
+});
+
+

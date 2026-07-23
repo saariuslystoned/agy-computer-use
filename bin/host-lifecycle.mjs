@@ -41,8 +41,8 @@ export async function executeHostStart(customSupervisor) {
     const initialGen = ctrlProbe.data.generation;
 
     if (ownerStatus === 'running') {
-      const nativeProbe = await supervisor.checkNativeStatus(1000);
-      if (nativeProbe.alive) {
+      const native = ctrlProbe.data.native;
+      if (native) {
         console.log(JSON.stringify({
           success: true,
           status: 'running',
@@ -52,11 +52,15 @@ export async function executeHostStart(customSupervisor) {
           nativePid: ctrlProbe.data.nativePid || ctrlProbe.data.pid || null,
           pid: ctrlProbe.data.nativePid || ctrlProbe.data.pid || null,
           socketPath: paths.hostSocketPath,
-          tcc_permission_state: nativeProbe.data.tcc_permission_state
+          tcc_permission_state: native.tcc_permission_state
         }, null, 2));
         process.exit(0);
         return;
       }
+    }
+
+    if (ownerStatus === 'stopping') {
+      fail('Existing host daemon is currently stopping. Refusing to start over stopping host.', 'error', 'STOPPING_IN_PROGRESS', 1);
     }
 
     if (ownerStatus === 'starting') {
@@ -65,19 +69,14 @@ export async function executeHostStart(customSupervisor) {
       const startWaitBegin = Date.now();
       let readyRunning = false;
       let finalCtrlData = null;
-      let finalNativeData = null;
 
       while (Date.now() - startWaitBegin < startWaitTimeoutMs) {
         const cProbe = await supervisor.checkControlStatus(300);
         if (cProbe.alive && cProbe.data.generation === initialGen) {
-          if (cProbe.data.status === 'running') {
-            const nProbe = await supervisor.checkNativeStatus(300);
-            if (nProbe.alive) {
-              readyRunning = true;
-              finalCtrlData = cProbe.data;
-              finalNativeData = nProbe.data;
-              break;
-            }
+          if (cProbe.data.status === 'running' && cProbe.data.native) {
+            readyRunning = true;
+            finalCtrlData = cProbe.data;
+            break;
           }
         } else if (!cProbe.alive) {
           break;
@@ -85,7 +84,7 @@ export async function executeHostStart(customSupervisor) {
         await new Promise((r) => setTimeout(r, 150));
       }
 
-      if (readyRunning && finalCtrlData && finalNativeData) {
+      if (readyRunning && finalCtrlData && finalCtrlData.native) {
         console.log(JSON.stringify({
           success: true,
           status: 'running',
@@ -95,7 +94,7 @@ export async function executeHostStart(customSupervisor) {
           nativePid: finalCtrlData.nativePid || finalCtrlData.pid || null,
           pid: finalCtrlData.nativePid || finalCtrlData.pid || null,
           socketPath: paths.hostSocketPath,
-          tcc_permission_state: finalNativeData.tcc_permission_state
+          tcc_permission_state: finalCtrlData.native.tcc_permission_state
         }, null, 2));
         process.exit(0);
         return;
@@ -206,29 +205,26 @@ export async function executeHostStatus(customSupervisor) {
 
   if (ctrlProbe.alive) {
     if (ctrlProbe.data.status === 'running') {
-      const nativeProbe = await supervisor.checkNativeStatus(1000);
-      if (nativeProbe.alive) {
-        console.log(JSON.stringify({
-          success: true,
-          status: 'running',
-          generation: ctrlProbe.data.generation,
-          daemonPid: ctrlProbe.data.daemonPid,
-          nativePid: ctrlProbe.data.nativePid || ctrlProbe.data.pid || null,
-          pid: ctrlProbe.data.nativePid || ctrlProbe.data.pid || null,
-          data: nativeProbe.data
-        }, null, 2));
-        process.exit(0);
-        return;
-      }
-    } else if (ctrlProbe.data.status === 'starting') {
       console.log(JSON.stringify({
         success: true,
-        status: 'starting',
+        status: 'running',
         generation: ctrlProbe.data.generation,
         daemonPid: ctrlProbe.data.daemonPid,
         nativePid: ctrlProbe.data.nativePid || ctrlProbe.data.pid || null,
         pid: ctrlProbe.data.nativePid || ctrlProbe.data.pid || null,
-        data: ctrlProbe.data
+        data: ctrlProbe.data.native
+      }, null, 2));
+      process.exit(0);
+      return;
+    } else if (ctrlProbe.data.status === 'starting' || ctrlProbe.data.status === 'stopping') {
+      console.log(JSON.stringify({
+        success: true,
+        status: ctrlProbe.data.status,
+        generation: ctrlProbe.data.generation,
+        daemonPid: ctrlProbe.data.daemonPid,
+        nativePid: ctrlProbe.data.nativePid || ctrlProbe.data.pid || null,
+        pid: ctrlProbe.data.nativePid || ctrlProbe.data.pid || null,
+        data: ctrlProbe.data.native || null
       }, null, 2));
       process.exit(0);
       return;
@@ -291,45 +287,70 @@ export async function executeHostStop(customSupervisor) {
       );
       if (res && res.success && res.data && res.data.status === 'stopped') {
         const receipt = res.data;
-        if (receipt.generation !== ownerGen || receipt.daemonPid !== ownerDaemonPid) {
-          fail('Stop receipt identity mismatch', 'STALE_OR_AMBIGUOUS', 'STOP_FAILED', 1);
+        if (
+          typeof receipt.generation !== 'string' ||
+          receipt.generation !== ownerGen ||
+          typeof receipt.daemonPid !== 'number' ||
+          receipt.daemonPid !== ownerDaemonPid ||
+          (receipt.nativePid !== null && typeof receipt.nativePid !== 'number') ||
+          receipt.native_closed !== true ||
+          typeof receipt.killEscalated !== 'boolean' ||
+          !receipt.residueState ||
+          typeof receipt.residueState.hostSocketClean !== 'boolean' ||
+          typeof receipt.residueState.lockFilePreserved !== 'boolean'
+        ) {
+          fail('Malformed stop receipt received from supervisor', 'error', 'MALFORMED_RECEIPT', 1);
         }
 
-        // Bounded wait for daemon process termination and socket absence
+        // Bounded wait for daemon & native process termination and socket absence
         const stopWaitBegin = Date.now();
         const stopWaitTimeoutMs = 3000;
         let daemonDead = false;
 
         while (Date.now() - stopWaitBegin < stopWaitTimeoutMs) {
-          try {
-            process.kill(ownerDaemonPid, 0);
-            await new Promise((r) => setTimeout(r, 50));
-          } catch {
+          let dAlive = true;
+          try { process.kill(ownerDaemonPid, 0); } catch { dAlive = false; }
+          let nAlive = false;
+          if (ownerNativePid) {
+            try { process.kill(ownerNativePid, 0); nAlive = true; } catch { nAlive = false; }
+          }
+          if (!dAlive && !nAlive) {
             daemonDead = true;
             break;
           }
+          await new Promise((r) => setTimeout(r, 40));
         }
 
         let ctrlSocketPresent = false;
-        try { fs.lstatSync(paths.controlSocketPath); ctrlSocketPresent = true; } catch {}
+        try { fs.lstatSync(paths.controlSocketPath); ctrlSocketPresent = true; } catch (err) {
+          if (err.code !== 'ENOENT') ctrlSocketPresent = true;
+        }
 
         let hostSocketPresent = false;
-        try { fs.lstatSync(paths.hostSocketPath); hostSocketPresent = true; } catch {}
+        try { fs.lstatSync(paths.hostSocketPath); hostSocketPresent = true; } catch (err) {
+          if (err.code !== 'ENOENT') hostSocketPresent = true;
+        }
 
-        if (daemonDead && !ctrlSocketPresent) {
+        let lockFilePreserved = false;
+        try {
+          const lockSt = fs.lstatSync(paths.lockFilePath);
+          lockFilePreserved = lockSt.isFile() && (lockSt.mode & 0o077) === 0;
+        } catch {}
+
+        if (daemonDead && !ctrlSocketPresent && !hostSocketPresent && lockFilePreserved) {
           const finalReceipt = {
             success: true,
             status: 'stopped',
             idempotent: false,
             generation: receipt.generation,
             daemonPid: receipt.daemonPid,
-            nativePid: receipt.nativePid ?? ownerNativePid,
-            native_closed: receipt.native_closed ?? true,
-            killEscalated: receipt.killEscalated ?? false,
+            nativePid: receipt.nativePid,
+            native_closed: receipt.native_closed,
+            killEscalated: receipt.killEscalated,
             residueState: {
               hostSocketClean: !hostSocketPresent,
               controlSocketClean: !ctrlSocketPresent,
-              lockFilePreserved: receipt.residueState?.lockFilePreserved ?? true
+              lockFilePreserved: lockFilePreserved
             }
           };
           console.log(JSON.stringify(finalReceipt, null, 2));
@@ -337,7 +358,7 @@ export async function executeHostStop(customSupervisor) {
           return;
         }
 
-        fail('Daemon process did not terminate within timeout after stop receipt', 'error', 'STOP_TIMEOUT', 1);
+        fail('Daemon or native process did not terminate within timeout after stop receipt', 'error', 'STOP_TIMEOUT', 1);
       }
     } catch (err) {
       fail(`Failed to send stop request to active supervisor: ${err.message}`, 'error', 'STOP_FAILED', 1);

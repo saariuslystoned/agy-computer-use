@@ -81,8 +81,8 @@ export function safeUnlinkSocket(socketPath, rootIdentity, socketIdentity) {
   if (!rootIdentity || typeof rootIdentity !== 'object' || rootIdentity.uid === undefined || rootIdentity.dev === undefined || rootIdentity.ino === undefined) {
     throw new Error(`safeUnlinkSocket requires mandatory captured rootIdentity {uid, dev, ino}`);
   }
-  if (!socketIdentity || typeof socketIdentity !== 'object' || socketIdentity.ino === undefined || socketIdentity.dev === undefined || socketIdentity.ino === null || socketIdentity.dev === null) {
-    throw new Error(`safeUnlinkSocket requires mandatory captured socketIdentity {uid, dev, ino}`);
+  if (!socketIdentity || typeof socketIdentity !== 'object' || socketIdentity.uid === undefined || socketIdentity.uid === null || socketIdentity.type === undefined || socketIdentity.type === null || socketIdentity.ino === undefined || socketIdentity.dev === undefined || socketIdentity.ino === null || socketIdentity.dev === null) {
+    throw new Error(`safeUnlinkSocket requires mandatory captured socketIdentity {uid, type, dev, ino}`);
   }
 
   let st;
@@ -151,6 +151,13 @@ export function sendFramedIPCRequest(socketPath, requestObj, timeoutMs = 3000) {
       return reject(new Error('IPC request must include a valid request id'));
     }
 
+    const payloadJsonStr = JSON.stringify(requestObj);
+    const payloadBuf = Buffer.from(payloadJsonStr, 'utf-8');
+    const MAX_PAYLOAD_SIZE = 16 * 1024 * 1024;
+    if (payloadBuf.length > MAX_PAYLOAD_SIZE) {
+      return reject(new Error(`IPC request payload size ${payloadBuf.length} bytes exceeds 16MB limit`));
+    }
+
     let st;
     try {
       st = fs.lstatSync(socketPath);
@@ -184,14 +191,12 @@ export function sendFramedIPCRequest(socketPath, requestObj, timeoutMs = 3000) {
     };
 
     client = net.createConnection(socketPath, () => {
-      const payloadBuf = Buffer.from(JSON.stringify(requestObj), 'utf-8');
       const headerBuf = Buffer.alloc(4);
       headerBuf.writeUInt32BE(payloadBuf.length, 0);
       client.write(Buffer.concat([headerBuf, payloadBuf]));
     });
 
     let rxBuf = Buffer.alloc(0);
-    const MAX_PAYLOAD_SIZE = 16 * 1024 * 1024;
 
     client.on('data', (chunk) => {
       rxBuf = Buffer.concat([rxBuf, chunk]);
@@ -205,6 +210,13 @@ export function sendFramedIPCRequest(socketPath, requestObj, timeoutMs = 3000) {
           return;
         }
         if (rxBuf.length >= 4 + msgLen) {
+          if (rxBuf.length > 4 + msgLen) {
+            cleanup();
+            if (settled) return;
+            settled = true;
+            reject(new Error(`Trailing data in frame beyond ${4 + msgLen} bytes`));
+            return;
+          }
           const payloadJson = rxBuf.subarray(4, 4 + msgLen).toString('utf-8');
           cleanup();
           if (settled) return;
@@ -337,7 +349,10 @@ export class ProductionHostSupervisor {
           (d.nativePid === null || typeof d.nativePid === 'number') &&
           ['starting', 'running', 'stopping'].includes(d.status)
         ) {
-          if (d.status === 'running' && d.native) {
+          if (d.status === 'running') {
+            if (!d.native) {
+              return { alive: false, reason: 'running owner without embedded native observation must be rejected', raw: res };
+            }
             if (!validateStatusResponseSchema({ id: res.id, success: true, data: d.native })) {
               return { alive: false, reason: 'invalid_native_schema', raw: res };
             }
@@ -536,6 +551,7 @@ export class ProductionHostSupervisor {
   }
 
   async finalizeDaemonTeardown() {
+    this.removeSignalListeners();
     if (this.activeConnections) {
       for (const sock of this.activeConnections) {
         try { sock.destroy(); } catch {}
@@ -545,12 +561,22 @@ export class ProductionHostSupervisor {
     const server = this.controlServer;
     this.controlServer = null;
     if (server) {
-      await new Promise((resolve) => {
-        try { server.close(() => resolve()); } catch { resolve(); }
+      await new Promise((resolve, reject) => {
+        try {
+          server.close((err) => {
+            if (err) reject(err);
+            else resolve();
+          });
+        } catch (err) {
+          reject(err);
+        }
       });
     }
     if (this.controlSocketIno !== null && this.controlSocketDev !== null && this.rootIdentity) {
-      safeUnlinkSocket(this.controlSocketPath, this.rootIdentity, { ino: this.controlSocketIno, dev: this.controlSocketDev });
+      let st = null;
+      try { st = fs.lstatSync(this.controlSocketPath); } catch {}
+      const socketUid = st ? st.uid : (process.getuid ? process.getuid() : 501);
+      safeUnlinkSocket(this.controlSocketPath, this.rootIdentity, { uid: socketUid, type: 'socket', ino: this.controlSocketIno, dev: this.controlSocketDev });
     }
     if (this.isDaemonProcess) {
       process.exit(0);
@@ -559,6 +585,15 @@ export class ProductionHostSupervisor {
 
   _finalizeDaemonTeardown() {
     this.finalizeDaemonTeardown().catch(() => {});
+  }
+
+  removeSignalListeners() {
+    if (this.signalCleanup) {
+      process.removeListener('SIGTERM', this.signalCleanup);
+      process.removeListener('SIGINT', this.signalCleanup);
+      process.removeListener('SIGHUP', this.signalCleanup);
+      this.signalCleanup = null;
+    }
   }
 
   async handleControlRequest(req) {
@@ -626,7 +661,7 @@ export class ProductionHostSupervisor {
     await this.startControlServer();
     this.state = 'starting';
 
-    const cleanupSignal = () => {
+    this.signalCleanup = () => {
       if (!this.stoppingFromSignal) {
         this.stoppingFromSignal = true;
         this.stop().then(() => {
@@ -636,15 +671,9 @@ export class ProductionHostSupervisor {
         });
       }
     };
-    process.once('SIGTERM', cleanupSignal);
-    process.once('SIGINT', cleanupSignal);
-    process.once('SIGHUP', cleanupSignal);
-
-    const removeSignalListeners = () => {
-      process.removeListener('SIGTERM', cleanupSignal);
-      process.removeListener('SIGINT', cleanupSignal);
-      process.removeListener('SIGHUP', cleanupSignal);
-    };
+    process.once('SIGTERM', this.signalCleanup);
+    process.once('SIGINT', this.signalCleanup);
+    process.once('SIGHUP', this.signalCleanup);
 
     try {
       const stageOpts = options.build !== undefined ? { build: options.build } : {};
@@ -724,13 +753,9 @@ export class ProductionHostSupervisor {
         tcc_permission_state: lastNativeData.tcc_permission_state
       };
     } catch (err) {
-      await this.stop();
-      if (this.isDaemonProcess) {
-        this._finalizeDaemonTeardown();
-      }
+      try { await this.stop(); } catch {}
+      try { await this.finalizeDaemonTeardown(); } catch {}
       throw err;
-    } finally {
-      removeSignalListeners();
     }
   }
 
@@ -743,6 +768,7 @@ export class ProductionHostSupervisor {
   }
 
   async _stopInternal(stopTimeoutMs = 3000) {
+    this.removeSignalListeners();
     this.state = 'stopping';
 
     const nativePid = this.child?.pid || null;
@@ -761,7 +787,7 @@ export class ProductionHostSupervisor {
 
       let graceTimer = null;
       const timeoutPromise = new Promise((r) => {
-        graceTimer = setTimeout(() => r('timed_out'), stopTimeoutMs);
+        graceTimer = setTimeout(() => r('timed_out'), Math.min(stopTimeoutMs, 2000));
       });
 
       try {
@@ -777,34 +803,55 @@ export class ProductionHostSupervisor {
         try {
           proc.kill('SIGKILL');
         } catch {}
-        await childPromise;
+
+        let killTimer = null;
+        const killTimeoutPromise = new Promise((r) => {
+          killTimer = setTimeout(() => r('kill_timed_out'), 100);
+        });
+        const killRes = await Promise.race([childPromise, killTimeoutPromise]);
+        if (killTimer) clearTimeout(killTimer);
+        if (killRes === 'kill_timed_out') {
+          nativeClosed = false;
+        } else {
+          nativeClosed = true;
+        }
+      } else {
+        nativeClosed = true;
       }
-      nativeClosed = true;
       this.child = null;
     } else {
       nativeClosed = true;
     }
 
+    let hostSocketClean = true;
     if (this.hostSocketIno !== null && this.hostSocketDev !== null && this.rootIdentity) {
-      safeUnlinkSocket(this.hostSocketPath, this.rootIdentity, { ino: this.hostSocketIno, dev: this.hostSocketDev });
+      try {
+        let st = null;
+        try { st = fs.lstatSync(this.hostSocketPath); } catch {}
+        const socketUid = st ? st.uid : (process.getuid ? process.getuid() : 501);
+        safeUnlinkSocket(this.hostSocketPath, this.rootIdentity, { uid: socketUid, type: 'socket', ino: this.hostSocketIno, dev: this.hostSocketDev });
+      } catch (err) {
+        if (err.code !== 'ENOENT') hostSocketClean = false;
+      }
     }
 
-    let hostSocketClean = true;
     try {
       const st = fs.lstatSync(this.hostSocketPath);
       if (st) hostSocketClean = false;
-    } catch {
-      hostSocketClean = true;
+    } catch (err) {
+      if (err.code === 'ENOENT') {
+        hostSocketClean = true;
+      } else {
+        hostSocketClean = false;
+      }
     }
 
-    let lockFilePreserved = true;
-    if (fs.existsSync(this.lockFilePath)) {
-      try {
-        const st = fs.lstatSync(this.lockFilePath);
-        lockFilePreserved = st.isFile();
-      } catch {
-        lockFilePreserved = false;
-      }
+    let lockFilePreserved = false;
+    try {
+      const st = fs.lstatSync(this.lockFilePath);
+      lockFilePreserved = st.isFile() && !st.isSymbolicLink() && (st.mode & 0o077) === 0;
+    } catch {
+      lockFilePreserved = false;
     }
 
     if (!hostSocketClean || !lockFilePreserved) {
