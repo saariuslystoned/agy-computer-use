@@ -41,7 +41,7 @@ This skill teaches Google Antigravity agents (and Gemini models) how to reliably
 - All input actions require a nonblank `intent` explaining the target purpose.
 - `computer_use_move`: Dispatches a single same-display mouse move without clicking.
 - `computer_use_scroll`: Dispatches a finite anchored scroll wheel event with bounded non-zero scroll deltas (`delta_x`, `delta_y`).
-- `computer_use_drag`: Dispatches a same-display drag from (`start_x`, `start_y`) to (`end_x`, `end_y`) with guaranteed input release on every terminal path. Cross-display drags are deferred.
+- `computer_use_drag`: Dispatches a same-display drag from (`start_x`, `start_y`) to (`end_x`, `end_y`) using the left mouse button (`button: "left"`) with guaranteed input release on every terminal path. Cross-display drags and non-left drag buttons are deferred.
 
 ### 4. Coordinate System (`0...999`)
 - All coordinates in visual layout analysis and input synthesis actions (`click`, `move`, `scroll`, `drag`) are normalized to an integer grid from `0` to `999`.

@@ -362,7 +362,17 @@
             "delta_x": { "type": "integer", "minimum": -1000, "maximum": 1000 },
             "delta_y": { "type": "integer", "minimum": -1000, "maximum": 1000 },
             "intent": { "type": "string", "minLength": 1 }
-          }
+          },
+          "anyOf": [
+            {
+              "required": ["delta_x"],
+              "properties": { "delta_x": { "not": { "const": 0 } } }
+            },
+            {
+              "required": ["delta_y"],
+              "properties": { "delta_y": { "not": { "const": 0 } } }
+            }
+          ]
         }
       }
     },
@@ -384,7 +394,7 @@
             "start_y": { "type": "integer", "minimum": 0, "maximum": 999 },
             "end_x": { "type": "integer", "minimum": 0, "maximum": 999 },
             "end_y": { "type": "integer", "minimum": 0, "maximum": 999 },
-            "button": { "enum": ["left", "right", "middle"] },
+            "button": { "enum": ["left"] },
             "intent": { "type": "string", "minLength": 1 }
           }
         }

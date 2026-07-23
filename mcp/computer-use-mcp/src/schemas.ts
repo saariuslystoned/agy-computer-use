@@ -136,18 +136,18 @@ export const AXTreeInputSchema = z.object({
 
 export const AXNodeSchema: z.ZodType<any> = z.lazy(() =>
   z.object({
-    id: z.string().min(1),
-    role: z.string().min(1),
-    subrole: z.string().optional(),
-    title: z.string().optional(),
-    value: z.string().optional(),
+    id: z.string().min(1).max(256),
+    role: z.string().min(1).max(256),
+    subrole: z.string().max(256).optional(),
+    title: z.string().max(256).optional(),
+    value: z.string().max(256).optional(),
     enabled: z.boolean().optional(),
     focused: z.boolean().optional(),
     bounds: z.object({
-      x: z.number().finite(),
-      y: z.number().finite(),
-      width: z.number().finite(),
-      height: z.number().finite()
+      x: z.number().nonnegative().finite(),
+      y: z.number().nonnegative().finite(),
+      width: z.number().nonnegative().finite(),
+      height: z.number().nonnegative().finite()
     }).strict(),
     children: z.array(AXNodeSchema).optional()
   }).strict()
@@ -155,18 +155,64 @@ export const AXNodeSchema: z.ZodType<any> = z.lazy(() =>
 
 export const AXTargetAppSchema = z.object({
   pid: z.number().int().positive(),
-  bundle_id: z.string().optional(),
-  name: z.string().optional()
+  bundle_id: z.string().max(256).optional(),
+  name: z.string().max(256).optional()
 }).strict();
+
+export function inspectTreeStructure(node: any, currentDepth = 1): { count: number; maxDepth: number; ids: Set<string>; hasDuplicateId: boolean } {
+  let count = 1;
+  let maxDepth = currentDepth;
+  const ids = new Set<string>([node.id]);
+  let hasDuplicateId = false;
+
+  if (Array.isArray(node.children)) {
+    for (const child of node.children) {
+      const childRes = inspectTreeStructure(child, currentDepth + 1);
+      count += childRes.count;
+      maxDepth = Math.max(maxDepth, childRes.maxDepth);
+      for (const id of childRes.ids) {
+        if (ids.has(id)) {
+          hasDuplicateId = true;
+        }
+        ids.add(id);
+      }
+      if (childRes.hasDuplicateId) {
+        hasDuplicateId = true;
+      }
+    }
+  }
+  return { count, maxDepth, ids, hasDuplicateId };
+}
 
 export const AXTreeDataSchema = z.object({
   target_app: AXTargetAppSchema,
   topology_version: TopologyVersionSchema,
-  node_count: z.number().int().nonnegative(),
-  max_depth_reached: z.number().int().nonnegative(),
+  node_count: z.number().int().min(1).max(500),
+  max_depth_reached: z.number().int().min(1).max(10),
   truncated: z.boolean(),
   tree: AXNodeSchema
-}).strict();
+}).strict()
+.refine(
+  (data) => {
+    const struct = inspectTreeStructure(data.tree);
+    return data.node_count === struct.count;
+  },
+  { message: "node_count must match actual node count in tree" }
+)
+.refine(
+  (data) => {
+    const struct = inspectTreeStructure(data.tree);
+    return data.max_depth_reached === struct.maxDepth;
+  },
+  { message: "max_depth_reached must match actual max depth in tree" }
+)
+.refine(
+  (data) => {
+    const struct = inspectTreeStructure(data.tree);
+    return !struct.hasDuplicateId;
+  },
+  { message: "AX tree node IDs must be unique" }
+);
 
 export const ClickInputSchema = z.object({
   capture_id: z.string().min(1),
@@ -206,7 +252,7 @@ export const DragInputSchema = z.object({
   start_y: z.number().int().min(0).max(999),
   end_x: z.number().int().min(0).max(999),
   end_y: z.number().int().min(0).max(999),
-  button: z.enum(["left", "right", "middle"]).optional(),
+  button: z.enum(["left"]).optional(),
   intent: z.string().trim().min(1)
 }).strict();
 

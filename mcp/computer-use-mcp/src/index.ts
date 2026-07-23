@@ -589,7 +589,7 @@ export function createComputerUseServer(hostClient: HostClient): Server {
         start_y: { type: "integer", minimum: 0, maximum: 999, description: "Normalized start vertical coordinate (0-999)." },
         end_x: { type: "integer", minimum: 0, maximum: 999, description: "Normalized end horizontal coordinate (0-999)." },
         end_y: { type: "integer", minimum: 0, maximum: 999, description: "Normalized end vertical coordinate (0-999)." },
-        button: { type: "string", enum: ["left", "right", "middle"], description: "Optional mouse button. Defaults to left." },
+        button: { type: "string", enum: ["left"], description: "Optional mouse button. Must be left." },
         intent: { type: "string", minLength: 1, description: "Clear explanation of the action's intent." }
       },
       required: ["capture_id", "topology_version", "start_x", "start_y", "end_x", "end_y", "intent"],

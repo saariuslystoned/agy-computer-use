@@ -14,7 +14,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 import { createComputerUseServer, validateAndDecodeBase64JPEG, parseJPEGDimensions } from "../src/index.js";
-import { validatePixelDimensions } from "../src/schemas.js";
+import { validatePixelDimensions, AXTreeDataSchema, DragInputSchema } from "../src/schemas.js";
 import { MockHostClient, UnixSocketHostClient, IPCResponseSchema } from "../src/host-client.js";
 
 const Ajv = (AjvModule as any).default || AjvModule;
@@ -1037,5 +1037,85 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
 
     await client.close();
     await server.close();
+  });
+});
+
+describe("Defect 4 & 5 Hardened Validation Tests", () => {
+  test("AXTreeDataSchema positive and negative validation", () => {
+    const validTreeData = {
+      target_app: { pid: 123, bundle_id: "com.apple.calc", name: "Calc" },
+      topology_version: "top-sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      node_count: 2,
+      max_depth_reached: 2,
+      truncated: false,
+      tree: {
+        id: "ax-window-1",
+        role: "AXWindow",
+        bounds: { x: 0, y: 0, width: 500, height: 500 },
+        children: [
+          {
+            id: "ax-button-2",
+            role: "AXButton",
+            bounds: { x: 10, y: 10, width: 50, height: 20 }
+          }
+        ]
+      }
+    };
+    assert.equal(AXTreeDataSchema.safeParse(validTreeData).success, true);
+
+    // Negative: node_count mismatch
+    const badCountData = { ...validTreeData, node_count: 99 };
+    assert.equal(AXTreeDataSchema.safeParse(badCountData).success, false);
+
+    // Negative: max_depth_reached mismatch
+    const badDepthData = { ...validTreeData, max_depth_reached: 10 };
+    assert.equal(AXTreeDataSchema.safeParse(badDepthData).success, false);
+
+    // Negative: duplicate node ID
+    const duplicateIdData = {
+      ...validTreeData,
+      tree: {
+        id: "ax-node-1",
+        role: "AXWindow",
+        bounds: { x: 0, y: 0, width: 100, height: 100 },
+        children: [
+          { id: "ax-node-1", role: "AXButton", bounds: { x: 0, y: 0, width: 10, height: 10 } }
+        ]
+      }
+    };
+    assert.equal(AXTreeDataSchema.safeParse(duplicateIdData).success, false);
+
+    // Negative: negative bounds
+    const negBoundsData = {
+      ...validTreeData,
+      node_count: 1,
+      max_depth_reached: 1,
+      tree: { id: "ax-1", role: "AXWindow", bounds: { x: -5, y: 0, width: 10, height: 10 } }
+    };
+    assert.equal(AXTreeDataSchema.safeParse(negBoundsData).success, false);
+
+    // Negative: string exceeding 256 chars
+    const longStringData = {
+      ...validTreeData,
+      node_count: 1,
+      max_depth_reached: 1,
+      tree: { id: "ax-1", role: "AXWindow", title: "A".repeat(300), bounds: { x: 0, y: 0, width: 10, height: 10 } }
+    };
+    assert.equal(AXTreeDataSchema.safeParse(longStringData).success, false);
+  });
+
+  test("DragInputSchema rejects right/middle mouse buttons", () => {
+    const validLeftDrag = {
+      capture_id: "cap-1",
+      topology_version: "top-sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      start_x: 0, start_y: 0, end_x: 100, end_y: 100, button: "left", intent: "drag item"
+    };
+    assert.equal(DragInputSchema.safeParse(validLeftDrag).success, true);
+
+    const invalidRightDrag = { ...validLeftDrag, button: "right" };
+    assert.equal(DragInputSchema.safeParse(invalidRightDrag).success, false);
+
+    const invalidMiddleDrag = { ...validLeftDrag, button: "middle" };
+    assert.equal(DragInputSchema.safeParse(invalidMiddleDrag).success, false);
   });
 });

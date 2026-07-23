@@ -155,6 +155,8 @@ public struct DefaultAXInspector: AXInspectionEngine {
         let appDTO = AXTargetAppDTO(pid: Int(pid), bundleId: app.bundleIdentifier, name: app.localizedName)
         let axApp = AXUIElementCreateApplication(pid)
 
+        AXUIElementSetMessagingTimeout(axApp, 5.0)
+
         let maxDepth = min(max(1, requestedMaxDepth), BoundedAXTraverser.defaultMaxDepth)
         let maxNodes = BoundedAXTraverser.defaultMaxNodes
 
@@ -162,6 +164,7 @@ public struct DefaultAXInspector: AXInspectionEngine {
         var maxDepthReached = 0
         var isTruncated = false
         var visited = Set<AXUIElement>()
+        var didTimeout = false
 
         let deadline = ContinuousClock().now + .seconds(5)
 
@@ -174,8 +177,12 @@ public struct DefaultAXInspector: AXInspectionEngine {
             maxDepthReached: &maxDepthReached,
             isTruncated: &isTruncated,
             visited: &visited,
-            deadline: deadline
-        ) else {
+            deadline: deadline,
+            didTimeout: &didTimeout
+        ), !didTimeout else {
+            if didTimeout {
+                throw ComputerUseError.targetUnreachable(reason: "AX tree inspection timed out after 5.0 seconds")
+            }
             throw ComputerUseError.targetUnreachable(reason: "Failed to extract root AX element for application '\(app.localizedName ?? "\(pid)")'")
         }
 
@@ -198,10 +205,11 @@ public struct DefaultAXInspector: AXInspectionEngine {
         maxDepthReached: inout Int,
         isTruncated: inout Bool,
         visited: inout Set<AXUIElement>,
-        deadline: ContinuousClock.Instant
+        deadline: ContinuousClock.Instant,
+        didTimeout: inout Bool
     ) -> AXNodeDTO? {
         if ContinuousClock().now >= deadline {
-            isTruncated = true
+            didTimeout = true
             return nil
         }
 
@@ -216,6 +224,7 @@ public struct DefaultAXInspector: AXInspectionEngine {
         }
         visited.insert(axElement)
         nodeCount += 1
+        let currentNodeIndex = nodeCount
         maxDepthReached = max(maxDepthReached, currentDepth)
 
         var roleStr = "AXUnknown"
@@ -228,32 +237,52 @@ public struct DefaultAXInspector: AXInspectionEngine {
 
         // Role
         var roleValue: CFTypeRef?
-        if AXUIElementCopyAttributeValue(axElement, kAXRoleAttribute as CFString, &roleValue) == .success,
-           let r = roleValue as? String {
+        let roleRes = AXUIElementCopyAttributeValue(axElement, kAXRoleAttribute as CFString, &roleValue)
+        if roleRes == .cannotComplete {
+            didTimeout = true
+            return nil
+        }
+        if roleRes == .success, let r = roleValue as? String {
             roleStr = r
         }
 
         // Subrole
         var subroleValue: CFTypeRef?
-        if AXUIElementCopyAttributeValue(axElement, kAXSubroleAttribute as CFString, &subroleValue) == .success,
-           let sr = subroleValue as? String {
+        let subroleRes = AXUIElementCopyAttributeValue(axElement, kAXSubroleAttribute as CFString, &subroleValue)
+        if subroleRes == .cannotComplete {
+            didTimeout = true
+            return nil
+        }
+        if subroleRes == .success, let sr = subroleValue as? String {
             subroleStr = sr
         }
 
         // Title
         var titleValue: CFTypeRef?
-        if AXUIElementCopyAttributeValue(axElement, kAXTitleAttribute as CFString, &titleValue) == .success,
-           let t = titleValue as? String {
+        let titleRes = AXUIElementCopyAttributeValue(axElement, kAXTitleAttribute as CFString, &titleValue)
+        if titleRes == .cannotComplete {
+            didTimeout = true
+            return nil
+        }
+        if titleRes == .success, let t = titleValue as? String {
             titleStr = t
         }
 
-        // Value
+        // Value - Expose only explicitly supported safe scalar text/value shapes (CFString, CFNumber, CFBoolean)
         var valValue: CFTypeRef?
-        if AXUIElementCopyAttributeValue(axElement, kAXValueAttribute as CFString, &valValue) == .success {
-            if let v = valValue as? String {
-                valueStr = v
-            } else if let v = valValue {
-                valueStr = String(describing: v)
+        let valRes = AXUIElementCopyAttributeValue(axElement, kAXValueAttribute as CFString, &valValue)
+        if valRes == .cannotComplete {
+            didTimeout = true
+            return nil
+        }
+        if valRes == .success, let v = valValue {
+            if let str = v as? String {
+                valueStr = str
+            } else if let num = v as? NSNumber {
+                valueStr = num.stringValue
+            } else if CFGetTypeID(v) == CFBooleanGetTypeID() {
+                let b = (v as! CFBoolean) == kCFBooleanTrue
+                valueStr = b ? "true" : "false"
             }
         }
 
@@ -271,42 +300,50 @@ public struct DefaultAXInspector: AXInspectionEngine {
             focusedVal = f
         }
 
-        // Position & Size -> Bounds
+        // Position & Size -> Bounds with safe CFGetTypeID and AXValueGetType validation
         var posValue: CFTypeRef?
         var sizeValue: CFTypeRef?
         var pt = CGPoint.zero
         var sz = CGSize.zero
 
         if AXUIElementCopyAttributeValue(axElement, kAXPositionAttribute as CFString, &posValue) == .success,
-           let posVal = posValue {
-            var rawPt = CGPoint.zero
-            if AXValueGetValue(posVal as! AXValue, .cgPoint, &rawPt) {
-                pt = rawPt
+           let posVal = posValue,
+           CFGetTypeID(posVal) == AXValueGetTypeID() {
+            let axVal = (posVal as CFTypeRef) as! AXValue
+            if AXValueGetType(axVal) == .cgPoint {
+                var rawPt = CGPoint.zero
+                if AXValueGetValue(axVal, .cgPoint, &rawPt) {
+                    pt = rawPt
+                }
             }
         }
 
         if AXUIElementCopyAttributeValue(axElement, kAXSizeAttribute as CFString, &sizeValue) == .success,
-           let sizeVal = sizeValue {
-            var rawSz = CGSize.zero
-            if AXValueGetValue(sizeVal as! AXValue, .cgSize, &rawSz) {
-                sz = rawSz
+           let sizeVal = sizeValue,
+           CFGetTypeID(sizeVal) == AXValueGetTypeID() {
+            let axVal = (sizeVal as CFTypeRef) as! AXValue
+            if AXValueGetType(axVal) == .cgSize {
+                var rawSz = CGSize.zero
+                if AXValueGetValue(axVal, .cgSize, &rawSz) {
+                    sz = rawSz
+                }
             }
         }
-        boundsRect = AXRect(x: Double(pt.x), y: Double(pt.y), width: Double(sz.width), height: Double(sz.height))
+        boundsRect = AXRect(x: max(0.0, Double(pt.x)), y: max(0.0, Double(pt.y)), width: max(0.0, Double(sz.width)), height: max(0.0, Double(sz.height)))
 
-        // Redaction & Truncation of Strings
+        // Redaction & Truncation of Strings (capped strictly at <= 256 chars including ellipsis)
         let isSecure = (subroleStr == "AXSecureTextField" || subroleStr == (kAXSecureTextFieldSubrole as String))
         if isSecure {
             valueStr = BoundedAXTraverser.redactedPlaceholder
         } else if let v = valueStr {
             if v.count > BoundedAXTraverser.maxStringLength {
-                valueStr = String(v.prefix(BoundedAXTraverser.maxStringLength)) + "..."
+                valueStr = String(v.prefix(BoundedAXTraverser.maxStringLength - 3)) + "..."
                 isTruncated = true
             }
         }
 
         if let t = titleStr, t.count > BoundedAXTraverser.maxStringLength {
-            titleStr = String(t.prefix(BoundedAXTraverser.maxStringLength)) + "..."
+            titleStr = String(t.prefix(BoundedAXTraverser.maxStringLength - 3)) + "..."
             isTruncated = true
         }
 
@@ -314,10 +351,18 @@ public struct DefaultAXInspector: AXInspectionEngine {
         var childrenNodes: [AXNodeDTO] = []
         if currentDepth < maxDepth {
             var childrenValue: CFTypeRef?
-            if AXUIElementCopyAttributeValue(axElement, kAXChildrenAttribute as CFString, &childrenValue) == .success,
-               let childrenArr = childrenValue as? [AXUIElement] {
+            let childRes = AXUIElementCopyAttributeValue(axElement, kAXChildrenAttribute as CFString, &childrenValue)
+            if childRes == .cannotComplete {
+                didTimeout = true
+                return nil
+            }
+            if childRes == .success, let childrenArr = childrenValue as? [AXUIElement] {
                 for childAX in childrenArr {
                     if nodeCount >= maxNodes || ContinuousClock().now >= deadline {
+                        if ContinuousClock().now >= deadline {
+                            didTimeout = true
+                            return nil
+                        }
                         isTruncated = true
                         break
                     }
@@ -330,9 +375,12 @@ public struct DefaultAXInspector: AXInspectionEngine {
                         maxDepthReached: &maxDepthReached,
                         isTruncated: &isTruncated,
                         visited: &visited,
-                        deadline: deadline
+                        deadline: deadline,
+                        didTimeout: &didTimeout
                     ) {
                         childrenNodes.append(childDTO)
+                    } else if didTimeout {
+                        return nil
                     }
                 }
             }
@@ -344,8 +392,7 @@ public struct DefaultAXInspector: AXInspectionEngine {
             }
         }
 
-        let elementHash = abs(axElement.hashValue)
-        let elementId = "ax-\(roleStr)-\(elementHash)"
+        let elementId = "ax-\(roleStr)-\(currentNodeIndex)"
 
         return AXNodeDTO(
             id: elementId,
@@ -373,7 +420,7 @@ public enum BoundedAXTraverser {
             return redactedPlaceholder
         }
         if text.count > maxStringLength {
-            return String(text.prefix(maxStringLength)) + "..."
+            return String(text.prefix(maxStringLength - 3)) + "..."
         }
         return text
     }

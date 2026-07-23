@@ -5663,6 +5663,8 @@ public struct ComputerUseHostTestRunner {
         let mainContent = try String(contentsOfFile: relPath, encoding: .utf8)
         assertTrue(mainContent.contains("let inputEngine = CGEventInputSynthesisEngine()"), "ComputerUseHost main.swift must construct CGEventInputSynthesisEngine")
         assertTrue(!mainContent.contains("DisabledInputInjector()"), "ComputerUseHost main.swift MUST NOT construct DisabledInputInjector")
+        assertTrue(mainContent.contains("let axEngine = DefaultAXInspector()"), "ComputerUseHost main.swift must construct DefaultAXInspector")
+        assertTrue(!mainContent.contains("DisabledAXInspector()"), "ComputerUseHost main.swift MUST NOT construct DisabledAXInspector")
     }
 
     public static func run41_AXTreeInspectionTargetingRedactionCapsAndTruncation() async throws {
@@ -5672,7 +5674,7 @@ public struct ComputerUseHostTestRunner {
 
         let longText = String(repeating: "A", count: 300)
         let sanitizedLong = BoundedAXTraverser.sanitizeText(longText, isSecure: false)
-        assertEqual(sanitizedLong?.count, 259)
+        assertEqual(sanitizedLong?.count, 256)
         assertTrue(sanitizedLong?.hasSuffix("...") == true)
 
         // 2. Test DisabledAXInspector fails closed
@@ -5918,5 +5920,43 @@ public struct ComputerUseHostTestRunner {
         ))
         assertEqual(disMoveResp.success, false)
         assertEqual(disMoveResp.error?.code, "MUTATION_DISABLED")
+
+        // 7. Test scroll delta > 1000 rejection and drag right button rejection
+        let obsResp5 = await server.handleRequest(IPCRequest(id: "req-10", method: "observe"))
+        let capId5 = obsResp5.data?["capture_id"]?.rawValue as? String ?? ""
+        let oobScrollResp = await server.handleRequest(IPCRequest(
+            id: "req-11",
+            method: "scroll",
+            params: [
+                "capture_id": .string(capId5),
+                "topology_version": .string(topo.version),
+                "x": .int(500),
+                "y": .int(500),
+                "delta_x": .int(0),
+                "delta_y": .int(2000),
+                "intent": .string("OOB Scroll")
+            ]
+        ))
+        assertEqual(oobScrollResp.success, false)
+        assertEqual(oobScrollResp.error?.code, "IPC_ERROR")
+
+        let obsResp6 = await server.handleRequest(IPCRequest(id: "req-12", method: "observe"))
+        let capId6 = obsResp6.data?["capture_id"]?.rawValue as? String ?? ""
+        let rightDragResp = await server.handleRequest(IPCRequest(
+            id: "req-13",
+            method: "drag",
+            params: [
+                "capture_id": .string(capId6),
+                "topology_version": .string(topo.version),
+                "start_x": .int(100),
+                "start_y": .int(100),
+                "end_x": .int(400),
+                "end_y": .int(400),
+                "button": .string("right"),
+                "intent": .string("Right drag")
+            ]
+        ))
+        assertEqual(rightDragResp.success, false)
+        assertEqual(rightDragResp.error?.code, "IPC_ERROR")
     }
 }

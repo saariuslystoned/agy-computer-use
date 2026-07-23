@@ -10,13 +10,13 @@ fileprivate func logStderr(_ message: String) {
 @main
 struct ComputerUseHostMain {
     static func main() async throws {
-        logStderr("[ComputerUseHost] Starting native Unix domain socket server (v0.1-m9)...")
+        logStderr("[ComputerUseHost] Starting native Unix domain socket server (v0.2-m10)...")
 
         let authorizer = CGScreenRecordingAuthorizer()
         let topologyProvider = SystemDisplayTopologyProvider()
         let captureEngine = SCScreenshotCaptureEngine(authorizer: authorizer)
         let inputEngine = CGEventInputSynthesisEngine()
-        let axEngine = DisabledAXInspector()
+        let axEngine = DefaultAXInspector()
 
         let server = HostServer(
             authorizer: authorizer,

@@ -380,8 +380,18 @@ public actor HostServer {
                 guard axEngine.isAvailable else {
                     throw ComputerUseError.targetUnreachable(reason: "AX tree inspection is unavailable or untrusted in this build phase")
                 }
+                if let maxDepthRaw = request.params?["max_depth"]?.rawValue as? Int {
+                    guard maxDepthRaw >= 1 && maxDepthRaw <= 10 else {
+                        throw ComputerUseError.ipcError(reason: "max_depth parameter must be an integer between 1 and 10")
+                    }
+                }
                 let maxDepth = request.params?["max_depth"]?.rawValue as? Int ?? 10
                 let appId = request.params?["app_id"]?.rawValue as? String
+                if let rawAppId = appId {
+                    guard !rawAppId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                        throw ComputerUseError.ipcError(reason: "app_id parameter cannot be blank")
+                    }
+                }
                 let currentTop = try topologyProvider.getTopology()
                 let treeResult = try axEngine.inspectTree(maxDepth: maxDepth, appId: appId, topologyVersion: currentTop.version)
                 let encoder = JSONEncoder()
@@ -527,6 +537,12 @@ public actor HostServer {
 
                 let deltaX = request.params?["delta_x"]?.rawValue as? Int ?? 0
                 let deltaY = request.params?["delta_y"]?.rawValue as? Int ?? 0
+                guard deltaX >= -1000 && deltaX <= 1000 else {
+                    throw ComputerUseError.ipcError(reason: "delta_x must be between -1000 and 1000")
+                }
+                guard deltaY >= -1000 && deltaY <= 1000 else {
+                    throw ComputerUseError.ipcError(reason: "delta_y must be between -1000 and 1000")
+                }
                 guard deltaX != 0 || deltaY != 0 else {
                     throw ComputerUseError.ipcError(reason: "At least one scroll delta (delta_x or delta_y) must be non-zero")
                 }
@@ -584,9 +600,10 @@ public actor HostServer {
                 try CoordinateMapper.validateGridCoordinates(x: endX, y: endY)
 
                 let buttonStr = request.params?["button"]?.rawValue as? String ?? "left"
-                guard let button = MouseButton(rawValue: buttonStr) else {
-                    throw ComputerUseError.ipcError(reason: "Invalid mouse button '\(buttonStr)'")
+                guard buttonStr == "left" else {
+                    throw ComputerUseError.ipcError(reason: "Drag button must be 'left' in this minimum-safe slice")
                 }
+                let button = MouseButton.left
 
                 guard let display = currentTop.displays.first(where: { $0.id == activeCap.displayId }) else {
                     throw ComputerUseError.targetUnreachable(reason: "Display ID \(activeCap.displayId) not found in active topology")
