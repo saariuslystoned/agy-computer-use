@@ -855,4 +855,59 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
     await client.close();
     await server.close();
   });
+
+  test("M9-PID-NORMALIZATION: Tests status response with optional pid present and legacy no-pid fallback", async () => {
+    const mockHost = new MockHostClient();
+    mockHost.tccState = "granted";
+    mockHost.axTrusted = true;
+    mockHost.inputMutationState = "enabled";
+
+    const server = createComputerUseServer(mockHost);
+    const client = new Client({ name: "test-client", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport)
+    ]);
+
+    const statusCall1 = await client.callTool({ name: "computer_use_status", arguments: {} });
+    assert.equal((statusCall1 as any).isError, undefined);
+    const data1 = JSON.parse(((statusCall1.content as any[])[0] as any).text);
+    assert.equal(data1.pid, undefined, "Legacy status response without pid passes schema validation");
+
+    await client.close();
+    await server.close();
+
+    const mockHostWithPid = new MockHostClient();
+    mockHostWithPid.tccState = "granted";
+    mockHostWithPid.axTrusted = true;
+    mockHostWithPid.inputMutationState = "enabled";
+
+    const origRequest = mockHostWithPid.request.bind(mockHostWithPid);
+    mockHostWithPid.request = async (method: string, params?: Record<string, any>, signal?: AbortSignal) => {
+      const resp = await origRequest(method, params, signal);
+      if (method === "status" && resp.success && resp.data) {
+        resp.data.pid = 99887;
+      }
+      return resp;
+    };
+
+    const server2 = createComputerUseServer(mockHostWithPid);
+    const client2 = new Client({ name: "test-client", version: "1.0.0" });
+    const [ct2, st2] = InMemoryTransport.createLinkedPair();
+
+    await Promise.all([
+      server2.connect(st2),
+      client2.connect(ct2)
+    ]);
+
+    const statusCall2 = await client2.callTool({ name: "computer_use_status", arguments: {} });
+    assert.equal((statusCall2 as any).isError, undefined);
+    const data2 = JSON.parse(((statusCall2.content as any[])[0] as any).text);
+    assert.equal(data2.pid, 99887, "Status response with positive integer pid passes schema validation");
+
+    await client2.close();
+    await server2.close();
+  });
 });

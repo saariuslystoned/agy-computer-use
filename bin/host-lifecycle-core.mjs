@@ -11,79 +11,64 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const REPO_ROOT = path.resolve(__dirname, '..');
 
-export function getExactProcessIdentity(pid) {
-  if (!pid || typeof pid !== 'number' || pid <= 0) return null;
-  try {
-    const rawCmd = execFileSync('/bin/ps', ['-p', String(pid), '-o', 'args='], { encoding: 'utf8' }).trim();
-    if (!rawCmd) return null;
-    const firstSpace = rawCmd.indexOf(' ');
-    const exeToken = firstSpace === -1 ? rawCmd : rawCmd.substring(0, firstSpace);
-
-    let lstart = '';
-    try {
-      lstart = execFileSync('/bin/ps', ['-p', String(pid), '-o', 'lstart='], { encoding: 'utf8' }).trim();
-    } catch {}
-
-    const executable = exeToken.includes('/') ? path.resolve(exeToken) : exeToken;
-    return { pid, executable, lstart };
-  } catch {}
-  return null;
-}
-
 export function defaultProcessInspector() {
   try {
-    const out = execFileSync('/bin/ps', ['-A', '-o', 'pid=,args='], { encoding: 'utf8' });
+    const out = execFileSync('/bin/ps', ['-A', '-o', 'pid=,lstart=,args='], { encoding: 'utf8' });
     const lines = out.trim().split('\n');
     const procs = [];
     for (const rawLine of lines) {
       const line = rawLine.trim();
       if (!line) continue;
-      const firstSpace = line.indexOf(' ');
-      if (firstSpace === -1) continue;
-      const pid = parseInt(line.substring(0, firstSpace).trim(), 10);
-      if (isNaN(pid) || pid <= 0) continue;
 
-      const fullArgs = line.substring(firstSpace + 1).trim();
+      const parts = line.split(/\s+/);
+      const pid = parseInt(parts[0], 10);
+      if (isNaN(pid) || pid <= 0) continue;
+      if (parts.length < 6) continue;
+
+      const lstart = `${parts[1]} ${parts[2]} ${parts[3]} ${parts[4]} ${parts[5]}`;
+      const rest = line.substring(parts[0].length).trim();
+      const argsStartIndex = rest.indexOf(parts[5]) + parts[5].length;
+      const fullArgs = rest.substring(argsStartIndex).trim();
+      if (!fullArgs) continue;
+
       const argSpace = fullArgs.indexOf(' ');
       const rawBinary = argSpace === -1 ? fullArgs : fullArgs.substring(0, argSpace);
       if (!rawBinary) continue;
 
       const executable = rawBinary.includes('/') ? path.resolve(rawBinary) : rawBinary;
-      procs.push({ pid, executable });
+      procs.push({ pid, executable, lstart });
     }
     return procs;
   } catch {}
   return [];
 }
 
+export function getExactProcessIdentity(pid, processInspector = defaultProcessInspector) {
+  if (!pid || typeof pid !== 'number' || pid <= 0) return null;
+  const allProcs = processInspector();
+  return allProcs.find((p) => p.pid === pid) || null;
+}
+
 export function getExactStagedProcessInventory(stagedAppDir, processInspector = defaultProcessInspector) {
   if (!stagedAppDir) return [];
   const targetBinary = path.resolve(path.join(stagedAppDir, 'Contents/MacOS/ComputerUseHost'));
   const allProcs = processInspector();
-  const matches = [];
-
-  for (const proc of allProcs) {
-    if (proc.executable === targetBinary) {
-      const ident = getExactProcessIdentity(proc.pid);
-      matches.push(ident || { pid: proc.pid, executable: targetBinary, lstart: proc.lstart || '' });
-    }
-  }
-  return matches;
+  return allProcs.filter((proc) => proc.executable === targetBinary);
 }
 
 export function getRunningStagedNativeProcesses(stagedAppDir, processInspector = defaultProcessInspector) {
   return getExactStagedProcessInventory(stagedAppDir, processInspector);
 }
 
-export function getExecutablePathForPid(pid) {
-  const ident = getExactProcessIdentity(pid);
+export function getExecutablePathForPid(pid, processInspector = defaultProcessInspector) {
+  const ident = getExactProcessIdentity(pid, processInspector);
   return ident ? ident.executable : null;
 }
 
-export function validateNativePidExecutable(pid, expectedAppDirOrBinaryPath) {
+export function validateNativePidExecutable(pid, expectedAppDirOrBinaryPath, processInspector = defaultProcessInspector) {
   if (!pid || typeof pid !== 'number' || pid <= 0) return false;
   if (!expectedAppDirOrBinaryPath) return true;
-  const actualComm = getExecutablePathForPid(pid);
+  const actualComm = getExecutablePathForPid(pid, processInspector);
   if (!actualComm) return false;
 
   const normActual = path.resolve(actualComm);
@@ -387,6 +372,10 @@ export class ProductionHostSupervisor {
     this.processInspector = options.processInspector || defaultProcessInspector;
     this.nativePid = null;
     this.state = 'stopped';
+  }
+
+  getProcessIdentity(pid) {
+    return getExactProcessIdentity(pid, this.processInspector);
   }
 
   ensureLockFile() {
@@ -837,7 +826,10 @@ export class ProductionHostSupervisor {
       let proc;
 
       if (stagedAppDir) {
-        const openBin = options.openBinary || '/usr/bin/open';
+        const openBin = options.openBinary || process.env.AGY_TEST_OPEN_BINARY || '/usr/bin/open';
+        if ((process.env.NODE_ENV === 'test' || process.env.AGY_TEST_SUITE === '1') && openBin === '/usr/bin/open') {
+          throw new Error('Refusing to invoke real /usr/bin/open in unit-test environment');
+        }
         const openArgs = [
           '-n', '-g', '-W',
           '--env', `COMPUTER_USE_SOCKET_PATH=${this.hostSocketPath}`,
@@ -983,14 +975,14 @@ export class ProductionHostSupervisor {
 
       if (nativeAlive) {
         if (this.nativeProcIdentity) {
-          const currentIdentity = getExactProcessIdentity(targetNativePid);
+          const currentIdentity = this.getProcessIdentity(targetNativePid);
           if (!currentIdentity || currentIdentity.executable !== this.nativeProcIdentity.executable || currentIdentity.lstart !== this.nativeProcIdentity.lstart) {
             throw new Error(`Refusing to send SIGTERM to PID ${targetNativePid}: current process identity '${JSON.stringify(currentIdentity)}' does not match captured birth identity '${JSON.stringify(this.nativeProcIdentity)}'`);
           }
         } else {
           const expectedTarget = this.stagedAppDir || this.binaryPath;
-          if (expectedTarget && !validateNativePidExecutable(targetNativePid, expectedTarget)) {
-            const actualExe = getExecutablePathForPid(targetNativePid);
+          if (expectedTarget && !validateNativePidExecutable(targetNativePid, expectedTarget, this.processInspector)) {
+            const actualExe = getExecutablePathForPid(targetNativePid, this.processInspector);
             throw new Error(`Refusing to send SIGTERM to PID ${targetNativePid}: executable identity '${actualExe}' does not match expected staged binary '${expectedTarget}'`);
           }
         }
@@ -1009,7 +1001,7 @@ export class ProductionHostSupervisor {
           this.killEscalated = true;
 
           if (this.nativeProcIdentity) {
-            const currentIdentity = getExactProcessIdentity(targetNativePid);
+            const currentIdentity = this.getProcessIdentity(targetNativePid);
             if (!currentIdentity || currentIdentity.executable !== this.nativeProcIdentity.executable || currentIdentity.lstart !== this.nativeProcIdentity.lstart) {
               throw new Error(`Refusing to send SIGKILL to PID ${targetNativePid}: process birth identity changed before SIGKILL`);
             }

@@ -245,7 +245,7 @@ public actor HostServer {
                 let currentTopology = try topologyProvider.getTopology()
                 self.activeTopology = currentTopology
                 let isGranted = authorizer.isScreenCaptureAccessGranted
-                let osAxTrusted = AXIsProcessTrusted()
+                let osAxTrusted = inputEngine.isMutationEnabled
 
                 let topologyDict: [String: AnyCodable] = [
                     "version": .string(currentTopology.version),

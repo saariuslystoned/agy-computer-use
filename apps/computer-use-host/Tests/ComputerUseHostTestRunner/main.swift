@@ -1591,7 +1591,7 @@ public struct ComputerUseHostTestRunner {
             "pid": .int(Int(ProcessInfo.processInfo.processIdentifier)),
             "tcc_permission_state": .string("granted"),
             "accessibility_available": .bool(false),
-            "accessibility_trusted": .bool(AXIsProcessTrusted()),
+            "accessibility_trusted": .bool(false),
             "ax_tree_inspection_available": .bool(false),
             "input_mutation_state": .string("disabled"),
             "topology_version": .string(fakeTopo.version),

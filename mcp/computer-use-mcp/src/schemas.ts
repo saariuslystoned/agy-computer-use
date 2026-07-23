@@ -84,6 +84,7 @@ export const DisplayTopologySchema = z.object({
 
 export const StatusDataSchema = z.object({
   connected: z.boolean(),
+  pid: z.number().int().positive().optional(),
   tcc_permission_state: z.enum(["granted", "denied"]),
   accessibility_available: z.boolean(),
   accessibility_trusted: z.boolean(),

@@ -1,3 +1,4 @@
+process.env.AGY_TEST_SUITE = '1';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -989,7 +990,7 @@ process.exit(0);
     if (fs.existsSync(childPidFile)) {
       spawnedChildPid = parseInt(fs.readFileSync(childPidFile, 'utf8'), 10);
       if (spawnedChildPid > 0) {
-        return [{ pid: spawnedChildPid, executable: stagedBinaryPath }];
+        return [{ pid: spawnedChildPid, executable: stagedBinaryPath, lstart: 'mock-start-time' }];
       }
     }
     return [];
@@ -1049,7 +1050,7 @@ test('M9-LAUNCHSERVICES-REJECT-PREEXISTING: Rejects launch if pre-existing stage
   });
 
   await assert.rejects(
-    async () => { await supervisor.start(); },
+    async () => { await supervisor.start({ openBinary: '/usr/bin/true' }); },
     (err) => {
       assert.match(err.message, /Refusing to launch staged app/);
       assert.match(err.message, /pre-existing running instance/);
@@ -1087,7 +1088,7 @@ test('M9-LAUNCHSERVICES-REJECT-MULTIPLE: Rejects launch if ambiguous multiple pr
   supervisor.startControlServer = async () => {};
 
   await assert.rejects(
-    async () => { await supervisor.start({ binaryPath: path.join(validAppDir, 'Contents/MacOS/ComputerUseHost') }); },
+    async () => { await supervisor.start({ openBinary: '/usr/bin/true' }); },
     (err) => {
       assert.match(err.message, /ambiguous multiple \(2\) new running processes/);
       return true;
