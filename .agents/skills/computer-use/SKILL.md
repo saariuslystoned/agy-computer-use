@@ -47,6 +47,11 @@ This skill teaches Google Antigravity agents (and Gemini models) how to reliably
 - All coordinates in visual layout analysis and input synthesis actions (`click`, `move`, `scroll`, `drag`) are normalized to an integer grid from `0` to `999`.
 - `x = 0, y = 0` is Top-Left; `x = 999, y = 999` is Bottom-Right of the active display.
 
+### 5. Phone-Mirror (Vysor) Operations — Addendum A1
+- Registered swarm test devices may be driven through their Vysor desktop mirror window with the same nine tools; the full procedure lives in the [Vysor Phone-Mirror Operations Reference](references/vysor-phone-mirror.md).
+- Load-bearing rules: exclusive desktop ownership before any input (halt on unexplained desktop changes); coordinates derived only from the **current** capture (the phone mutates behind the mirror — a fresh lease is not fresh targeting); mirror-content targeting is vision-only (macOS AX ends at the Vysor window); calibrate the window→phone mapping per the reference and recalibrate on window/rotation/posture/reconnect changes.
+- This mirror lane complements the on-device semantic control lane (Pixel Use MCP); prefer on-device semantic targeting when the lane provides it.
+
 ---
 
 ## Safety & Security Rules
@@ -63,6 +68,7 @@ This skill teaches Google Antigravity agents (and Gemini models) how to reliably
 > 2. Sending emails, RCS, SMS, or external chat messages to real contacts.
 > 3. Deleting system files or executing `sudo` / destructive terminal commands.
 > 4. Modifying macOS System Settings or security permissions.
+> 5. Any phone-side account, security, payment, or communication action through a device mirror (sends, settings toggles, app installs/removals, device unlock/credential entry) — only registered swarm test devices may be mirrored at all, read-only navigation on assigned lanes excepted, per the [Vysor Phone-Mirror Operations Reference](references/vysor-phone-mirror.md).
 
 ---
 
@@ -70,3 +76,4 @@ This skill teaches Google Antigravity agents (and Gemini models) how to reliably
 - [Dogfood Canary Reference](references/dogfood-canary.md)
 - [Observe-Action-Observe Loop Guide](references/observe-action-loop.md)
 - [Accessibility vs Vision Decision Matrix](references/ax-vs-vision.md)
+- [Vysor Phone-Mirror Operations Reference (Addendum A1)](references/vysor-phone-mirror.md)
