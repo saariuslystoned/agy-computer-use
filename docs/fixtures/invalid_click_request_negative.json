@@ -1,0 +1,11 @@
+{
+  "id": "req-bad-click",
+  "method": "click",
+  "params": {
+    "x": 1050,
+    "y": 500,
+    "capture_id": "cap-1",
+    "topology_version": "top-v1",
+    "intent": "   "
+  }
+}

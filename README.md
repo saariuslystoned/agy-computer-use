@@ -3,14 +3,19 @@
 [![macOS](https://img.shields.io/badge/OS-macOS%2014%2B-blue.svg)](https://apple.com)
 [![Gemini](https://img.shields.io/badge/Model-Gemini%203.6%20Flash-orange.svg)](https://deepmind.google/technologies/gemini/)
 [![Antigravity](https://img.shields.io/badge/Platform-Google%20Antigravity-green.svg)](https://antigravity.google)
+[![Build Status](https://img.shields.io/badge/v0.1-M10%2FD3%20Dogfood-blue.svg)](#)
 
-> High-performance, dual-mode (Accessibility + Multimodal Vision) Computer Use agent platform for Google Antigravity & Gemini 3.6 Flash.
+> Architecture specification and production-bounded M10/D3 nine-tool computer-use surface for Google Antigravity & Gemini 3.6 Flash on macOS.
 
 ---
 
 ## Technical Overview
 
-`agy-computer-use` delivers next-generation computer use capabilities for macOS. Going beyond standard pixel-only screenshot vision, it combines **native macOS Accessibility (AXUIElement) object graph inspection** with **real-time hardware-accelerated Screen Capture (ScreenCaptureKit)** and **CGEvent synthesis**.
+`agy-computer-use` defines an enterprise-grade Computer Use platform for macOS. It combines native macOS screen perception, display topology management, bounded input synthesis, and Unix domain socket IPC via a native host application and an MCP server bridge.
+
+Building on the completed **Milestone D2 & M9 foundations**, Milestone M10 implements and physically dogfoods the nine-tool MCP surface (`computer_use_status`, `computer_use_observe`, `computer_use_ax_tree`, `computer_use_click`, `computer_use_move`, `computer_use_type`, `computer_use_shortcut`, `computer_use_scroll`, `computer_use_drag`) for macOS desktop interactions.
+
+Local ad-hoc staged-app/TCC operation is proven via `ComputerUseHost.app`. Stable team code signing, distribution, and notarization remain human-gated future work.
 
 ### Core Architecture
 
@@ -18,105 +23,102 @@
 flowchart TD
     subgraph Antigravity ["Google Antigravity / Gemini 3.6 Flash"]
         Agent["Antigravity Agent / Gemini Model"]
-        Skill["Computer Use Skill"]
+        Skill["Computer Use Skill (.agents/skills/computer-use)"]
     end
 
-    subgraph Server ["Computer Use MCP Server"]
-        MCP["MCP Server Protocol Handler"]
+    subgraph Server ["Computer Use MCP Server (Node/TypeScript)"]
+        MCP["MCP Protocol Handler (Stdio)"]
+        SocketClient["Unix Domain Socket IPC Client"]
+    end
+
+    subgraph Native ["Staged Background Host (ComputerUseHost)"]
+        SocketServer["Unix Domain Socket Listener (0700)"]
+        AXEngine["AXUIElement Inspector (Active M10)"]
+        CapEngine["Screen Capture Engine (macOS 14+ SCScreenshotManager)"]
+        InputEngine["Input Synthesis Engine (Active M10 Bounded)"]
         CoordMapper["Coordinate & Display Scaler"]
-    end
-
-    subgraph Native ["Native macOS ComputerUseHost App"]
-        AXEngine["AXUIElement Inspector (DOM Tree)"]
-        CapEngine["ScreenCaptureKit Engine (Retina/Display)"]
-        InputEngine["CGEvent Input Injector"]
-        OverlayUI["Action Indicator / Breadcrumb Overlay"]
     end
 
     Agent <--> Skill
     Skill <--> MCP
-    MCP <-->|IPC / Socket / Stdion| Native
-    Native -->|CGEvent| OSInput["macOS Input Subsystem"]
-    Native -->|ScreenCaptureKit| Display["Display Hardware"]
-    Native -->|AXUIElement| AXTree["macOS Accessibility Engine"]
+    MCP <-->|Length-Prefixed JSON-RPC| SocketClient
+    SocketClient <-->|Unix Domain Socket| SocketServer
+    SocketServer <--> AXEngine
+    SocketServer <--> CapEngine
+    SocketServer <--> InputEngine
+    CapEngine -->|Display Bounds & Scale| CoordMapper
 ```
 
 ---
 
-## Key Capabilities (Codex-Parity & Beyond)
+## Tool API Specifications (Milestone M10 Active Surface)
 
-1. **Dual Perception Pipeline**:
-   - **Visual Snapshot**: High-resolution image capture (compressed, retina-calibrated, normalized to 1000x1000 or native resolution).
-   - **Accessibility Tree (AX)**: Precise UI element hierarchy extraction (roles, labels, titles, bounding boxes, enable states) allowing instant click target resolution without visual ambiguity.
+The MCP server exposes the following nine active tools to Gemini 3.6 Flash / Antigravity:
 
-2. **Precision Control Suite**:
-   - **Click Operations**: Single, double, triple, right, middle, mouse-down, mouse-up.
-   - **Drag & Drop**: Smooth trajectory calculation between source and destination coordinates.
-   - **Keyboard & Shortcuts**: Text typing, modifier keys (`Cmd`, `Opt`, `Ctrl`, `Shift`), global keyboard shortcuts (`Cmd+C`, `Cmd+V`, `Cmd+Space`).
-   - **Scrolling**: Horizontal and vertical natural trackpad/wheel emulation.
-
-3. **Multi-Monitor & Retina Aware**:
-   - Automatic scaling conversion between logical points (macOS coordinate system) and physical pixels.
-   - Display selection and bounding box clipping.
-
-4. **Visual Action Feedback Overlay**:
-   - On-screen visual pulse and trajectory indicators during agent execution for transparent human oversight.
-
----
-
-## Repository Structure
-
-```text
-agy-computer-use/
-├── AGENTS.md                  # Development guidelines, safety policies & contracts
-├── README.md                  # Front-door specification and setup guide
-├── apps/
-│   └── computer-use-host/     # Native Swift Desktop Host App / Daemon
-├── mcp/
-│   └── computer-use-mcp/      # Model Context Protocol server bridge
-├── skills/
-│   └── computer-use/          # Antigravity skill package definition
-├── docs/                      # Comprehensive technical documentation & API specs
-├── plans/                     # Implementation milestones and status tracking
-└── proof/                     # Empirical validation test runs and benchmarks
-```
-
----
-
-## Tool API Specifications
-
-The MCP server exposes the following low-latency tools to Gemini 3.6 Flash / Antigravity:
-
-| Tool Name | Parameters | Description |
+| Tool Name | Required Parameters | Description |
 |---|---|---|
-| `computer_use_screenshot` | `display_id?` | Captures current desktop display image and returns visual artifact. |
-| `computer_use_ax_tree` | `app_name?`, `depth?` | Returns macOS Accessibility element tree with exact pixel coordinates. |
-| `computer_use_click` | `x`, `y`, `button?`, `click_count?` | Moves cursor and performs click at specified coordinates. |
-| `computer_use_move` | `x`, `y` | Moves mouse cursor to coordinates. |
-| `computer_use_drag` | `start_x`, `start_y`, `end_x`, `end_y` | Performs drag and drop action. |
-| `computer_use_type` | `text`, `delay_ms?` | Types text string into active window element. |
-| `computer_use_shortcut` | `keys` (e.g. `["command", "c"]`) | Triggers keyboard shortcut combination. |
-| `computer_use_scroll` | `x`, `y`, `delta_x`, `delta_y` | Scrolls scrollable container at target location. |
+| `computer_use_status` | None | Returns host connectivity, active display topology, TCC permission state, and mutation lockout state. |
+| `computer_use_observe` | `display_id?` | Captures primary or target display screenshot, returning `capture_id`, `topology_version` (`top-sha256-...`), and JPEG image payload. |
+| `computer_use_ax_tree` | `app_id?`, `max_depth?` | Inspects accessibility UI element hierarchy (AXUIElement tree) of specified running application or frontmost application. Enforces depth, node, string caps, and secure text redaction. |
+| `computer_use_click` | `x`, `y`, `intent`, `capture_id`, `topology_version`, `button?`, `click_count?` | Dispatches single mouse click at normalized (0..999) coordinates on active display topology. |
+| `computer_use_move` | `x`, `y`, `intent`, `capture_id`, `topology_version` | Dispatches single mouse movement to normalized (0..999) coordinates without clicking. |
+| `computer_use_type` | `text`, `intent`, `capture_id`, `topology_version`, `press_enter?` | Synthesizes Unicode text entry into focused window/element. |
+| `computer_use_shortcut` | `keys`, `intent`, `capture_id`, `topology_version` | Dispatches bounded keyboard shortcut sequence (e.g. `['cmd', 'tab']`). |
+| `computer_use_scroll` | `x`, `y`, `delta_y`, `intent`, `capture_id`, `topology_version`, `delta_x?` | Dispatches finite scroll wheel input at normalized coordinates. |
+| `computer_use_drag` | `start_x`, `start_y`, `end_x`, `end_y`, `intent`, `capture_id`, `topology_version`, `button?` | Dispatches same-display drag from start to end coordinates with guaranteed button release. |
 
 ---
 
-## Requirements & Prerequisites
+## Requirements & Setup
 
 - **OS**: macOS 14.0 (Sonoma) or newer.
 - **Runtimes**:
-  - `Mise` for runtime management.
+  - Node.js `v22.23.1` (managed via `mise`).
+  - pnpm `10.33.0`.
   - Swift 5.9+ / Xcode Command Line Tools.
-  - Node.js 20+ / Bun 1.1+.
-- **Permissions Required**:
-  - System Settings -> Privacy & Security -> **Accessibility** (for CGEvent injection & AXUIElement).
-  - System Settings -> Privacy & Security -> **Screen Recording** (for ScreenCaptureKit).
 
----
+### Running Tests & Readiness Checks
 
-## Roadmap
+- **Production Host Lifecycle Commands**:
+  - Start Native Host:
+    ```bash
+    ./bin/agy-computer-use host-start
+    ```
+  - Check Host Status (read-only):
+    ```bash
+    ./bin/agy-computer-use host-status
+    ```
+  - Stop Native Host:
+    ```bash
+    ./bin/agy-computer-use host-stop
+    ```
 
-- [ ] **Phase 1**: Architecture & Directory Setup (Scaffolding).
-- [ ] **Phase 2**: Native Swift Host (`ComputerUseHost`) for AXUIElement & CGEvent.
-- [ ] **Phase 3**: MCP Server Implementation (`computer-use-mcp`).
-- [ ] **Phase 4**: Antigravity Skill Definition (`skills/computer-use`).
-- [ ] **Phase 5**: Full Integration Testing, Benchmarks, & Proof.
+- **Process Authority & Lifecycle Policies**:
+  - **Terminal Owner Correlation**: Host lifecycle commands (`host-start`, `host-status`, `host-stop`) communicate with the supervisor owner process over `control.sock`. `host-stop` RPC awaits exact native child close and socket residue verification before returning terminal receipt (containing generation ID, daemon PID, native PID, and `native_closed: true`).
+  - **Non-Override Runtime Directory Policy**: Public CLI host commands operate strictly on the canonical runtime directory (`/tmp/agy-computer-use-<uid>`), enforcing single-owner Unix domain socket permissions (`0700`) and inode identity validation to prevent socket hijacking or symlink attacks. Custom runtime directory overrides (`COMPUTER_USE_RUNTIME_DIR`) are restricted to isolated test harnesses and rejected or fail-closed in public production CLI operations.
+
+> [!NOTE]
+> Milestones D2 and M9 established the native observation foundation and bounded click/type/shortcut loop. Milestone M10/D3 implements and physically dogfoods the complete nine-tool v0.1 surface, including bounded AX inspection, pointer movement, scrolling, and same-display left-button dragging driven live via Google Antigravity. Local ad-hoc staged-app/TCC operation is proven; team signing/notarization remains future work. A denied Screen Recording or Accessibility state remains a human TCC gate.
+
+- **Authoritative Native Swift Test Authority**:
+  ```bash
+  ./bin/agy-computer-use test-native
+  ```
+- **Focused Production Host Lifecycle Test Authority**:
+  ```bash
+  node --test bin/host-lifecycle.test.mjs
+  ```
+- **TypeScript MCP Server Tests & TypeScript Check**:
+  ```bash
+  cd mcp/computer-use-mcp && pnpm check && pnpm test
+  ```
+- **Stage Background App & Verify Principal Classification**:
+  ```bash
+  ./bin/agy-computer-use stage-host-app
+  ./bin/agy-computer-use host-principal
+  node --test bin/host-app.test.mjs
+  ```
+- **Offline Production MCP Readiness Check**:
+  ```bash
+  ./bin/agy-computer-use production-ready
+  ```

@@ -1,0 +1,236 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, "codex/**" ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  macos-build-and-test:
+    runs-on: macos-14
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Select Xcode & Verify Swift Toolchain
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode_15.4.app
+          swift --version | grep -E "Swift version 5\.10"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.23.1"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: "10.33.0"
+
+      - name: Run Source & Formatting Safety Guards
+        run: |
+          set -euo pipefail
+          git fetch origin main:refs/remotes/origin/main
+          git rev-parse --verify origin/main > /dev/null
+
+          BASE=$(git merge-base HEAD origin/main 2>/dev/null || echo "")
+          if [ -z "$BASE" ]; then
+            echo "Error: Failed to resolve non-empty merge-base between HEAD and origin/main" >&2
+            exit 1
+          fi
+          git diff --check "$BASE" HEAD
+
+          validate_pathspec() {
+            local path_spec="$1"
+            local tracked_files
+            tracked_files=$(git ls-files -- "$path_spec")
+            if [ -z "$tracked_files" ]; then
+              echo "Error: Pathspec '$path_spec' does not resolve to any tracked files in git" >&2
+              return 1
+            fi
+            return 0
+          }
+
+          check_no_match() {
+            local pattern="$1"
+            local path_spec="$2"
+
+            if ! validate_pathspec "$path_spec"; then
+              return 2
+            fi
+
+            local status=0
+            git grep -q "$pattern" -- "$path_spec" || status=$?
+
+            if [ "$status" -eq 0 ]; then
+              echo "Forbidden match found for pattern '$pattern' in '$path_spec'" >&2
+              return 1
+            elif [ "$status" -eq 1 ]; then
+              return 0
+            else
+              echo "Error: 'git grep' failed with status $status for pattern '$pattern' in '$path_spec'" >&2
+              return "$status"
+            fi
+          }
+
+          check_no_match "CGRequestScreenCaptureAccess" 'apps/computer-use-host/Sources/'
+          check_no_match "Fake" 'apps/computer-use-host/Sources/'
+          check_no_match "recordCase(" 'apps/computer-use-host/Tests/'
+          git grep -q "let inputEngine = CGEventInputSynthesisEngine()" -- 'apps/computer-use-host/Sources/ComputerUseHost/main.swift'
+
+          # Self-probes proving guards fail closed independently
+          # 1. Positive match probe (must fail with status 1 because 'import' exists)
+          probe1_status=0
+          check_no_match "import" 'apps/computer-use-host/Sources/' || probe1_status=$?
+          if [ "$probe1_status" -ne 1 ]; then
+            echo "Self-probe 1 failed: expected check_no_match to exit 1 for positive match 'import', got $probe1_status" >&2
+            exit 1
+          fi
+
+          # 2. Clean no-match probe (must succeed with status 0)
+          check_no_match "NONEXISTENT_SECURITY_FORBIDDEN_PATTERN_98765" 'apps/computer-use-host/Sources/'
+
+          # 3. Missing/renamed scope probe (must fail with status 2 for missing scope)
+          probe3_status=0
+          check_no_match "import" 'nonexistent/scope/path/' || probe3_status=$?
+          if [ "$probe3_status" -ne 2 ]; then
+            echo "Self-probe 3 failed: expected check_no_match to exit 2 for missing scope, got $probe3_status" >&2
+            exit 1
+          fi
+
+          # 4. Forced command failure probe (invalid regex must fail with status >1)
+          probe4_status=0
+          check_no_match "[invalid-regex-unclosed-bracket" 'apps/computer-use-host/Sources/' || probe4_status=$?
+          if [ "$probe4_status" -le 1 ]; then
+            echo "Self-probe 4 failed: expected check_no_match to exit >1 for invalid regex, got $probe4_status" >&2
+            exit 1
+          fi
+
+      - name: Build & Run Native Swift Test Authority
+        run: |
+          set -euo pipefail
+          SWIFT_LIST_RAW=$(cd apps/computer-use-host && swift test list 2>&1) || SWIFT_LIST_STATUS=$?
+          SWIFT_LIST_STATUS=${SWIFT_LIST_STATUS:-0}
+          if [ "$SWIFT_LIST_STATUS" -ne 0 ]; then
+            echo "Error: 'swift test list' failed with exit status $SWIFT_LIST_STATUS in CI" >&2
+            exit 1
+          fi
+          DISCOVERED=$(echo "$SWIFT_LIST_RAW" | grep -E "^ComputerUseHostTests\." | sort)
+          if [ -z "$DISCOVERED" ]; then
+            echo "Error: 'swift test list' returned 0 discovered tests in CI" >&2
+            exit 1
+          fi
+          diff -u <(echo "$DISCOVERED") docs/native_test_manifest.txt
+          TEST_OUT=$(./bin/agy-computer-use test-native 2>&1 | tee /dev/stderr)
+          echo "$TEST_OUT" | grep -F "test01_LengthPrefixedFraming"
+          echo "$TEST_OUT" | grep -F "test02_OversizedFramingHeaderRejection"
+          echo "$TEST_OUT" | grep -F "test03_DirectoryPreparation"
+          echo "$TEST_OUT" | grep -F "test04_UDSClientServerRoundTrip"
+          echo "$TEST_OUT" | grep -F "test05_PostTimeoutUDSRecovery"
+          echo "$TEST_OUT" | grep -F "test06_SlowDripHeaderTimeout"
+          echo "$TEST_OUT" | grep -F "test07_SlowDripBodyTimeout"
+          echo "$TEST_OUT" | grep -F "test08_BlockedResponseWriteTimeout"
+          echo "$TEST_OUT" | grep -F "test09_PeerCloseAndPartialIO"
+          echo "$TEST_OUT" | grep -F "test10_EINTRRetryPath"
+          echo "$TEST_OUT" | grep -F "test11_TimeoutResponseFollowedByNextClient"
+          echo "$TEST_OUT" | grep -F "test12_LiveSocketCollisionProbe"
+          echo "$TEST_OUT" | grep -F "test13_VerifiedStaleSocketRecovery"
+          echo "$TEST_OUT" | grep -F "test14_ForeignSymlinkNonSocketRefusal"
+          echo "$TEST_OUT" | grep -F "test15_StopNeverUnlinksReplacementInode"
+          echo "$TEST_OUT" | grep -F "test16_IEEE754BitPatternTopologyGoldenVectorAndMutations"
+          echo "$TEST_OUT" | grep -F "test17_HotPlugSafeDisplayEnumerator"
+          echo "$TEST_OUT" | grep -F "test18_PermissionPreflightDeniedZeroLoaderCalls"
+          echo "$TEST_OUT" | grep -F "test19_PureJPEGValidatorExactAndNear10MiBBoundaries"
+          echo "$TEST_OUT" | grep -F "test20_SOF0AndSOF2MarkerValidation"
+          echo "$TEST_OUT" | grep -F "test21_JPEGInvalidMagicTruncatedSegmentAndMismatchRejection"
+          echo "$TEST_OUT" | grep -F "test22_NoncooperativeLateCompletionGenerationFence"
+          echo "$TEST_OUT" | grep -F "test23_StaleOperationGenerationFence"
+          echo "$TEST_OUT" | grep -F "test24_RequesterCancellation"
+          echo "$TEST_OUT" | grep -F "test25_TimedOutOrphanCapacity"
+          echo "$TEST_OUT" | grep -F "test26_TopologyChangeDuringCaptureDiscarded"
+          echo "$TEST_OUT" | grep -F "test27_DisabledActionsAndAXTreeRejection"
+          echo "$TEST_OUT" | grep -F "test28_DisplayIdParameterValidation"
+          echo "$TEST_OUT" | grep -F "test29_CancellationErrorMappedToCancelledCode"
+          echo "$TEST_OUT" | grep -F "test30_PartialStartRollback"
+          echo "$TEST_OUT" | grep -F "test31_AcceptEINTRRetry"
+          echo "$TEST_OUT" | grep -F "test32_ReadHeaderBodyEINTRRetry"
+          echo "$TEST_OUT" | grep -F "test33_WriteResponseEAGAINDeadlineAndSingleAttempt"
+          echo "$TEST_OUT" | grep -F "test34_PositiveByteAdvancesClockPastDeadlineReturnsTimeout"
+          echo "$TEST_OUT" | grep -F "test35_InjectedListenFailurePostBindRollback"
+          echo "$TEST_OUT" | grep -F "test36_FourSurfaceAuthorityBijection"
+          echo "$TEST_OUT" | grep -F "test37_ManualSleeperSevenDeterministicScenarios"
+          echo "$TEST_OUT" | grep -F "test38_HostServerDeadlineCaptureAuthority"
+          echo "$TEST_OUT" | grep -F "test39_HostLifecycleAndSubprocessShutdown"
+
+      - name: Stage Background App Bundle & Verify Principal Classification
+        run: |
+          set -euo pipefail
+          ./bin/agy-computer-use stage-host-app
+          STAGE_OUT=$(./bin/agy-computer-use host-principal)
+          echo "$STAGE_OUT" | grep -F '"classification": "ad_hoc_ephemeral"'
+          echo "$STAGE_OUT" | grep -F '"identifier": "com.saariuslystoned.agy-computer-use.host"'
+
+          STABLE_STATUS=0
+          STABLE_OUT=$(./bin/agy-computer-use host-principal --require-stable 2>&1) || STABLE_STATUS=$?
+          test "$STABLE_STATUS" -eq 1
+          echo "$STABLE_OUT" | grep -F '"classification": "ad_hoc_ephemeral"'
+          echo "$STABLE_OUT" | grep -F '"error": "Staged app is ad_hoc_ephemeral; --require-stable specified"'
+
+          node --test bin/host-app.test.mjs
+
+      - name: Build Release Executable & Guard Binary Symbols
+        run: |
+          set -euo pipefail
+          cd apps/computer-use-host
+          swift build -c release -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors
+          BIN_PATH=$(swift build -c release --show-bin-path)/ComputerUseHost
+          test -f "$BIN_PATH"
+
+          inspect_symbols() {
+            local target_bin="$1"
+            local nm_cmd="${2:-nm}"
+            local demangle_cmd="${3:-swift demangle}"
+            local tmp_nm tmp_demangled
+            tmp_nm=$(mktemp)
+            tmp_demangled=$(mktemp)
+
+            eval "$nm_cmd \"\$target_bin\"" > "$tmp_nm" || { rm -f "$tmp_nm" "$tmp_demangled"; return 1; }
+            test -s "$tmp_nm" || { rm -f "$tmp_nm" "$tmp_demangled"; return 1; }
+
+            eval "$demangle_cmd" < "$tmp_nm" > "$tmp_demangled" || { rm -f "$tmp_nm" "$tmp_demangled"; return 1; }
+            test -s "$tmp_demangled" || { rm -f "$tmp_nm" "$tmp_demangled"; return 1; }
+
+            local res=0
+            if grep -iE "Fake|Spy|Scripted|Mock|TestDouble|TestRunner|TestHelper" "$tmp_demangled" > /dev/null; then
+              res=1
+            fi
+            rm -f "$tmp_nm" "$tmp_demangled"
+            return $res
+          }
+
+          # Fail-closed symbol inspection of release binary
+          inspect_symbols "$BIN_PATH"
+
+          # Verify missing binary / nm failure probe fails closed independently using /usr/bin/false
+          ! inspect_symbols "$BIN_PATH" /usr/bin/false
+
+          # Verify forced demangler failure probe fails closed independently using /usr/bin/false
+          ! inspect_symbols "$BIN_PATH" nm /usr/bin/false
+
+      - name: Build & Test TypeScript MCP Server
+        run: |
+          set -euo pipefail
+          cd mcp/computer-use-mcp
+          pnpm install --frozen-lockfile
+          pnpm check
+          pnpm test
+
+      - name: Validate Offline Production MCP Readiness
+        run: |
+          set -euo pipefail
+          ./bin/agy-computer-use production-ready
+          ./bin/agy-computer-use canary-ready

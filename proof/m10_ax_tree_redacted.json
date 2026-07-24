@@ -1,0 +1,27 @@
+{
+  "description": "Extracted redacted accessibility tree subset from computer_use_ax_tree for com.apple.Safari showing secure text field redaction",
+  "target_app": {
+    "pid": 14295,
+    "bundle_id": "com.apple.Safari",
+    "name": "Safari"
+  },
+  "topology_version": "top-sha256-c1ddd4bae082c11d19d8b87a29f177b61f27db9ba82aad8a600545a954e0deff",
+  "node_count": 500,
+  "max_depth_reached": 10,
+  "truncated": true,
+  "extracted_secure_field_subtree": {
+    "id": "ax-AXTextField-13",
+    "role": "AXTextField",
+    "subrole": "AXSecureTextField",
+    "title": "",
+    "value": "[REDACTED]",
+    "enabled": true,
+    "focused": false,
+    "bounds": {
+      "x": 531,
+      "y": 268,
+      "width": 308,
+      "height": 39
+    }
+  }
+}

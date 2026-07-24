@@ -1,0 +1,380 @@
+#!/usr/bin/env node
+
+import { execFileSync, execSync } from "child_process";
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
+import { fileURLToPath, pathToFileURL } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const rootDir = path.resolve(__dirname, "..");
+const mcpPkgDir = path.join(rootDir, "mcp/computer-use-mcp");
+
+function log(msg) {
+  console.log(`[bin/agy-computer-use] ${msg}`);
+}
+
+function fail(msg) {
+  console.error(`[FAIL] ${msg}`);
+  process.exit(1);
+}
+
+const subcommand = process.argv[2] || "doctor";
+const validSubcommands = ["build", "doctor", "production-ready", "canary-ready", "test-native", "stage-host-app", "host-principal", "host-start", "host-status", "host-stop"];
+
+if (!validSubcommands.includes(subcommand)) {
+  console.error(`[FAIL] Unknown subcommand '${subcommand}'. Valid subcommands are: ${validSubcommands.join(", ")}`);
+  process.exit(1);
+}
+
+function validateMcpConfigStruct() {
+  const mcpConfigPath = path.join(rootDir, ".agents/mcp_config.json");
+  if (!fs.existsSync(mcpConfigPath)) {
+    throw new Error(`.agents/mcp_config.json missing at ${mcpConfigPath}`);
+  }
+
+  const mcpConfig = JSON.parse(fs.readFileSync(mcpConfigPath, "utf-8"));
+  const keys = Object.keys(mcpConfig?.mcpServers || {});
+  if (keys.length !== 1 || keys[0] !== "computer-use") {
+    throw new Error(`.agents/mcp_config.json must contain EXACTLY ONE active MCP server key: 'computer-use', got ${JSON.stringify(keys)}`);
+  }
+
+  const prodServer = mcpConfig.mcpServers["computer-use"];
+  const allowedServerKeys = new Set(["command", "args", "cwd", "disabled"]);
+  for (const key of Object.keys(prodServer)) {
+    if (!allowedServerKeys.has(key)) {
+      throw new Error(`Forbidden key '${key}' in computer-use server configuration`);
+    }
+  }
+
+  if (prodServer.command !== "./bin/mcp-server.sh") {
+    throw new Error(`computer-use server command must be './bin/mcp-server.sh'`);
+  }
+  if (!Array.isArray(prodServer.args) || prodServer.args.length !== 0) {
+    throw new Error(`computer-use server args must be strictly []`);
+  }
+  if (prodServer.cwd !== ".") {
+    throw new Error(`computer-use server cwd must be '.'`);
+  }
+  const launcherPath = path.join(rootDir, prodServer.command);
+  if (!fs.existsSync(launcherPath)) {
+    throw new Error(`Target MCP server launcher does not exist at ${launcherPath}`);
+  }
+}
+
+async function verifyProductionMcpConfiguredStdio(envOverride) {
+  const clientSdkPath = path.join(mcpPkgDir, "node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js");
+  const stdioSdkPath = path.join(mcpPkgDir, "node_modules/@modelcontextprotocol/sdk/dist/esm/client/stdio.js");
+
+  const { Client } = await import(pathToFileURL(clientSdkPath).href);
+  const { StdioClientTransport } = await import(pathToFileURL(stdioSdkPath).href);
+
+  const mcpConfigPath = path.join(rootDir, ".agents/mcp_config.json");
+  const mcpConfig = JSON.parse(fs.readFileSync(mcpConfigPath, "utf-8"));
+  const prodServer = mcpConfig.mcpServers["computer-use"];
+
+  const envOptions = envOverride ? { env: envOverride } : {};
+
+  const transport = new StdioClientTransport({
+    command: prodServer.command,
+    args: prodServer.args,
+    cwd: rootDir,
+    ...envOptions
+  });
+
+  const client = new Client(
+    { name: "production-ready-client", version: "1.0.0" },
+    { capabilities: {} }
+  );
+
+  let cleanupDone = false;
+  async function cleanup() {
+    if (cleanupDone) return;
+    cleanupDone = true;
+    try {
+      await client.close();
+    } catch {
+      try {
+        await transport.close();
+      } catch {}
+    }
+  }
+
+  try {
+    const connectPromise = client.connect(transport);
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("connect timeout after 5000ms")), 5000)
+    );
+    await Promise.race([connectPromise, timeoutPromise]);
+
+    const listPromise = client.listTools();
+    const listTimeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("listTools timeout after 5000ms")), 5000)
+    );
+    const toolsResult = await Promise.race([listPromise, listTimeoutPromise]);
+
+    if (!toolsResult || !toolsResult.tools || toolsResult.tools.length !== 9) {
+      throw new Error(`Public production MCP tool inventory count must be EXACTLY 9, got ${toolsResult?.tools?.length ?? 0}`);
+    }
+
+    const toolNames = toolsResult.tools.map(t => t.name).sort();
+    const expectedToolNames = ["computer_use_ax_tree", "computer_use_click", "computer_use_drag", "computer_use_move", "computer_use_observe", "computer_use_scroll", "computer_use_shortcut", "computer_use_status", "computer_use_type"];
+    if (JSON.stringify(toolNames) !== JSON.stringify(expectedToolNames)) {
+      throw new Error(`Production tool names must be ${JSON.stringify(expectedToolNames)}, got ${JSON.stringify(toolNames)}`);
+    }
+
+    return toolNames;
+  } finally {
+    await cleanup();
+  }
+}
+
+async function verifyMinimalPathConfiguredLaunch() {
+  const nodeBinDir = path.dirname(process.execPath);
+  let pnpmBinDir = nodeBinDir;
+  try {
+    const pnpmPath = execSync("command -v pnpm || true", { encoding: "utf-8" }).trim();
+    if (pnpmPath) {
+      pnpmBinDir = path.dirname(pnpmPath);
+    }
+  } catch {}
+
+  const pathDirs = Array.from(new Set([nodeBinDir, pnpmBinDir, "/usr/bin", "/bin"])).join(":");
+
+  const minimalPathEnv = {
+    PATH: pathDirs,
+    HOME: process.env.HOME || "",
+    USER: process.env.USER || "",
+    SHELL: process.env.SHELL || "/bin/sh",
+    TEST_FORCE_MISSING_MISE: "1"
+  };
+  return await verifyProductionMcpConfiguredStdio(minimalPathEnv);
+}
+
+function verifyMissingToolchainFailure() {
+  const mcpConfigPath = path.join(rootDir, ".agents/mcp_config.json");
+  const mcpConfig = JSON.parse(fs.readFileSync(mcpConfigPath, "utf-8"));
+  const prodServer = mcpConfig.mcpServers["computer-use"];
+  const launcherPath = path.join(rootDir, prodServer.command);
+
+  let output = "";
+  let exitCode = 0;
+  try {
+    output = execSync(`"${launcherPath}"`, {
+      cwd: rootDir,
+      env: { PATH: "/nonexistent_path_dir_12345", HOME: "/nonexistent_home_dir_12345", TEST_FORCE_MISSING_MISE: "1" },
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+  } catch (err) {
+    exitCode = err.status || 1;
+    output = (err.stderr || "") + "\n" + (err.stdout || "");
+  }
+
+  if (exitCode === 0) {
+    throw new Error("Missing-toolchain launcher test expected nonzero exit code, but exited 0");
+  }
+
+  if (!output.includes("[mcp-server-launcher] ERROR:")) {
+    throw new Error(`Missing-toolchain launcher test expected diagnostic stderr message, got: ${output}`);
+  }
+
+  return true;
+}
+
+function verifyMismatchedVersionFailure() {
+  const mcpConfigPath = path.join(rootDir, ".agents/mcp_config.json");
+  const mcpConfig = JSON.parse(fs.readFileSync(mcpConfigPath, "utf-8"));
+  const prodServer = mcpConfig.mcpServers["computer-use"];
+  const launcherPath = path.join(rootDir, prodServer.command);
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-mcp-test-"));
+  const stubNode = path.join(tmpDir, "node");
+  fs.writeFileSync(stubNode, "#!/bin/sh\nif [ \"$1\" = \"-v\" ]; then echo 'v26.0.0'; exit 0; fi\nexit 1\n", { mode: 0o755 });
+
+  let output = "";
+  let exitCode = 0;
+  try {
+    output = execSync(`"${launcherPath}"`, {
+      cwd: rootDir,
+      env: { PATH: `${tmpDir}:/usr/bin:/bin`, HOME: tmpDir, TEST_FORCE_MISSING_MISE: "1" },
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+  } catch (err) {
+    exitCode = err.status || 1;
+    output = (err.stderr || "") + "\n" + (err.stdout || "");
+  } finally {
+    try {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    } catch {}
+  }
+
+  if (exitCode === 0) {
+    throw new Error("Mismatched-version launcher test expected nonzero exit code, but exited 0");
+  }
+
+  if (!output.includes("does not match pinned versions")) {
+    throw new Error(`Mismatched-version launcher test expected version error diagnostic, got: ${output}`);
+  }
+
+  return true;
+}
+
+async function main() {
+  if (subcommand === "host-start" || subcommand === "host-status" || subcommand === "host-stop") {
+    const lifecycleJs = path.join(rootDir, "bin/host-lifecycle.mjs");
+    const extraArgs = process.argv.slice(3);
+    try {
+      execFileSync(process.execPath, [lifecycleJs, subcommand, ...extraArgs], {
+        cwd: rootDir,
+        stdio: "inherit"
+      });
+      process.exit(0);
+    } catch (err) {
+      process.exit(err.status || 1);
+    }
+  }
+
+  if (subcommand === "stage-host-app") {
+    log("Staging ComputerUseHost.app background principal bundle...");
+    execSync("node bin/host-app.mjs stage", { cwd: rootDir, stdio: "inherit" });
+    process.exit(0);
+  }
+
+  if (subcommand === "host-principal") {
+    log("Classifying ComputerUseHost.app principal...");
+    const extraArgs = process.argv.slice(3);
+    const hostAppJs = path.join(rootDir, "bin/host-app.mjs");
+    try {
+      execFileSync(process.execPath, [hostAppJs, "classify", ...extraArgs], {
+        cwd: rootDir,
+        stdio: "inherit"
+      });
+      process.exit(0);
+    } catch (err) {
+      process.exit(err.status || 1);
+    }
+  }
+
+  if (subcommand === "build") {
+    log("Building mcp/computer-use-mcp package...");
+    execSync("pnpm build", { cwd: mcpPkgDir, stdio: "inherit" });
+    log("Build complete.");
+    process.exit(0);
+  }
+
+  if (subcommand === "test-native") {
+    log("Building and running native test suite with strict concurrency flags...");
+    const hostDir = path.join(rootDir, "apps/computer-use-host");
+    const manifestPath = path.join(rootDir, "docs/native_test_manifest.txt");
+
+    let helpOutput = "";
+    let listOutput = "";
+    let listExitCode = 0;
+
+    try {
+      helpOutput = execSync("swift test list --help 2>&1", { cwd: hostDir, encoding: "utf-8" });
+      const enableFlag = helpOutput.includes("--enable-xctest") ? " --enable-xctest" : "";
+      listOutput = execSync(`swift test list${enableFlag} 2>&1`, { cwd: hostDir, encoding: "utf-8" });
+      listExitCode = 0;
+    } catch (err) {
+      listOutput = (err.stdout || "") + "\n" + (err.stderr || "") + "\n" + (err.message || "");
+      listExitCode = err.status || 1;
+    }
+
+    let manifestContent = "";
+    try {
+      manifestContent = fs.readFileSync(manifestPath, "utf-8");
+    } catch (err) {
+      fail(`Failed to read native test manifest at ${manifestPath}: ${err.message}`);
+    }
+
+    const selectionModulePath = path.join(mcpPkgDir, "src/native-authority-selection-core.js");
+    const { classifyNativeAuthoritySelection } = await import(pathToFileURL(selectionModulePath).href);
+    const selection = classifyNativeAuthoritySelection({
+      helpOutput,
+      listOutput,
+      listExitCode,
+      manifestContent
+    });
+
+    if (selection.status !== 0) {
+      fail(selection.error || "'swift test list' failed closed");
+    }
+
+    if (selection.authority === "fallback") {
+      log("XCTest discovery unavailable in environment; running ComputerUseHostTestRunner executable authority...");
+      execSync("swift run -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors ComputerUseHostTestRunner", { cwd: hostDir, stdio: "inherit" });
+      log("Native test suite execution complete.");
+      process.exit(0);
+    }
+
+    if (selection.authority === "xctest") {
+      log(`Executing native test suite (${selection.testCount} discovered tests)...`);
+      const enableFlag = helpOutput.includes("--enable-xctest") ? " --enable-xctest" : "";
+      execSync(`swift test${enableFlag} -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors`, { cwd: hostDir, stdio: "inherit" });
+      log("Native test suite execution complete.");
+      process.exit(0);
+    }
+
+    fail(`Unrecognized selection authority: ${selection.authority}`);
+  }
+
+  if (subcommand === "doctor" || subcommand === "production-ready" || subcommand === "canary-ready") {
+    log(`Validating production-only configured stdio readiness (subcommand: ${subcommand})...`);
+
+    // ALWAYS build current TypeScript sources before verification
+    execSync("pnpm build", { cwd: mcpPkgDir, stdio: "ignore" });
+
+    try {
+      const nodeVer = process.version;
+      log(`Node.js version: ${nodeVer}`);
+    } catch {
+      fail("Node.js missing in environment.");
+    }
+
+    try {
+      validateMcpConfigStruct();
+      log("Verified .agents/mcp_config.json strict single-server 'computer-use' registration.");
+    } catch (err) {
+      fail(`MCP Config validation failed: ${err.message}`);
+    }
+
+    try {
+      const toolNames = await verifyProductionMcpConfiguredStdio();
+      log(`Verified production configured stdio MCP tool inventory: Exactly ${toolNames.length} tools (${toolNames.join(", ")})`);
+    } catch (err) {
+      fail(`Configured stdio MCP tool inventory check failed: ${err.message}`);
+    }
+
+    try {
+      const minimalTools = await verifyMinimalPathConfiguredLaunch();
+      log(`Verified minimal PATH configured launcher tool inventory: Exactly ${minimalTools.length} tools (${minimalTools.join(", ")})`);
+    } catch (err) {
+      fail(`Minimal PATH configured launch check failed: ${err.message}`);
+    }
+
+    try {
+      verifyMissingToolchainFailure();
+      log("Verified missing-toolchain negative launcher failure diagnostic.");
+    } catch (err) {
+      fail(`Missing-toolchain negative launcher check failed: ${err.message}`);
+    }
+
+    try {
+      verifyMismatchedVersionFailure();
+      log("Verified mismatched-version negative launcher failure diagnostic.");
+    } catch (err) {
+      fail(`Mismatched-version negative launcher check failed: ${err.message}`);
+    }
+
+    log("ALL PRODUCTION CONFIGURED STDIO READINESS CHECKS PASSED!");
+    process.exit(0);
+  }
+}
+
+main().catch((err) => {
+  fail(err.message);
+});

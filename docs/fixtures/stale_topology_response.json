@@ -1,0 +1,8 @@
+{
+  "id": "req-2002",
+  "success": false,
+  "error": {
+    "code": "STALE_TOPOLOGY",
+    "message": "Display topology changed while capture was in flight"
+  }
+}

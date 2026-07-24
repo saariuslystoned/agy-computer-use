@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "computer-use": {
+      "command": "./bin/mcp-server.sh",
+      "args": [],
+      "cwd": "."
+    }
+  }
+}

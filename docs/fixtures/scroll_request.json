@@ -1,0 +1,13 @@
+{
+  "id": "req-scroll-001",
+  "method": "scroll",
+  "params": {
+    "capture_id": "cap-DF8EAAE6-024B-4A21-916A-DE370E1E365F",
+    "topology_version": "top-sha256-fb6c55499cfac6b4ad6aa412b55237d1560d7c36c41f7f148810a2d2479ab22d",
+    "x": 500,
+    "y": 500,
+    "delta_x": 0,
+    "delta_y": -100,
+    "intent": "Scroll down list"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "id": "req-ax-001",
+  "success": true,
+  "data": {
+    "target_app": {
+      "pid": 1234,
+      "bundle_id": "com.apple.calculator",
+      "name": "Calculator"
+    },
+    "topology_version": "top-sha256-fb6c55499cfac6b4ad6aa412b55237d1560d7c36c41f7f148810a2d2479ab22d",
+    "node_count": 1,
+    "max_depth_reached": 1,
+    "truncated": false,
+    "tree": {
+      "id": "ax-AXApplication-101",
+      "role": "AXApplication",
+      "subrole": "AXStandard",
+      "title": "Calculator",
+      "enabled": true,
+      "focused": true,
+      "bounds": {
+        "x": 0.0,
+        "y": 0.0,
+        "width": 300.0,
+        "height": 400.0
+      }
+    }
+  }
+}

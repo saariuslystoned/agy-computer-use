@@ -1,0 +1,8 @@
+{
+  "id": "req-2001",
+  "success": false,
+  "error": {
+    "code": "PERMISSION_DENIED",
+    "message": "Screen recording permission was denied by macOS TCC system"
+  }
+}

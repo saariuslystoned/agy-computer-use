@@ -1,0 +1,8 @@
+{
+  "id": "req-ax-001",
+  "success": false,
+  "error": {
+    "code": "TARGET_UNREACHABLE",
+    "message": "AX tree inspection is unavailable in the current M9 bounded input slice"
+  }
+}

@@ -1,0 +1,706 @@
+import Foundation
+
+public final class SocketListener: @unchecked Sendable {
+    public static var defaultSocketPath: String {
+        return "/private/tmp/agy-computer-use-\(getuid())/host.sock"
+    }
+
+    public let socketPath: String
+    private let server: HostServer
+    private var serverFd: Int32 = -1
+    private var lockFd: Int32 = -1
+    private var dirFd: Int32 = -1
+    public private(set) var isRunning: Bool = false
+    public private(set) var responseAttemptCount = 0
+    private var boundDev: dev_t = 0
+    private var boundInode: ino_t = 0
+    private var boundDirDev: dev_t = 0
+    private var boundDirInode: ino_t = 0
+    private let lock = NSLock()
+    private let perFrameTimeoutSec: Double
+
+    private let syscalls: POSIXSyscallProviding
+    private let clock: HostClock
+
+    public init(
+        socketPath: String? = nil,
+        server: HostServer,
+        perFrameTimeoutSec: Double = 5.0,
+        syscalls: POSIXSyscallProviding = DarwinPOSIXSyscalls.shared,
+        clock: HostClock = DefaultHostClock()
+    ) {
+        let path = socketPath ?? SocketListener.defaultSocketPath
+        if path.hasPrefix("/tmp/") {
+            self.socketPath = "/private" + path
+        } else {
+            self.socketPath = path
+        }
+        self.server = server
+        self.perFrameTimeoutSec = perFrameTimeoutSec
+        self.syscalls = syscalls
+        self.clock = clock
+    }
+
+    public static func prepareDirectory(at path: String, syscalls: POSIXSyscallProviding = DarwinPOSIXSyscalls.shared) throws {
+        var canonicalPath = path
+        if canonicalPath.hasPrefix("/tmp/") {
+            canonicalPath = "/private" + canonicalPath
+        }
+
+        var statBuf = stat()
+        let targetDir: String
+        if syscalls.lstat(canonicalPath, &statBuf) == 0 {
+            targetDir = (statBuf.st_mode & S_IFMT) == S_IFDIR ? canonicalPath : (canonicalPath as NSString).deletingLastPathComponent
+        } else {
+            targetDir = (canonicalPath as NSString).pathExtension.isEmpty ? canonicalPath : (canonicalPath as NSString).deletingLastPathComponent
+        }
+
+        if targetDir == "/private/tmp" || targetDir == "/tmp" {
+            return
+        }
+
+        let res = syscalls.mkdir(targetDir, 0o700)
+        if res == 0 || syscalls.lastErrno == EEXIST {
+            let openDirFd = syscalls.open(targetDir, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC, 0)
+            guard openDirFd >= 0 else {
+                let err = syscalls.lastErrno
+                if err == ELOOP {
+                    throw ComputerUseError.ipcError(reason: "Refusing to follow symlink at runtime directory path: \(targetDir)")
+                } else if err == ENOTDIR {
+                    throw ComputerUseError.ipcError(reason: "Refusing to use pre-existing non-directory file at runtime path: \(targetDir)")
+                }
+                throw ComputerUseError.ipcError(reason: "Failed to open runtime directory descriptor for path: \(targetDir), errno: \(err)")
+            }
+            defer { _ = syscalls.close(openDirFd) }
+
+            var openStatBuf = stat()
+            guard syscalls.fstat(openDirFd, &openStatBuf) == 0 else {
+                throw ComputerUseError.ipcError(reason: "Failed to fstat open descriptor for runtime directory: \(targetDir)")
+            }
+            guard (openStatBuf.st_mode & S_IFMT) == S_IFDIR else {
+                throw ComputerUseError.ipcError(reason: "Refusing to use non-directory descriptor at runtime path: \(targetDir)")
+            }
+            guard openStatBuf.st_uid == syscalls.getuid() else {
+                throw ComputerUseError.ipcError(reason: "Directory owner UID \(openStatBuf.st_uid) does not match current user UID \(syscalls.getuid())")
+            }
+            guard (openStatBuf.st_mode & 0o777) == 0o700 else {
+                throw ComputerUseError.ipcError(reason: "Insecure directory permissions for path: \(targetDir) (mode 0o\(String(openStatBuf.st_mode & 0o777, radix: 8)), expected 0o700)")
+            }
+        } else {
+            let err = syscalls.lastErrno
+            throw ComputerUseError.ipcError(reason: "Failed to create 0700 runtime directory: \(targetDir), errno \(err)")
+        }
+    }
+
+    public func start() throws {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard !isRunning else { return }
+
+        var boundDevForRollback: dev_t = 0
+        var boundInodeForRollback: ino_t = 0
+
+        do {
+            let parentDir = (socketPath as NSString).deletingLastPathComponent
+            let socketFilename = (socketPath as NSString).lastPathComponent
+            try SocketListener.prepareDirectory(at: socketPath, syscalls: self.syscalls)
+
+            let openDirFd = syscalls.open(parentDir, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC, 0)
+            guard openDirFd >= 0 else {
+                throw ComputerUseError.ipcError(reason: "Failed to open descriptor for runtime directory: \(parentDir)")
+            }
+            self.dirFd = openDirFd
+
+            var dirStat = stat()
+            guard syscalls.fstat(self.dirFd, &dirStat) == 0 else {
+                throw ComputerUseError.ipcError(reason: "Failed to fstat runtime directory descriptor: \(parentDir)")
+            }
+            guard (dirStat.st_mode & S_IFMT) == S_IFDIR else {
+                throw ComputerUseError.ipcError(reason: "Runtime directory descriptor is not a directory: \(parentDir)")
+            }
+            guard dirStat.st_uid == syscalls.getuid() else {
+                throw ComputerUseError.ipcError(reason: "Runtime directory owner UID \(dirStat.st_uid) does not match current user UID \(syscalls.getuid())")
+            }
+            guard (dirStat.st_mode & 0o777) == 0o700 else {
+                throw ComputerUseError.ipcError(reason: "Insecure runtime directory permissions for path: \(parentDir)")
+            }
+            self.boundDirDev = dirStat.st_dev
+            self.boundDirInode = dirStat.st_ino
+
+            lockFd = syscalls.openat(self.dirFd, "host.lock", O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK, 0o600)
+            guard lockFd >= 0 else {
+                throw ComputerUseError.ipcError(reason: "Failed to open or create host.lock file via runtime directory descriptor")
+            }
+
+            var lockStat = stat()
+            guard syscalls.fstat(lockFd, &lockStat) == 0,
+                  (lockStat.st_mode & S_IFMT) == S_IFREG,
+                  lockStat.st_uid == syscalls.getuid(),
+                  (lockStat.st_mode & 0o077) == 0 else {
+                _ = syscalls.close(lockFd)
+                lockFd = -1
+                throw ComputerUseError.ipcError(reason: "host.lock descriptor verification failed: must be a private regular file owned by current user")
+            }
+
+            let flockRes = syscalls.fileFlock(lockFd, LOCK_EX | LOCK_NB)
+            guard flockRes == 0 else {
+                _ = syscalls.close(lockFd)
+                lockFd = -1
+                throw ComputerUseError.ipcError(reason: "Refusing to start: another active host instance holds flock on host.lock")
+            }
+
+            var existingSockStat = stat()
+            if syscalls.fstatat(self.dirFd, socketFilename, &existingSockStat, AT_SYMLINK_NOFOLLOW) == 0 {
+                guard existingSockStat.st_uid == syscalls.getuid() else {
+                    throw ComputerUseError.ipcError(reason: "Refusing to unlink socket owned by foreign UID \(existingSockStat.st_uid)")
+                }
+                guard (existingSockStat.st_mode & S_IFMT) == S_IFSOCK else {
+                    throw ComputerUseError.ipcError(reason: "Refusing to unlink non-socket file at \(socketFilename)")
+                }
+
+                let probeFd = syscalls.socket(AF_UNIX, SOCK_STREAM, 0)
+                guard probeFd >= 0 else {
+                    throw ComputerUseError.ipcError(reason: "Socket probe descriptor creation failed with errno \(syscalls.lastErrno), failing closed")
+                }
+                defer { _ = syscalls.close(probeFd) }
+
+                let flags = syscalls.fcntl(probeFd, F_GETFL, 0)
+                guard flags >= 0 else {
+                    throw ComputerUseError.ipcError(reason: "Socket probe fcntl F_GETFL failed with errno \(syscalls.lastErrno), failing closed")
+                }
+
+                let setFlRes = syscalls.fcntl(probeFd, F_SETFL, flags | O_NONBLOCK)
+                guard setFlRes >= 0 else {
+                    throw ComputerUseError.ipcError(reason: "Socket probe fcntl F_SETFL failed with errno \(syscalls.lastErrno), failing closed")
+                }
+
+                var probeAddr = sockaddr_un()
+                let pathBytes = socketPath.utf8CString
+                guard pathBytes.count <= MemoryLayout.size(ofValue: probeAddr.sun_path) else {
+                    throw ComputerUseError.ipcError(reason: "Socket path length exceeds sockaddr_un sun_path limit")
+                }
+                let addrLen = MemoryLayout<sa_family_t>.size + pathBytes.count
+                probeAddr.sun_len = UInt8(addrLen)
+                probeAddr.sun_family = sa_family_t(AF_UNIX)
+                withUnsafeMutableBytes(of: &probeAddr.sun_path) { ptr in
+                    ptr.initializeMemory(as: CChar.self, repeating: 0)
+                    _ = pathBytes.withUnsafeBufferPointer { bPtr in memcpy(ptr.baseAddress!, bPtr.baseAddress!, bPtr.count) }
+                }
+
+                let connRes = withUnsafePointer(to: &probeAddr) { ptr in
+                    ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { saPtr in
+                        syscalls.connect(probeFd, saPtr, socklen_t(addrLen))
+                    }
+                }
+
+                if connRes == 0 {
+                    throw ComputerUseError.ipcError(reason: "Refusing to unlink active socket with live listener at \(socketPath)")
+                } else if syscalls.lastErrno == EINPROGRESS {
+                    var pfd = pollfd(fd: probeFd, events: Int16(POLLOUT), revents: 0)
+                    let pollRes = syscalls.poll(&pfd, 1, 100)
+                    if pollRes > 0 {
+                        var err: Int32 = 0
+                        var errLen = socklen_t(MemoryLayout<Int32>.size)
+                        let optRes = syscalls.getsockopt(probeFd, SOL_SOCKET, SO_ERROR, &err, &errLen)
+                        guard optRes == 0 else {
+                            throw ComputerUseError.ipcError(reason: "Socket probe getsockopt SO_ERROR failed with errno \(syscalls.lastErrno), failing closed")
+                        }
+                        if err == 0 {
+                            throw ComputerUseError.ipcError(reason: "Refusing to unlink active socket with live listener at \(socketPath)")
+                        } else if err != ECONNREFUSED {
+                            throw ComputerUseError.ipcError(reason: "Socket connect returned error \(err), failing closed")
+                        }
+                    } else if pollRes == 0 {
+                        throw ComputerUseError.ipcError(reason: "Socket connect probe timed out, failing closed")
+                    } else {
+                        throw ComputerUseError.ipcError(reason: "Socket poll failed with errno \(syscalls.lastErrno), failing closed")
+                    }
+                } else if syscalls.lastErrno != ECONNREFUSED {
+                    throw ComputerUseError.ipcError(reason: "Socket probe failed with errno \(syscalls.lastErrno), failing closed")
+                }
+
+                var preUnlinkStat = stat()
+                guard syscalls.fstatat(self.dirFd, socketFilename, &preUnlinkStat, AT_SYMLINK_NOFOLLOW) == 0,
+                      preUnlinkStat.st_dev == existingSockStat.st_dev,
+                      preUnlinkStat.st_ino == existingSockStat.st_ino,
+                      preUnlinkStat.st_uid == syscalls.getuid(),
+                      (preUnlinkStat.st_mode & S_IFMT) == S_IFSOCK else {
+                    throw ComputerUseError.ipcError(reason: "Socket state changed before unlink, failing closed")
+                }
+                _ = syscalls.unlinkat(self.dirFd, socketFilename, 0)
+            }
+
+            serverFd = syscalls.socket(AF_UNIX, SOCK_STREAM, 0)
+            guard serverFd >= 0 else {
+                throw ComputerUseError.ipcError(reason: "Failed to create UNIX domain socket descriptor")
+            }
+
+            var on: Int32 = 1
+            _ = syscalls.setsockopt(serverFd, SOL_SOCKET, SO_REUSEADDR, &on, socklen_t(MemoryLayout<Int32>.size))
+
+            var addr = sockaddr_un()
+            let pathBytes = socketPath.utf8CString
+            guard pathBytes.count <= MemoryLayout.size(ofValue: addr.sun_path) else {
+                throw ComputerUseError.ipcError(reason: "Socket path exceeds sun_path maximum size (\(socketPath))")
+            }
+
+            let addrLen = MemoryLayout<sa_family_t>.size + pathBytes.count
+            addr.sun_len = UInt8(addrLen)
+            addr.sun_family = sa_family_t(AF_UNIX)
+
+            withUnsafeMutableBytes(of: &addr.sun_path) { ptr in
+                ptr.initializeMemory(as: CChar.self, repeating: 0)
+                _ = pathBytes.withUnsafeBufferPointer { bPtr in
+                    memcpy(ptr.baseAddress!, bPtr.baseAddress!, bPtr.count)
+                }
+            }
+
+            // Pre-bind parent directory revalidation via retained descriptor AND lstat pathname
+            var preBindDirStat = stat()
+            var preBindPathStat = stat()
+            guard syscalls.fstat(self.dirFd, &preBindDirStat) == 0,
+                  syscalls.lstat(parentDir, &preBindPathStat) == 0,
+                  preBindDirStat.st_dev == self.boundDirDev,
+                  preBindDirStat.st_ino == self.boundDirInode,
+                  preBindPathStat.st_dev == self.boundDirDev,
+                  preBindPathStat.st_ino == self.boundDirInode,
+                  preBindPathStat.st_uid == syscalls.getuid(),
+                  (preBindPathStat.st_mode & S_IFMT) == S_IFDIR,
+                  (preBindPathStat.st_mode & 0o777) == 0o700 else {
+                throw ComputerUseError.ipcError(reason: "Pre-bind parent directory revalidation failed: path replaced or mode altered")
+            }
+
+            // Pathname bind (macOS POSIX lacks bindat; narrow same-UID path-swap residual guarded by pre/post fstat & lstat)
+            let bindRes = withUnsafePointer(to: &addr) { ptr in
+                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { saPtr in
+                    syscalls.bind(serverFd, saPtr, socklen_t(addrLen))
+                }
+            }
+
+            guard bindRes == 0 else {
+                let err = syscalls.lastErrno
+                throw ComputerUseError.ipcError(reason: "Failed to bind socket at \(socketPath): errno \(err)")
+            }
+
+            var boundStat = stat()
+            guard syscalls.fstatat(self.dirFd, socketFilename, &boundStat, AT_SYMLINK_NOFOLLOW) == 0,
+                  boundStat.st_uid == syscalls.getuid(),
+                  (boundStat.st_mode & S_IFMT) == S_IFSOCK else {
+                throw ComputerUseError.ipcError(reason: "Bound socket state revalidation failed via fstatat")
+            }
+            boundDevForRollback = boundStat.st_dev
+            boundInodeForRollback = boundStat.st_ino
+
+            // Post-bind parent directory revalidation via retained descriptor AND lstat pathname
+            var postBindDirStat = stat()
+            var postBindPathStat = stat()
+            guard syscalls.fstat(self.dirFd, &postBindDirStat) == 0,
+                  syscalls.lstat(parentDir, &postBindPathStat) == 0,
+                  postBindDirStat.st_dev == self.boundDirDev,
+                  postBindDirStat.st_ino == self.boundDirInode,
+                  postBindPathStat.st_dev == self.boundDirDev,
+                  postBindPathStat.st_ino == self.boundDirInode,
+                  postBindPathStat.st_uid == syscalls.getuid(),
+                  (postBindPathStat.st_mode & S_IFMT) == S_IFDIR,
+                  (postBindPathStat.st_mode & 0o777) == 0o700 else {
+                throw ComputerUseError.ipcError(reason: "Post-bind parent directory revalidation failed: path replaced after bind")
+            }
+
+            let listenRes = syscalls.listen(serverFd, 5)
+            guard listenRes == 0 else {
+                let err = syscalls.lastErrno
+                throw ComputerUseError.ipcError(reason: "Failed to listen on socket at \(socketPath): errno \(err)")
+            }
+
+            self.boundDev = boundStat.st_dev
+            self.boundInode = boundStat.st_ino
+            isRunning = true
+        } catch {
+            if serverFd >= 0 {
+                _ = syscalls.close(serverFd)
+                serverFd = -1
+            }
+            let socketFilename = (socketPath as NSString).lastPathComponent
+            if dirFd >= 0 && boundInodeForRollback > 0 {
+                var statBuf = stat()
+                if syscalls.fstatat(dirFd, socketFilename, &statBuf, AT_SYMLINK_NOFOLLOW) == 0,
+                   statBuf.st_dev == boundDevForRollback,
+                   statBuf.st_ino == boundInodeForRollback,
+                   statBuf.st_uid == syscalls.getuid(),
+                   (statBuf.st_mode & S_IFMT) == S_IFSOCK {
+                    _ = syscalls.unlinkat(dirFd, socketFilename, 0)
+                }
+            }
+            if lockFd >= 0 {
+                _ = syscalls.fileFlock(lockFd, LOCK_UN)
+                _ = syscalls.close(lockFd)
+                lockFd = -1
+            }
+            if dirFd >= 0 {
+                _ = syscalls.close(dirFd)
+                dirFd = -1
+            }
+            self.boundDev = 0
+            self.boundInode = 0
+            self.boundDirDev = 0
+            self.boundDirInode = 0
+            self.isRunning = false
+            throw error
+        }
+    }
+
+    private func getSocketState() -> (fd: Int32, active: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (serverFd, isRunning)
+    }
+
+    public func acceptAndHandleOneConnection() async throws -> Bool {
+        let (fd, active) = getSocketState()
+
+        guard active, fd >= 0 else { return false }
+
+        var clientAddr = sockaddr_un()
+        var clientAddrLen = socklen_t(MemoryLayout<sockaddr_un>.size)
+
+        var clientFd: Int32 = -1
+        while true {
+            clientFd = withUnsafeMutablePointer(to: &clientAddr) { ptr in
+                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { saPtr in
+                    syscalls.accept(fd, saPtr, &clientAddrLen)
+                }
+            }
+            if clientFd < 0 {
+                if syscalls.lastErrno == EINTR {
+                    continue
+                }
+                return false
+            }
+            break
+        }
+
+        defer {
+            _ = syscalls.close(clientFd)
+        }
+
+        var peerUid: uid_t = 0
+        var peerGid: gid_t = 0
+        let peerRes = syscalls.getpeereid(clientFd, &peerUid, &peerGid)
+        guard peerRes == 0, peerUid == syscalls.getuid() else {
+            return true
+        }
+
+        var nosigpipe: Int32 = 1
+        let optRes = syscalls.setsockopt(clientFd, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, socklen_t(MemoryLayout<Int32>.size))
+        guard optRes == 0 else {
+            return true
+        }
+
+        let clock = self.clock
+        var writeAttempted = false
+
+        // 1. Header read phase: 2s deadline
+        let headerDeadline = clock.now + .seconds(2)
+        do {
+            var headerBuffer = Data()
+            try readExactly(count: 4, from: clientFd, into: &headerBuffer, clock: clock, deadline: headerDeadline, operation: "socket_read_header", phaseBudgetSec: 2.0)
+
+            let payloadLength = Int(headerBuffer[0]) << 24 | Int(headerBuffer[1]) << 16 | Int(headerBuffer[2]) << 8 | Int(headerBuffer[3])
+            guard payloadLength > 0, payloadLength <= LengthPrefixedFramer.maxPayloadSize else {
+                writeAttempted = true
+                let writeDeadline = clock.now + .seconds(self.perFrameTimeoutSec)
+                let errResp = IPCResponse(
+                    id: "unknown",
+                    success: false,
+                    error: IPCErrorPayload(code: "IPC_ERROR", message: "Oversized or zero payload header length: \(payloadLength)")
+                )
+                try await writeResponse(errResp, to: clientFd, clock: clock, deadline: writeDeadline, phaseBudgetSec: self.perFrameTimeoutSec)
+                return true
+            }
+
+            // 2. Body read phase: 3s deadline starting at body phase start
+            let bodyDeadline = clock.now + .seconds(3)
+            var payloadBuffer = Data()
+            try readExactly(count: payloadLength, from: clientFd, into: &payloadBuffer, clock: clock, deadline: bodyDeadline, operation: "socket_read_body", phaseBudgetSec: 3.0)
+
+            let request = try JSONDecoder().decode(IPCRequest.self, from: payloadBuffer)
+
+            // 3. Execution phase: HostServer handles request with its own deadline
+            let response = await server.handleRequest(request)
+
+            // 4. Response write phase: perFrameTimeoutSec deadline starting at write phase start
+            writeAttempted = true
+            let writeDeadline = clock.now + .seconds(self.perFrameTimeoutSec)
+            try await writeResponse(response, to: clientFd, clock: clock, deadline: writeDeadline, phaseBudgetSec: self.perFrameTimeoutSec)
+        } catch let err as ComputerUseError {
+            if !writeAttempted {
+                let writeDeadline = clock.now + .seconds(self.perFrameTimeoutSec)
+                let errResp = IPCResponse(
+                    id: "err-\(UUID().uuidString)",
+                    success: false,
+                    error: IPCErrorPayload(code: err.errorCode, message: err.errorMessage)
+                )
+                _ = try? await writeResponse(errResp, to: clientFd, clock: clock, deadline: writeDeadline, phaseBudgetSec: self.perFrameTimeoutSec)
+            }
+        } catch {
+            if !writeAttempted {
+                let writeDeadline = clock.now + .seconds(self.perFrameTimeoutSec)
+                let errResp = IPCResponse(
+                    id: "err-\(UUID().uuidString)",
+                    success: false,
+                    error: IPCErrorPayload(code: "IPC_ERROR", message: error.localizedDescription)
+                )
+                _ = try? await writeResponse(errResp, to: clientFd, clock: clock, deadline: writeDeadline, phaseBudgetSec: self.perFrameTimeoutSec)
+            }
+        }
+
+        return true
+    }
+
+    private func readExactly(count: Int, from fd: Int32, into data: inout Data, clock: HostClock, deadline: ContinuousClock.Instant, operation: String, phaseBudgetSec: Double) throws {
+        var tempBuf = [UInt8](repeating: 0, count: count)
+        var totalRead = 0
+
+        while totalRead < count {
+            let now = clock.now
+            guard now < deadline else {
+                throw ComputerUseError.timeout(operation: operation, seconds: phaseBudgetSec)
+            }
+
+            let duration = deadline - now
+            let remainingSec = Double(duration.components.seconds) + Double(duration.components.attoseconds) / 1e18
+            guard remainingSec > 0 else {
+                throw ComputerUseError.timeout(operation: operation, seconds: phaseBudgetSec)
+            }
+
+            let tvSec = Int(remainingSec)
+            var tvUsec = __darwin_suseconds_t(ceil((remainingSec - floor(remainingSec)) * 1_000_000))
+            if remainingSec > 0 && tvSec == 0 && tvUsec == 0 {
+                tvUsec = 1
+            }
+            if tvUsec >= 1_000_000 {
+                tvUsec = 999_999
+            }
+            var tv = timeval(tv_sec: tvSec, tv_usec: tvUsec)
+            let optRes = syscalls.setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+            guard optRes == 0 else {
+                throw ComputerUseError.ipcError(reason: "Failed to set SO_RCVTIMEO socket option")
+            }
+
+            let bytesRead = syscalls.read(fd, &tempBuf[totalRead], count - totalRead)
+            if bytesRead > 0 {
+                totalRead += bytesRead
+                if clock.now >= deadline {
+                    throw ComputerUseError.timeout(operation: operation, seconds: phaseBudgetSec)
+                }
+            } else if bytesRead == 0 {
+                throw ComputerUseError.ipcError(reason: "Socket closed prematurely by peer during read")
+            } else {
+                let err = syscalls.lastErrno
+                if err == EINTR { continue }
+                if err == EAGAIN || err == EWOULDBLOCK {
+                    throw ComputerUseError.timeout(operation: operation, seconds: phaseBudgetSec)
+                }
+                throw ComputerUseError.ipcError(reason: "Socket read failed with errno \(err)")
+            }
+        }
+
+        data.append(tempBuf, count: totalRead)
+    }
+
+    private func writeResponse(_ response: IPCResponse, to fd: Int32, clock: HostClock, deadline: ContinuousClock.Instant, phaseBudgetSec: Double) async throws {
+        responseAttemptCount += 1
+        let respData = try JSONEncoder().encode(response)
+        let framedResp = try LengthPrefixedFramer.encode(payload: respData)
+
+        try await writeAll(data: framedResp, to: fd, clock: clock, deadline: deadline, phaseBudgetSec: phaseBudgetSec)
+    }
+
+    public var socketWriter: (@Sendable (Int32, UnsafeRawPointer, Int) throws -> Int)? = nil
+
+    private func writeAll(data: Data, to fd: Int32, clock: HostClock, deadline: ContinuousClock.Instant, phaseBudgetSec: Double) async throws {
+        var totalWritten = 0
+        let totalCount = data.count
+        let bytesArray = [UInt8](data)
+
+        while totalWritten < totalCount {
+            let now = clock.now
+            guard now < deadline else {
+                throw ComputerUseError.timeout(operation: "socket_write_response", seconds: phaseBudgetSec)
+            }
+
+            let duration = deadline - now
+            let remainingSec = Double(duration.components.seconds) + Double(duration.components.attoseconds) / 1e18
+            guard remainingSec > 0 else {
+                throw ComputerUseError.timeout(operation: "socket_write_response", seconds: phaseBudgetSec)
+            }
+
+            let tvSec = Int(remainingSec)
+            var tvUsec = __darwin_suseconds_t(ceil((remainingSec - floor(remainingSec)) * 1_000_000))
+            if remainingSec > 0 && tvSec == 0 && tvUsec == 0 {
+                tvUsec = 1
+            }
+            if tvUsec >= 1_000_000 {
+                tvUsec = 999_999
+            }
+            var nosigpipe: Int32 = 1
+            let sigOptRes = syscalls.setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, socklen_t(MemoryLayout<Int32>.size))
+            guard sigOptRes == 0 else {
+                throw ComputerUseError.ipcError(reason: "Failed to enforce SO_NOSIGPIPE option on client socket descriptor \(fd)")
+            }
+
+            var tv = timeval(tv_sec: tvSec, tv_usec: tvUsec)
+            let optRes = syscalls.setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+            guard optRes == 0 else {
+                throw ComputerUseError.ipcError(reason: "Failed to set SO_SNDTIMEO socket option")
+            }
+
+            let bytesWritten: Int
+            if let customWriter = socketWriter {
+                bytesWritten = try bytesArray.withUnsafeBytes { rawBuf in
+                    guard let basePtr = rawBuf.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return -1 }
+                    return try customWriter(fd, basePtr + totalWritten, totalCount - totalWritten)
+                }
+            } else {
+                bytesWritten = bytesArray.withUnsafeBytes { rawBuf in
+                    guard let basePtr = rawBuf.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return -1 }
+                    return syscalls.write(fd, basePtr + totalWritten, totalCount - totalWritten)
+                }
+            }
+
+            if bytesWritten > 0 {
+                totalWritten += bytesWritten
+                if clock.now >= deadline {
+                    throw ComputerUseError.timeout(operation: "socket_write_response", seconds: phaseBudgetSec)
+                }
+            } else if bytesWritten == 0 {
+                throw ComputerUseError.ipcError(reason: "Zero bytes written to socket")
+            } else {
+                let err = syscalls.lastErrno
+                if err == EINTR { continue }
+                if err == EAGAIN || err == EWOULDBLOCK {
+                    let current = clock.now
+                    if current < deadline {
+                        try await Task.sleep(nanoseconds: 10_000_000)
+                        continue
+                    }
+                    throw ComputerUseError.timeout(operation: "socket_write_response", seconds: phaseBudgetSec)
+                }
+                throw ComputerUseError.ipcError(reason: "Socket write failed with errno \(err)")
+            }
+        }
+    }
+
+    public enum CleanupStepResult: Sendable, Equatable {
+        case notAttempted
+        case attempted(result: Int32, errno: Int32)
+    }
+
+    public struct StopReport: Sendable, Equatable {
+        public let listenerFd: Int32
+        public let shutdownHow: Int32
+        public let shutdown: CleanupStepResult
+        public let serverClose: CleanupStepResult
+        public let socketUnlink: CleanupStepResult
+        public let lockUnlock: CleanupStepResult
+        public let lockClose: CleanupStepResult
+        public let dirClose: CleanupStepResult
+
+        public init(
+            listenerFd: Int32 = -1,
+            shutdownHow: Int32 = SHUT_RDWR,
+            shutdown: CleanupStepResult = .notAttempted,
+            serverClose: CleanupStepResult = .notAttempted,
+            socketUnlink: CleanupStepResult = .notAttempted,
+            lockUnlock: CleanupStepResult = .notAttempted,
+            lockClose: CleanupStepResult = .notAttempted,
+            dirClose: CleanupStepResult = .notAttempted
+        ) {
+            self.listenerFd = listenerFd
+            self.shutdownHow = shutdownHow
+            self.shutdown = shutdown
+            self.serverClose = serverClose
+            self.socketUnlink = socketUnlink
+            self.lockUnlock = lockUnlock
+            self.lockClose = lockClose
+            self.dirClose = dirClose
+        }
+    }
+
+    public private(set) var lastStopReport: StopReport?
+
+    public func stop() {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard isRunning else { return }
+        isRunning = false
+
+        let origServerFd = serverFd
+        var shutStep: CleanupStepResult = .notAttempted
+        var serverCloseStep: CleanupStepResult = .notAttempted
+
+        if serverFd >= 0 {
+            let res = syscalls.shutdown(serverFd, SHUT_RDWR)
+            let err = (res != 0) ? syscalls.lastErrno : 0
+            shutStep = .attempted(result: res, errno: err)
+
+            let cRes = syscalls.close(serverFd)
+            let cErr = (cRes != 0) ? syscalls.lastErrno : 0
+            serverCloseStep = .attempted(result: cRes, errno: cErr)
+            serverFd = -1
+        }
+
+        let socketFilename = (socketPath as NSString).lastPathComponent
+        var unlinkStep: CleanupStepResult = .notAttempted
+
+        if dirFd >= 0 {
+            var statBuf = stat()
+            if syscalls.fstatat(dirFd, socketFilename, &statBuf, AT_SYMLINK_NOFOLLOW) == 0 {
+                if statBuf.st_dev == self.boundDev && statBuf.st_ino == self.boundInode && statBuf.st_uid == syscalls.getuid() && (statBuf.st_mode & S_IFMT) == S_IFSOCK {
+                    let uRes = syscalls.unlinkat(dirFd, socketFilename, 0)
+                    let uErr = (uRes != 0) ? syscalls.lastErrno : 0
+                    unlinkStep = .attempted(result: uRes, errno: uErr)
+                }
+            }
+        }
+
+        var unlockStep: CleanupStepResult = .notAttempted
+        var lockCloseStep: CleanupStepResult = .notAttempted
+
+        if lockFd >= 0 {
+            let unlckRes = syscalls.fileFlock(lockFd, LOCK_UN)
+            let unlckErr = (unlckRes != 0) ? syscalls.lastErrno : 0
+            unlockStep = .attempted(result: unlckRes, errno: unlckErr)
+
+            let lCloseRes = syscalls.close(lockFd)
+            let lCloseErr = (lCloseRes != 0) ? syscalls.lastErrno : 0
+            lockCloseStep = .attempted(result: lCloseRes, errno: lCloseErr)
+            lockFd = -1
+        }
+
+        var dirCloseStep: CleanupStepResult = .notAttempted
+        if dirFd >= 0 {
+            let dCloseRes = syscalls.close(dirFd)
+            let dCloseErr = (dCloseRes != 0) ? syscalls.lastErrno : 0
+            dirCloseStep = .attempted(result: dCloseRes, errno: dCloseErr)
+            dirFd = -1
+        }
+
+        self.boundDev = 0
+        self.boundInode = 0
+        self.boundDirDev = 0
+        self.boundDirInode = 0
+        self.lastStopReport = StopReport(
+            listenerFd: origServerFd,
+            shutdownHow: SHUT_RDWR,
+            shutdown: shutStep,
+            serverClose: serverCloseStep,
+            socketUnlink: unlinkStep,
+            lockUnlock: unlockStep,
+            lockClose: lockCloseStep,
+            dirClose: dirCloseStep
+        )
+    }
+}

@@ -1,0 +1,25 @@
+{
+  "id": "req-1002",
+  "success": true,
+  "data": {
+    "capture_id": "cap-20260721-001",
+    "timestamp": 1721593603000,
+    "topology_version": "top-sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "display_id": 1,
+    "width_points": 50,
+    "height_points": 50,
+    "scale_factor": 2.0,
+    "pixel_width": 100,
+    "pixel_height": 100,
+    "image_format": "jpeg",
+    "image_data_base64": "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAARCABkAGQDAREAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/9oADAMBAAIRAxEAPwD+2AD/2Q==",
+    "image_byte_length": 160,
+    "image_sha256": "3e44792169e5420696bafc1fa3e68e062954fe3f3ce4297de9203800b40a11c8",
+    "normalized_bounds": {
+      "min_x": 0,
+      "min_y": 0,
+      "max_x": 999,
+      "max_y": 999
+    }
+  }
+}
