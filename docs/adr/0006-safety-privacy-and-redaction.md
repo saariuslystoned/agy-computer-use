@@ -8,7 +8,7 @@ Automated desktop interaction poses security and privacy risks if credentials, p
 
 ## Decision
 1. **Official AX Subrole Redaction**:
-   - Accessibility graph extraction automatically redacts secure text fields matching `kAXSubroleAttribute == kAXSecureTextFieldSubrole` (`subrole == "AXSecureTextField"`) to `[REDACTED]`. Title-based matching is not used as a classifier per Apple AX guidelines.
+   - Accessibility graph extraction automatically redacts the value and exposed `identifier`/`description` perception labels of secure text fields matching `kAXSubroleAttribute == kAXSecureTextFieldSubrole` (`subrole == "AXSecureTextField"`) to `[REDACTED]`. Title-based matching is not used as a classifier per Apple AX guidelines.
 2. **Visual Screenshot Pixel Limitation**:
    - AX text DTO redaction does NOT obscure visual desktop screenshot pixels. Passwords rendered inside visible UI entry fields remain present in visual JPEG payloads unless secure element bounding boxes are post-processed and masked.
 3. **App Entitlements & TCC Checks**:

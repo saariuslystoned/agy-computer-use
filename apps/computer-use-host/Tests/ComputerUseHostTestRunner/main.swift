@@ -5704,6 +5704,49 @@ public struct ComputerUseHostTestRunner {
     }
 
     public static func run41_AXTreeInspectionTargetingRedactionCapsAndTruncation() async throws {
+        // Accessibility enrollment is an explicit, one-shot launch mode. Normal
+        // host starts and malformed/duplicated flags must never raise a TCC
+        // prompt. Tests inject the requester so they cannot touch live TCC state.
+        var promptRequestCount = 0
+        let ordinaryPromptResult = AccessibilityTrustPromptPolicy.requestIfEnabled(
+            arguments: ["/path/to/ComputerUseHost", "--agy-launch-generation", "generation-1"]
+        ) {
+            promptRequestCount += 1
+            return true
+        }
+        assertEqual(ordinaryPromptResult, nil)
+        assertEqual(promptRequestCount, 0)
+
+        let requestedPromptResult = AccessibilityTrustPromptPolicy.requestIfEnabled(
+            arguments: [
+                "/path/to/ComputerUseHost",
+                "--agy-launch-generation",
+                "generation-1",
+                AccessibilityTrustPromptPolicy.requestArgument
+            ]
+        ) {
+            promptRequestCount += 1
+            return false
+        }
+        assertEqual(requestedPromptResult, false)
+        assertEqual(promptRequestCount, 1)
+
+        let duplicatePromptResult = AccessibilityTrustPromptPolicy.requestIfEnabled(
+            arguments: [
+                "/path/to/ComputerUseHost",
+                AccessibilityTrustPromptPolicy.requestArgument,
+                AccessibilityTrustPromptPolicy.requestArgument
+            ]
+        ) {
+            promptRequestCount += 1
+            return true
+        }
+        assertEqual(duplicatePromptResult, nil)
+        assertEqual(promptRequestCount, 1)
+        assertTrue(!AccessibilityTrustPromptPolicy.shouldRequest(
+            arguments: ["/path/to/ComputerUseHost", "--request-accessibility-near-match"]
+        ))
+
         // 1. Sanitize text redaction & truncation tests
         let redacted = BoundedAXTraverser.sanitizeText("secret123", isSecure: true)
         assertEqual(redacted, "[REDACTED]")
@@ -5752,6 +5795,8 @@ public struct ComputerUseHostTestRunner {
             id: "n1",
             role: "AXWindow",
             subrole: "AXSecureTextField",
+            identifier: "operator-password-field",
+            description: "secret123",
             title: longText,
             value: "pass123",
             enabled: true,
@@ -5759,9 +5804,34 @@ public struct ComputerUseHostTestRunner {
             bounds: AXRect(x: 0, y: 0, width: 100, height: 100)
         )
         let sanitizedNode = BoundedAXTraverser.sanitizeNode(sampleNode, currentDepth: 1, maxDepth: 5, nodeCount: &count, maxNodes: 500, visited: &visited)
+        assertEqual(sanitizedNode?.identifier, "[REDACTED]")
+        assertEqual(sanitizedNode?.description, "[REDACTED]")
         assertEqual(sanitizedNode?.value, "[REDACTED]")
         assertTrue(sanitizedNode?.title?.hasSuffix("...") == true)
         assertEqual(count, 1)
+
+        count = 0
+        visited.removeAll()
+        let longPerceptionLabels = AXNodeDTO(
+            id: "n2",
+            role: "AXButton",
+            identifier: longText,
+            description: longText,
+            enabled: true,
+            bounds: AXRect(x: 0, y: 0, width: 10, height: 10)
+        )
+        let sanitizedLabels = BoundedAXTraverser.sanitizeNode(
+            longPerceptionLabels,
+            currentDepth: 1,
+            maxDepth: 5,
+            nodeCount: &count,
+            maxNodes: 500,
+            visited: &visited
+        )
+        assertEqual(sanitizedLabels?.identifier?.count, 256)
+        assertEqual(sanitizedLabels?.description?.count, 256)
+        assertTrue(sanitizedLabels?.identifier?.hasSuffix("...") == true)
+        assertTrue(sanitizedLabels?.description?.hasSuffix("...") == true)
 
         // 5. Preserve global negative display origins while rejecting negative sizes.
         let negativeOriginBounds = DefaultAXInspector.boundsRect(
@@ -6496,6 +6566,8 @@ public struct ComputerUseHostTestRunner {
             : "\(pwd)/apps/computer-use-host/Sources/ComputerUseHostLib/AX/AXInspectionEngine.swift"
         let axInspectorSource = try String(contentsOfFile: axInspectorPath, encoding: .utf8)
         assertTrue(axInspectorSource.contains("private let operationGate = AXSemanticOperationGate()"))
+        assertTrue(axInspectorSource.contains("kAXIdentifierAttribute as CFString"))
+        assertTrue(axInspectorSource.contains("kAXDescriptionAttribute as CFString"))
         assertTrue(axInspectorSource.contains("try Self.validateRetainedAuthority("))
         assertTrue(axInspectorSource.contains("try Self.performAXActionCheckingOperatorInput("))
     }

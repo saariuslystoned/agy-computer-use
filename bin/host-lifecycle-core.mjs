@@ -10,6 +10,30 @@ import { classifyPrincipal } from './host-app.mjs';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const REPO_ROOT = path.resolve(__dirname, '..');
+export const ACCESSIBILITY_REQUEST_ARGUMENT = '--request-accessibility';
+
+export function buildNativeLaunchArguments(
+  baseArgs = [],
+  requestAccessibility = false
+) {
+  if (!Array.isArray(baseArgs) || !baseArgs.every((arg) => typeof arg === 'string')) {
+    throw new Error('Native launch arguments must be an array of strings');
+  }
+  if (typeof requestAccessibility !== 'boolean') {
+    throw new Error('requestAccessibility must be a boolean');
+  }
+  if (baseArgs.includes(ACCESSIBILITY_REQUEST_ARGUMENT)) {
+    throw new Error(
+      `${ACCESSIBILITY_REQUEST_ARGUMENT} is reserved; use requestAccessibility: true instead`
+    );
+  }
+
+  const nativeArgs = [...baseArgs];
+  if (requestAccessibility) {
+    nativeArgs.push(ACCESSIBILITY_REQUEST_ARGUMENT);
+  }
+  return nativeArgs;
+}
 
 function readPsProcessSnapshot() {
   const out = execFileSync(
@@ -905,6 +929,22 @@ export class ProductionHostSupervisor {
   }
 
   async start(options = {}) {
+    if (
+      options.requestAccessibility !== undefined
+      && typeof options.requestAccessibility !== 'boolean'
+    ) {
+      throw new Error('requestAccessibility must be a boolean when provided');
+    }
+
+    if (
+      options.requestAccessibility === true
+      && (this.state !== 'stopped' || this.child)
+    ) {
+      throw new Error(
+        'Accessibility enrollment requires a new exact host launch; the supervisor must be fully stopped first'
+      );
+    }
+
     if (this.state === 'running' && this.child) {
       const native = await this.checkNativeStatus(500);
       if (native.alive) {
@@ -974,12 +1014,16 @@ export class ProductionHostSupervisor {
         if (this.forbidRealLaunchServices && openBin === '/usr/bin/open') {
           throw new Error('Refusing to invoke real /usr/bin/open in unit-test environment');
         }
+        const nativeArgs = buildNativeLaunchArguments(
+          ['--agy-launch-generation', this.generation],
+          options.requestAccessibility === true
+        );
         const openArgs = [
           '-n', '-g', '-W',
           '--env', `COMPUTER_USE_SOCKET_PATH=${this.hostSocketPath}`,
           '--env', `AGY_SOCKET_PATH=${this.hostSocketPath}`,
           stagedAppDir,
-          '--args', '--agy-launch-generation', this.generation
+          '--args', ...nativeArgs
         ];
         proc = spawn(openBin, openArgs, {
           cwd: REPO_ROOT,
@@ -987,7 +1031,10 @@ export class ProductionHostSupervisor {
           stdio: ['ignore', 'pipe', 'pipe']
         });
       } else {
-        const binaryArgs = options.binaryArgs || [];
+        const binaryArgs = buildNativeLaunchArguments(
+          options.binaryArgs || [],
+          options.requestAccessibility === true
+        );
         proc = spawn(binaryPath, binaryArgs, {
           cwd: REPO_ROOT,
           env: childEnv,

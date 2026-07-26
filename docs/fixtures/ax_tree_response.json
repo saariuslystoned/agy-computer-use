@@ -33,6 +33,8 @@
           "element_ref": "ax-el-fixture-001",
           "supported_actions": ["press"],
           "role": "AXButton",
+          "identifier": "Seven",
+          "description": "7",
           "title": "7",
           "enabled": true,
           "bounds": {

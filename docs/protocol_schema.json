@@ -228,6 +228,8 @@
         },
         "role": { "type": "string", "minLength": 1 },
         "subrole": { "type": "string" },
+        "identifier": { "type": "string", "maxLength": 256 },
+        "description": { "type": "string", "maxLength": 256 },
         "title": { "type": "string" },
         "value": { "type": "string" },
         "enabled": { "type": "boolean" },

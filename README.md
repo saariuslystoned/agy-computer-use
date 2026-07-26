@@ -91,6 +91,14 @@ There is no fallback from the AX action tool to global HID.
     ```bash
     ./bin/agy-computer-use host-start
     ```
+  - Start a stopped host and explicitly request the macOS Accessibility
+    enrollment prompt:
+    ```bash
+    ./bin/agy-computer-use host-start --request-accessibility
+    ```
+    Ordinary starts never request this prompt. The exact opt-in flag fails
+    closed if an owned host is already running; stop that host first. macOS
+    still requires the operator to approve the system prompt or toggle.
   - Check Host Status (read-only):
     ```bash
     ./bin/agy-computer-use host-status

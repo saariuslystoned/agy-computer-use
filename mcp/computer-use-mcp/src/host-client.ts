@@ -164,6 +164,8 @@ export class MockHostClient implements HostClient {
             supported_actions: ["press"],
             role: "AXApplication",
             subrole: "AXStandard",
+            identifier: "calculator-root",
+            description: "Calculator",
             title: "Calculator",
             enabled: true,
             focused: true,

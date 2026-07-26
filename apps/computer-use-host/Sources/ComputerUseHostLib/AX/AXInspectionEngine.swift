@@ -1,7 +1,34 @@
 import Foundation
-import ApplicationServices
+@preconcurrency import ApplicationServices
 import AppKit
 import CryptoKit
+
+public enum AccessibilityTrustPromptPolicy {
+    public static let requestArgument = "--request-accessibility"
+
+    public static func shouldRequest(arguments: [String]) -> Bool {
+        arguments.filter { $0 == requestArgument }.count == 1
+    }
+
+    public static func requestIfEnabled(
+        arguments: [String],
+        requester: () -> Bool
+    ) -> Bool? {
+        guard shouldRequest(arguments: arguments) else {
+            return nil
+        }
+        return requester()
+    }
+
+    public static func requestFromSystemIfEnabled(arguments: [String]) -> Bool? {
+        requestIfEnabled(arguments: arguments) {
+            let options = [
+                kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true
+            ] as CFDictionary
+            return AXIsProcessTrustedWithOptions(options)
+        }
+    }
+}
 
 public struct AXRect: Codable, Equatable, Sendable {
     public let x: Double
@@ -41,6 +68,8 @@ public struct AXNodeDTO: Codable, Equatable, Sendable {
     public let supportedActions: [String]?
     public let role: String
     public let subrole: String?
+    public let identifier: String?
+    public let description: String?
     public let title: String?
     public let value: String?
     public let enabled: Bool?
@@ -54,6 +83,8 @@ public struct AXNodeDTO: Codable, Equatable, Sendable {
         case supportedActions = "supported_actions"
         case role
         case subrole
+        case identifier
+        case description
         case title
         case value
         case enabled
@@ -62,12 +93,14 @@ public struct AXNodeDTO: Codable, Equatable, Sendable {
         case children
     }
 
-    public init(id: String, elementRef: String? = nil, supportedActions: [String]? = nil, role: String, subrole: String? = nil, title: String? = nil, value: String? = nil, enabled: Bool? = nil, focused: Bool? = nil, bounds: AXRect, children: [AXNodeDTO]? = nil) {
+    public init(id: String, elementRef: String? = nil, supportedActions: [String]? = nil, role: String, subrole: String? = nil, identifier: String? = nil, description: String? = nil, title: String? = nil, value: String? = nil, enabled: Bool? = nil, focused: Bool? = nil, bounds: AXRect, children: [AXNodeDTO]? = nil) {
         self.id = id
         self.elementRef = elementRef
         self.supportedActions = supportedActions
         self.role = role
         self.subrole = subrole
+        self.identifier = identifier
+        self.description = description
         self.title = title
         self.value = value
         self.enabled = enabled
@@ -899,6 +932,8 @@ public final class DefaultAXInspector: AXInspectionEngine, AXSemanticActionEngin
 
         var roleStr = "AXUnknown"
         var subroleStr: String? = nil
+        var identifierStr: String? = nil
+        var descriptionStr: String? = nil
         var titleStr: String? = nil
         var valueStr: String? = nil
         var enabledVal: Bool? = nil
@@ -925,6 +960,36 @@ public final class DefaultAXInspector: AXInspectionEngine, AXSemanticActionEngin
         }
         if subroleRes == .success, let sr = subroleValue as? String {
             subroleStr = sr
+        }
+
+        // Identifier
+        var identifierValue: CFTypeRef?
+        let identifierRes = AXUIElementCopyAttributeValue(
+            axElement,
+            kAXIdentifierAttribute as CFString,
+            &identifierValue
+        )
+        if identifierRes == .cannotComplete {
+            didTimeout = true
+            return nil
+        }
+        if identifierRes == .success, let identifier = identifierValue as? String {
+            identifierStr = identifier
+        }
+
+        // Description
+        var descriptionValue: CFTypeRef?
+        let descriptionRes = AXUIElementCopyAttributeValue(
+            axElement,
+            kAXDescriptionAttribute as CFString,
+            &descriptionValue
+        )
+        if descriptionRes == .cannotComplete {
+            didTimeout = true
+            return nil
+        }
+        if descriptionRes == .success, let description = descriptionValue as? String {
+            descriptionStr = description
         }
 
         // Title
@@ -1005,6 +1070,8 @@ public final class DefaultAXInspector: AXInspectionEngine, AXSemanticActionEngin
         let isSecure = (subroleStr == "AXSecureTextField" || subroleStr == (kAXSecureTextFieldSubrole as String))
         if isSecure {
             valueStr = BoundedAXTraverser.redactedPlaceholder
+            identifierStr = identifierStr.map { _ in BoundedAXTraverser.redactedPlaceholder }
+            descriptionStr = descriptionStr.map { _ in BoundedAXTraverser.redactedPlaceholder }
         } else if let v = valueStr {
             if v.count > BoundedAXTraverser.maxStringLength {
                 valueStr = String(v.prefix(BoundedAXTraverser.maxStringLength - 3)) + "..."
@@ -1014,6 +1081,20 @@ public final class DefaultAXInspector: AXInspectionEngine, AXSemanticActionEngin
 
         if let t = titleStr, t.count > BoundedAXTraverser.maxStringLength {
             titleStr = String(t.prefix(BoundedAXTraverser.maxStringLength - 3)) + "..."
+            isTruncated = true
+        }
+        if let identifier = identifierStr,
+           identifier.count > BoundedAXTraverser.maxStringLength {
+            identifierStr = String(
+                identifier.prefix(BoundedAXTraverser.maxStringLength - 3)
+            ) + "..."
+            isTruncated = true
+        }
+        if let description = descriptionStr,
+           description.count > BoundedAXTraverser.maxStringLength {
+            descriptionStr = String(
+                description.prefix(BoundedAXTraverser.maxStringLength - 3)
+            ) + "..."
             isTruncated = true
         }
 
@@ -1094,6 +1175,8 @@ public final class DefaultAXInspector: AXInspectionEngine, AXSemanticActionEngin
             supportedActions: supportedActions,
             role: roleStr,
             subrole: subroleStr,
+            identifier: identifierStr,
+            description: descriptionStr,
             title: titleStr,
             value: valueStr,
             enabled: enabledVal,
@@ -1130,6 +1213,8 @@ public enum BoundedAXTraverser {
 
         let isSecureRole = (node.subrole == "AXSecureTextField" || node.subrole == (kAXSecureTextFieldSubrole as String))
         let cleanValue = sanitizeText(node.value, isSecure: isSecureRole)
+        let cleanIdentifier = sanitizeText(node.identifier, isSecure: isSecureRole)
+        let cleanDescription = sanitizeText(node.description, isSecure: isSecureRole)
         let cleanTitle = sanitizeText(node.title, isSecure: false)
 
         var sanitizedChildren: [AXNodeDTO] = []
@@ -1147,6 +1232,8 @@ public enum BoundedAXTraverser {
             supportedActions: node.supportedActions,
             role: node.role,
             subrole: node.subrole,
+            identifier: cleanIdentifier,
+            description: cleanDescription,
             title: cleanTitle,
             value: cleanValue,
             enabled: node.enabled,

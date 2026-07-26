@@ -17,12 +17,13 @@ This skill teaches Google Antigravity agents and Gemini models how to interact w
 ### 1. Status & Observation
 - **Host Lifecycle & TCC Staging Workflow**:
   1. **Stage Once**: `./bin/agy-computer-use stage-host-app` builds and stages the canonical `ComputerUseHost.app` bundle.
-  2. **Grant TCC Authority**: Grant Screen Recording and Accessibility permissions to the exact staged app bundle.
+  2. **Grant TCC Authority**: With the owned host stopped, use `./bin/agy-computer-use host-start --request-accessibility` only when Accessibility enrollment is needed, then let the operator approve the macOS prompt or toggle. Ordinary `host-start` is prompt-silent.
   3. **Restart Without Restaging**: `./bin/agy-computer-use host-stop && ./bin/agy-computer-use host-start`. Cold starts launch the already-staged app without rebuilding, replacing, or resigning it, preserving filesystem identity (inodes and mtime), executable bytes (SHA-256), and the app signing identity (CDHash).
   4. **Verify MCP Operations**: Call `computer_use_status` and `computer_use_observe` over MCP.
 - **Host Lifecycle Management**:
   - `./bin/agy-computer-use stage-host-app`: Builds and stages the canonical `ComputerUseHost.app` bundle.
   - `./bin/agy-computer-use host-start`: Starts the background native host process using the already-staged canonical app.
+  - `./bin/agy-computer-use host-start --request-accessibility`: On a stopped host only, launches the exact staged app with one explicit Accessibility prompt request. Never add this flag to routine starts or bypass the human macOS approval.
   - `./bin/agy-computer-use host-status`: Checks if native host is `running`, `stopped`, or `stale`.
   - `./bin/agy-computer-use host-stop`: Stops the native host process cleanly, awaiting exact native child close and terminal owner receipt (`native_closed: true`).
   - *Process Authority & Security*: Host lifecycle commands communicate with the owner control server on `control.sock` (terminal owner correlation) and strictly enforce the non-override canonical runtime directory policy (`/tmp/agy-computer-use-<uid>`).
@@ -34,14 +35,15 @@ This skill teaches Google Antigravity agents and Gemini models how to interact w
 - Call `computer_use_ax_tree` with an explicit `app_id`; never rely on the frontmost application.
 - The response may include `ax_snapshot_id`, `app_instance_ref`, expiry, and an `element_ref` plus `supported_actions: ["press"]` on exact retained controls.
 - Accessibility tree inspection enforces strict caps: depth limit (<= 10), node count (<= 500), string length (<= 256 chars), cycle detection, and secure text redaction (`[REDACTED]`).
-- Traversal `id`, title, label, bounds, and index are perception only. Only the opaque refs from the same fresh inspection authorize one action.
+- Traversal `id`, `identifier`, `description`, title, label, bounds, and index are perception only. Only the opaque refs from the same fresh inspection authorize one action.
 
 ### 3. Operator-Safe Semantic Action (`computer_use_ax_action`)
 - Prefer this path on any shared operator workstation.
 - Pass the exact `ax_snapshot_id`, `app_instance_ref`, `element_ref`, `topology_version`, advertised `action: "press"`, and a nonblank `intent`.
 - The lease is short-lived and consumed once. Stale, replayed, mismatched, disabled, relabeled/reparented, moved-to-another-window, terminated-process, unsupported, or operator/system-input-intervened targets fail closed.
 - `status: "dispatched"` is not behavior proof. Always call `computer_use_ax_tree` again for the same explicit app and verify the intended semantic result before continuing.
-- On `STALE_AX_SNAPSHOT`, `STALE_OPERATION`, `USER_INTERVENED`, or `OUTCOME_UNKNOWN`, run a fresh explicit-app `computer_use_ax_tree` and reconsider; never retry the old ref.
+- A `USER_INTERVENED` error from read-only `computer_use_ax_tree` means no action lease was issued and that inspection may be retried. Once `computer_use_ax_action` is called, any `USER_INTERVENED`, `OUTCOME_UNKNOWN`, transport uncertainty, or other error may follow an already-dispatched `AXPress`: never automatically repeat the action.
+- After any action-side error, run a fresh explicit-app `computer_use_ax_tree`, verify the target state, and let the controller or operator adjudicate whether another action is still needed. Never retry the old ref.
 
 ### 4. Exclusive Global-HID Actions
 - `computer_use_click`, `computer_use_move`, `computer_use_type`, `computer_use_shortcut`, `computer_use_scroll`, and `computer_use_drag` use the shared macOS input stream. They can move the physical pointer, change focus, or collide with the operator.

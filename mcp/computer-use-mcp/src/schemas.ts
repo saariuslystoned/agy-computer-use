@@ -159,6 +159,8 @@ export const AXNodeSchema: z.ZodType<any> = z.lazy(() =>
     supported_actions: z.array(z.literal("press")).min(1).max(1).optional(),
     role: z.string().min(1).max(256),
     subrole: z.string().max(256).optional(),
+    identifier: z.string().max(256).optional(),
+    description: z.string().max(256).optional(),
     title: z.string().max(256).optional(),
     value: z.string().max(256).optional(),
     enabled: z.boolean().optional(),

@@ -16,11 +16,15 @@ computer_use_ax_tree(same app_id)
   -> independently verify the intended state
 ```
 
-Never use a traversal `id`, title, label, index, or bounds as action authority.
+Never use a traversal `id`, `identifier`, `description`, title, label, index, or bounds as action authority.
 The opaque lease is consumed once. A dispatched action is not a verified effect.
 Semantic/window/ancestry drift or any observed macOS session input counter
-change returns a typed stale/intervention error. Recover only with a fresh
-explicit-app AX tree; never retry the consumed lease.
+change returns a typed stale/intervention error. A read-only tree inspection
+that returns `USER_INTERVENED` may be retried because it issued no lease. After
+`computer_use_ax_action` is called, however, every error may follow an
+already-dispatched press: never automatically repeat the action. Re-inspect,
+verify the target state, and let the controller or operator decide whether a
+new action is still needed.
 
 ## Exclusive global-HID loop
 

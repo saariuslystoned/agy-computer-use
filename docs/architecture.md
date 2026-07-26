@@ -36,7 +36,7 @@
 - **Local IPC Security**: Unix domain socket path `/private/tmp/agy-computer-use-$UID/host.sock` (resolving macOS `/tmp` symlink) with directory permissions set to `0700` and owner-only `host.lock` lifecycle lock.
 - **Peer Verification**: Host verifies connecting process UID. (Residual risk: unprivileged processes owned by the same UID on macOS can access the socket).
 - **Data Redaction**: Sensitive fields (`AXIsPassword`, `AXIsSecureText`) are redacted at the host level before serialization (`[REDACTED]`).
-- **Action Authority**: Traversal IDs, labels, titles, bounds, and indexes never
+- **Action Authority**: Traversal IDs, identifiers, descriptions, labels, titles, bounds, and indexes never
   authorize mutation. Only matching opaque refs from the current unexpired
   snapshot may dispatch one advertised action.
 - **Honest Outcome**: A successful `AXUIElementPerformAction` receipt is

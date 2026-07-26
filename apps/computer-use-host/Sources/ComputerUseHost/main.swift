@@ -12,6 +12,10 @@ struct ComputerUseHostMain {
     static func main() async throws {
         logStderr("[ComputerUseHost] Starting native Unix domain socket server (v0.2-m10)...")
 
+        _ = AccessibilityTrustPromptPolicy.requestFromSystemIfEnabled(
+            arguments: ProcessInfo.processInfo.arguments
+        )
+
         let authorizer = CGScreenRecordingAuthorizer()
         let topologyProvider = SystemDisplayTopologyProvider()
         let captureEngine = SCScreenshotCaptureEngine(authorizer: authorizer)
