@@ -48,8 +48,9 @@ noninterfering.
    validating it.
 7. Input-counter drift detected during AX dispatch wins over every returned AX
    error, including `cannotComplete`, and returns `USER_INTERVENED`.
-8. Any uncertain AX result returns `OUTCOME_UNKNOWN` and explicitly requires a
-   fresh `computer_use_ax_tree`; the old reference must not be retried.
+8. Absent detected input drift, AX `cannotComplete` and invalid/unsafe semantic
+   receipts return `OUTCOME_UNKNOWN` and explicitly require a fresh
+   `computer_use_ax_tree`; the old reference must not be retried.
 9. A valid receipt is `status: "dispatched"`,
    `strategy: "ax_semantic"`, `requires_reinspection: true`, and
    `global_hid_posts: 0`. Dispatch is not reported as verified behavior.
@@ -102,8 +103,8 @@ or changed in this candidate.
 
 ## Independent review
 
-A read-only independent reviewer first rejected the candidate for three
-blocking gaps:
+After earlier review rounds and repairs, a read-only independent reviewer
+identified three remaining blocking gaps:
 
 1. during-dispatch input drift was checked only after AX success;
 2. native AX uncertainty said “fresh observation” instead of naming
@@ -145,6 +146,6 @@ The following remain open and prevent closing issue #7:
 - the exact-window redacted operator HUD, tracked separately in issue #8.
 
 The live HUD is intentionally not part of this source candidate. Issue #8
-contains the pre-researched clean-room architecture, identity/privacy
-contracts, one-shot preview phase, later low-rate viewer phase, and required
+contains the pre-researched clean-room continuous exact-window HUD design,
+identity/privacy contracts, bounded latest-frame handling, and required
 black-box/native proof matrix.
