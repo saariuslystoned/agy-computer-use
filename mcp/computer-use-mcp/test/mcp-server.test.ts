@@ -5,7 +5,7 @@ import * as path from "path";
 import * as net from "net";
 import * as crypto from "crypto";
 import AjvModule from "ajv";
-import { execSync } from "node:child_process";
+import { execSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -851,6 +851,58 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
 
     assert.notEqual(misExitCode, 0, "Mismatched version launcher execution must exit nonzero");
     assert.match(misOutput, /does not match pinned versions/, "Mismatched version launcher output must contain version diagnostic error");
+
+    // Installed mise fallback must remain process-local. In particular, the
+    // launcher must not mutate mise's trust store for a fresh worktree.
+    const miseStubDir = fs.mkdtempSync(path.join(rootDir, "mcp/computer-use-mcp/test/fixtures/tmp_mise_") + Math.random().toString(36).substring(2));
+    const miseArgsLog = path.join(miseStubDir, "mise-args.txt");
+    fs.writeFileSync(
+      path.join(miseStubDir, "node"),
+      "#!/bin/sh\nif [ \"$1\" = \"-v\" ]; then echo 'v26.0.0'; exit 0; fi\nexit 1\n",
+      { mode: 0o755 }
+    );
+    fs.writeFileSync(
+      path.join(miseStubDir, "pnpm"),
+      "#!/bin/sh\nif [ \"$1\" = \"-v\" ]; then echo '99.0.0'; exit 0; fi\nexit 1\n",
+      { mode: 0o755 }
+    );
+    fs.writeFileSync(
+      path.join(miseStubDir, "mise"),
+      "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$MISE_ARG_LOG\"\n",
+      { mode: 0o755 }
+    );
+
+    try {
+      const miseResult = spawnSync(launcherAbsPath, [], {
+        cwd: rootDir,
+        env: {
+          PATH: `${miseStubDir}:/usr/bin:/bin`,
+          HOME: miseStubDir,
+          MISE_ARG_LOG: miseArgsLog
+        },
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+      assert.equal(
+        miseResult.status,
+        0,
+        `mise fallback must execute successfully: ${miseResult.stderr || miseResult.stdout}`
+      );
+      const miseArgs = fs.readFileSync(miseArgsLog, "utf-8").trim().split("\n");
+      assert.deepEqual(miseArgs, [
+        "--no-config",
+        "exec",
+        "node@22.23.1",
+        "pnpm@10.33.0",
+        "--",
+        "node",
+        path.join(rootDir, "bin/mcp-server.mjs")
+      ]);
+      assert.equal(miseArgs.includes("trust"), false, "mise fallback must never mutate trust state");
+      assert.equal(miseArgs.some(arg => arg.endsWith(".mise.toml")), false, "mise fallback must not load a worktree config");
+    } finally {
+      fs.rmSync(miseStubDir, { recursive: true, force: true });
+    }
   });
 
   test("M9-ACCESSIBILITY-TRUTH: Trusted CGEvent input works when AX tree inspection is unavailable (accessibility_trusted=true, ax_tree_inspection_available=false)", async () => {

@@ -28,6 +28,8 @@ This skill teaches Google Antigravity agents (and Gemini models) how to reliably
   - *Process Authority & Security*: Host lifecycle commands communicate with the owner control server on `control.sock` (terminal owner correlation) and strictly enforce the non-override canonical runtime directory policy (`/tmp/agy-computer-use-<uid>`).
 - **ALWAYS** call `computer_use_status` to verify host connection, TCC permission state (`granted`), OS input permission trust (`input_mutation_state: "enabled"` / `accessibility_trusted: true`), and display topology.
 - Call `computer_use_observe` to capture current desktop screen state and receive a valid `capture_id` and `topology_version`.
+- **Multi-display routing**: when `display_count > 1`, never assume the primary display contains the target. Use `computer_use_ax_tree` for the explicit target application, compare its window bounds with the topology returned by `computer_use_status`, and call `computer_use_observe` with the matching `display_id`. If the target display remains uncertain, inspect candidate displays one at a time with explicit `display_id`; do not treat one primary-display frame as the whole desktop.
+- `computer_use_observe` is display-scoped, not window-cropped, in v0.2.0. Use the target application's AX tree to locate its window inside the selected display. Never reuse a capture lease after changing displays.
 - Dynamic topology versions (`topology_version`) are required tokens returned from observation.
 
 ### 2. Accessibility Tree Inspection (`computer_use_ax_tree`)
