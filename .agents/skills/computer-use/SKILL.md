@@ -1,14 +1,14 @@
 ---
 name: computer-use
-description: Provides desktop screen perception and bounded input synthesis (computer_use_status, computer_use_observe, computer_use_ax_tree, computer_use_click, computer_use_move, computer_use_type, computer_use_shortcut, computer_use_scroll, computer_use_drag) for macOS desktop interactions. Contract Version v0.2.0-dogfood-m10.
+description: Provides explicit-app AX inspection, one-shot operator-safe semantic press, desktop perception, and exclusive-session global input tools for macOS. Contract Version v0.3.0-operator-safe-ax.
 ---
 
-# Antigravity Computer Use Skill (`v0.2.0-dogfood-m10`)
+# Antigravity Computer Use Skill (`v0.3.0-operator-safe-ax`)
 
-This skill teaches Google Antigravity agents (and Gemini models) how to reliably and safely interact with macOS graphical user interfaces using the nine-tool `computer-use-mcp` suite.
+This skill teaches Google Antigravity agents and Gemini models how to interact with macOS through the ten-tool `computer-use-mcp` suite.
 
 > [!NOTE]
-> **M10 Nine-Tool Surface**: In Milestone M10, native host screen observation (`computer_use_observe`), status reporting (`computer_use_status`), accessibility tree inspection (`computer_use_ax_tree`), and bounded input synthesis tools (`computer_use_click`, `computer_use_move`, `computer_use_type`, `computer_use_shortcut`, `computer_use_scroll`, `computer_use_drag`) are active. Every input action requires active `capture_id`, `topology_version`, and `intent`. Every action consumes the active capture lease, requiring a fresh `computer_use_observe` before any subsequent input action.
+> **Operator-safe Phase 1**: `computer_use_ax_tree` plus `computer_use_ax_action` provides an exact-element semantic `press` path that never falls back to global HID. The older coordinate and keyboard tools remain available only for explicitly exclusive GUI sessions.
 
 ---
 
@@ -26,16 +26,26 @@ This skill teaches Google Antigravity agents (and Gemini models) how to reliably
   - `./bin/agy-computer-use host-status`: Checks if native host is `running`, `stopped`, or `stale`.
   - `./bin/agy-computer-use host-stop`: Stops the native host process cleanly, awaiting exact native child close and terminal owner receipt (`native_closed: true`).
   - *Process Authority & Security*: Host lifecycle commands communicate with the owner control server on `control.sock` (terminal owner correlation) and strictly enforce the non-override canonical runtime directory policy (`/tmp/agy-computer-use-<uid>`).
-- **ALWAYS** call `computer_use_status` to verify host connection, TCC permission state (`granted`), OS input permission trust (`input_mutation_state: "enabled"` / `accessibility_trusted: true`), and display topology.
+- **ALWAYS** call `computer_use_status` to verify host connection, TCC permission state, Accessibility trust, operator-safe AX availability, and display topology.
 - Call `computer_use_observe` to capture current desktop screen state and receive a valid `capture_id` and `topology_version`.
 - Dynamic topology versions (`topology_version`) are required tokens returned from observation.
 
 ### 2. Accessibility Tree Inspection (`computer_use_ax_tree`)
-- Call `computer_use_ax_tree` to inspect safe semantic hierarchy, role, title, value, state, and bounds metadata for explicit running applications.
+- Call `computer_use_ax_tree` with an explicit `app_id`; never rely on the frontmost application.
+- The response may include `ax_snapshot_id`, `app_instance_ref`, expiry, and an `element_ref` plus `supported_actions: ["press"]` on exact retained controls.
 - Accessibility tree inspection enforces strict caps: depth limit (<= 10), node count (<= 500), string length (<= 256 chars), cycle detection, and secure text redaction (`[REDACTED]`).
-- AX inspection is untrusted perception only and never mutation authority.
+- Traversal `id`, title, label, bounds, and index are perception only. Only the opaque refs from the same fresh inspection authorize one action.
 
-### 3. Bounded Input Synthesis Actions
+### 3. Operator-Safe Semantic Action (`computer_use_ax_action`)
+- Prefer this path on any shared operator workstation.
+- Pass the exact `ax_snapshot_id`, `app_instance_ref`, `element_ref`, `topology_version`, advertised `action: "press"`, and a nonblank `intent`.
+- The lease is short-lived and consumed once. Stale, replayed, mismatched, disabled, relabeled/reparented, moved-to-another-window, terminated-process, unsupported, or operator/system-input-intervened targets fail closed.
+- `status: "dispatched"` is not behavior proof. Always call `computer_use_ax_tree` again for the same explicit app and verify the intended semantic result before continuing.
+- On `STALE_AX_SNAPSHOT`, `STALE_OPERATION`, `USER_INTERVENED`, or `OUTCOME_UNKNOWN`, run a fresh explicit-app `computer_use_ax_tree` and reconsider; never retry the old ref.
+
+### 4. Exclusive Global-HID Actions
+- `computer_use_click`, `computer_use_move`, `computer_use_type`, `computer_use_shortcut`, `computer_use_scroll`, and `computer_use_drag` use the shared macOS input stream. They can move the physical pointer, change focus, or collide with the operator.
+- Use them only when the route explicitly owns an exclusive GUI session, VM, or dedicated worker Mac. There is no silent fallback from `computer_use_ax_action`.
 - **Observe-Action-Observe Loop**: Input actions (`computer_use_click`, `computer_use_move`, `computer_use_type`, `computer_use_shortcut`, `computer_use_scroll`, `computer_use_drag`) atomically consume the observation lease token (`capture_id`).
 - Replay or sequential input actions without an intervening `computer_use_observe` fail closed with `STALE_CAPTURE`.
 - All input actions require a nonblank `intent` explaining the target purpose.
@@ -43,7 +53,7 @@ This skill teaches Google Antigravity agents (and Gemini models) how to reliably
 - `computer_use_scroll`: Dispatches a finite anchored scroll wheel event with bounded non-zero scroll deltas (`delta_x`, `delta_y`).
 - `computer_use_drag`: Dispatches a same-display drag from (`start_x`, `start_y`) to (`end_x`, `end_y`) using the left mouse button (`button: "left"`) with guaranteed input release on every terminal path. Cross-display drags and non-left drag buttons are deferred.
 
-### 4. Coordinate System (`0...999`)
+### 5. Coordinate System (`0...999`)
 - All coordinates in visual layout analysis and input synthesis actions (`click`, `move`, `scroll`, `drag`) are normalized to an integer grid from `0` to `999`.
 - `x = 0, y = 0` is Top-Left; `x = 999, y = 999` is Bottom-Right of the active display.
 

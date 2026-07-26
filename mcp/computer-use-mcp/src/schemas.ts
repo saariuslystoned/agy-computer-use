@@ -89,6 +89,12 @@ export const StatusDataSchema = z.object({
   accessibility_available: z.boolean(),
   accessibility_trusted: z.boolean(),
   ax_tree_inspection_available: z.boolean().optional(),
+  operator_safe_ax_available: z.boolean(),
+  operator_safe_ax_actions: z.array(z.literal("press")).max(1),
+  supported_action_strategies: z.array(
+    z.enum(["ax_semantic", "exclusive_global_hid"])
+  ).max(2),
+  global_hid_may_affect_pointer_or_focus: z.literal(true),
   input_mutation_state: z.enum(["enabled", "disabled"]),
   topology_version: TopologyVersionSchema,
   primary_display_id: z.number().int().positive().finite(),
@@ -103,6 +109,18 @@ export const StatusDataSchema = z.object({
 ).refine(
   (data) => data.display_count === data.topology.displays.length,
   { message: "display_count must match topology.displays array length" }
+).refine(
+  (data) => data.operator_safe_ax_available === data.operator_safe_ax_actions.includes("press"),
+  { message: "operator_safe_ax_available must match operator_safe_ax_actions" }
+).refine(
+  (data) => data.operator_safe_ax_available === data.supported_action_strategies.includes("ax_semantic"),
+  { message: "ax_semantic strategy must match operator_safe_ax_available" }
+).refine(
+  (data) => (data.input_mutation_state === "enabled") === data.supported_action_strategies.includes("exclusive_global_hid"),
+  { message: "exclusive_global_hid strategy must match input_mutation_state" }
+).refine(
+  (data) => new Set(data.supported_action_strategies).size === data.supported_action_strategies.length,
+  { message: "supported_action_strategies must not contain duplicates" }
 );
 
 export const ObserveDataSchema = z.object({
@@ -130,13 +148,15 @@ export const ObserveDataSchema = z.object({
 }).strict();
 
 export const AXTreeInputSchema = z.object({
-  app_id: z.string().trim().min(1).optional(),
+  app_id: z.string().trim().min(1),
   max_depth: z.number().int().min(1).max(10).optional()
 }).strict();
 
 export const AXNodeSchema: z.ZodType<any> = z.lazy(() =>
   z.object({
     id: z.string().min(1).max(256),
+    element_ref: z.string().min(1).max(256).optional(),
+    supported_actions: z.array(z.literal("press")).min(1).max(1).optional(),
     role: z.string().min(1).max(256),
     subrole: z.string().max(256).optional(),
     title: z.string().max(256).optional(),
@@ -150,7 +170,10 @@ export const AXNodeSchema: z.ZodType<any> = z.lazy(() =>
       height: z.number().nonnegative().finite()
     }).strict(),
     children: z.array(AXNodeSchema).optional()
-  }).strict()
+  }).strict().refine(
+    (data) => (data.element_ref === undefined) === (data.supported_actions === undefined),
+    { message: "element_ref and supported_actions must be present together" }
+  )
 );
 
 export const AXTargetAppSchema = z.object({
@@ -186,6 +209,9 @@ export function inspectTreeStructure(node: any, currentDepth = 1): { count: numb
 
 export const AXTreeDataSchema = z.object({
   target_app: AXTargetAppSchema,
+  ax_snapshot_id: z.string().min(1).max(256),
+  app_instance_ref: z.string().min(1).max(256),
+  expires_at_ms: z.number().int().positive().finite(),
   topology_version: TopologyVersionSchema,
   node_count: z.number().int().min(1).max(500),
   max_depth_reached: z.number().int().min(1).max(10),
@@ -213,6 +239,29 @@ export const AXTreeDataSchema = z.object({
   },
   { message: "AX tree node IDs must be unique" }
 );
+
+export const AXActionInputSchema = z.object({
+  ax_snapshot_id: z.string().trim().min(1).max(256),
+  app_instance_ref: z.string().trim().min(1).max(256),
+  element_ref: z.string().trim().min(1).max(256),
+  topology_version: TopologyVersionSchema,
+  action: z.literal("press"),
+  intent: z.string().trim().min(1)
+}).strict();
+
+export const AXActionResultDataSchema = z.object({
+  action_id: z.string().min(1).max(256),
+  status: z.literal("dispatched"),
+  strategy: z.literal("ax_semantic"),
+  action: z.literal("press"),
+  ax_snapshot_id: z.string().min(1).max(256),
+  app_instance_ref: z.string().min(1).max(256),
+  element_ref: z.string().min(1).max(256),
+  topology_version: TopologyVersionSchema,
+  requires_reinspection: z.literal(true),
+  global_hid_posts: z.literal(0),
+  duration_ms: z.number().nonnegative().finite()
+}).strict();
 
 export const ClickInputSchema = z.object({
   capture_id: z.string().min(1),

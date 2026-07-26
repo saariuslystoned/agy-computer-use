@@ -23,6 +23,7 @@ struct ComputerUseHostMain {
             topologyProvider: topologyProvider,
             captureEngine: captureEngine,
             axEngine: axEngine,
+            axActionEngine: axEngine,
             inputEngine: inputEngine
         )
 
