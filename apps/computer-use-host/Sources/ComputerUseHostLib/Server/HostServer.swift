@@ -189,6 +189,14 @@ public struct DefaultHostClock: HostClock {
 }
 
 public actor HostServer {
+    package static func isCanonicalOperatorSafeAXActionSubset(
+        _ actions: [String]
+    ) -> Bool {
+        actions.isEmpty ||
+            actions == ["press"] ||
+            actions == ["press", "set_value"]
+    }
+
     private var isConnected: Bool = false
     private let authorizer: ScreenRecordingAuthorizing
     private let topologyProvider: DisplayTopologyProviding
@@ -249,10 +257,18 @@ public actor HostServer {
                 self.activeTopology = currentTopology
                 let isGranted = authorizer.isScreenCaptureAccessGranted
                 let osAxTrusted = inputEngine.isMutationEnabled
+                let engineOperatorSafeAXActions =
+                    axActionEngine.supportedOperatorSafeActions
                 let operatorSafeAXAvailable =
                     axEngine.isAvailable &&
                     axActionEngine.isOperatorSafeActionAvailable &&
-                    axActionEngine.supportedOperatorSafeActions == ["press"]
+                    Self.isCanonicalOperatorSafeAXActionSubset(
+                        engineOperatorSafeAXActions
+                    ) &&
+                    !engineOperatorSafeAXActions.isEmpty
+                let advertisedOperatorSafeAXActions = operatorSafeAXAvailable
+                    ? engineOperatorSafeAXActions
+                    : []
                 let supportedActionStrategies: [AnyCodable] =
                     (operatorSafeAXAvailable ? [.string("ax_semantic")] : []) +
                     (osAxTrusted ? [.string("exclusive_global_hid")] : [])
@@ -286,9 +302,9 @@ public actor HostServer {
                         "accessibility_trusted": .bool(osAxTrusted),
                         "ax_tree_inspection_available": .bool(axEngine.isAvailable),
                         "operator_safe_ax_available": .bool(operatorSafeAXAvailable),
-                        "operator_safe_ax_actions": operatorSafeAXAvailable
-                            ? .array([.string("press")])
-                            : .array([]),
+                        "operator_safe_ax_actions": .array(
+                            advertisedOperatorSafeAXActions.map(AnyCodable.string)
+                        ),
                         "supported_action_strategies": .array(supportedActionStrategies),
                         "global_hid_may_affect_pointer_or_focus": .bool(true),
                         "input_mutation_state": .string(osAxTrusted ? "enabled" : "disabled"),
@@ -425,8 +441,24 @@ public actor HostServer {
                       !action.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                     throw ComputerUseError.ipcError(reason: "action parameter is required and must be nonblank")
                 }
-                guard action == "press" else {
+                guard action == "press" || action == "set_value" else {
                     throw ComputerUseError.noninterferingActionUnsupported(action: action)
+                }
+                let value: String?
+                if action == "set_value" {
+                    guard let rawValue = request.params?["value"]?.rawValue as? String else {
+                        throw ComputerUseError.ipcError(
+                            reason: "value parameter is required when action is set_value"
+                        )
+                    }
+                    value = try DefaultAXInspector.validateSetValueInput(rawValue)
+                } else {
+                    guard request.params?["value"] == nil else {
+                        throw ComputerUseError.ipcError(
+                            reason: "value parameter is valid only when action is set_value"
+                        )
+                    }
+                    value = nil
                 }
                 guard let snapshotId = request.params?["ax_snapshot_id"]?.rawValue as? String,
                       !snapshotId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -455,7 +487,13 @@ public actor HostServer {
                 guard axActionEngine.isOperatorSafeActionAvailable else {
                     throw ComputerUseError.noninterferingActionUnsupported(action: action)
                 }
-                guard axActionEngine.supportedOperatorSafeActions == ["press"] else {
+                let supportedOperatorSafeActions =
+                    axActionEngine.supportedOperatorSafeActions
+                guard Self.isCanonicalOperatorSafeAXActionSubset(
+                    supportedOperatorSafeActions
+                ),
+                      !supportedOperatorSafeActions.isEmpty,
+                      supportedOperatorSafeActions.contains(action) else {
                     throw ComputerUseError.noninterferingActionUnsupported(action: action)
                 }
 
@@ -464,6 +502,7 @@ public actor HostServer {
                     appInstanceRef: appInstanceRef,
                     elementRef: elementRef,
                     action: action,
+                    value: value,
                     topologyVersion: requestedTopologyVersion
                 )
                 guard !result.actionId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,

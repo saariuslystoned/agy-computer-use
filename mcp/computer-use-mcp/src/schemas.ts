@@ -2,6 +2,15 @@ import { z } from "zod";
 
 export const StatusInputSchema = z.object({}).strict();
 
+export const MAX_SET_VALUE_UTF8_BYTES = 4_096;
+export const OperatorSafeAXActionSchema = z.enum(["press", "set_value"]);
+
+export function isBoundedWellFormedUTF8(value: string): boolean {
+  const encoded = Buffer.from(value, "utf8");
+  return encoded.length <= MAX_SET_VALUE_UTF8_BYTES &&
+    encoded.toString("utf8") === value;
+}
+
 export const ObserveInputSchema = z.object({
   display_id: z.number().int().min(1).finite().optional()
 }).strict();
@@ -90,7 +99,12 @@ export const StatusDataSchema = z.object({
   accessibility_trusted: z.boolean(),
   ax_tree_inspection_available: z.boolean().optional(),
   operator_safe_ax_available: z.boolean(),
-  operator_safe_ax_actions: z.array(z.literal("press")).max(1),
+  operator_safe_ax_actions: z.array(OperatorSafeAXActionSchema).max(2).refine(
+    (actions) => actions.length === 0 ||
+      actions.join(",") === "press" ||
+      actions.join(",") === "press,set_value",
+    { message: "operator_safe_ax_actions must be empty, [press], or canonical [press, set_value]" }
+  ),
   supported_action_strategies: z.array(
     z.enum(["ax_semantic", "exclusive_global_hid"])
   ).max(2),
@@ -110,7 +124,7 @@ export const StatusDataSchema = z.object({
   (data) => data.display_count === data.topology.displays.length,
   { message: "display_count must match topology.displays array length" }
 ).refine(
-  (data) => data.operator_safe_ax_available === data.operator_safe_ax_actions.includes("press"),
+  (data) => data.operator_safe_ax_available === (data.operator_safe_ax_actions.length > 0),
   { message: "operator_safe_ax_available must match operator_safe_ax_actions" }
 ).refine(
   (data) => data.operator_safe_ax_available === data.supported_action_strategies.includes("ax_semantic"),
@@ -156,7 +170,10 @@ export const AXNodeSchema: z.ZodType<any> = z.lazy(() =>
   z.object({
     id: z.string().min(1).max(256),
     element_ref: z.string().min(1).max(256).optional(),
-    supported_actions: z.array(z.literal("press")).min(1).max(1).optional(),
+    supported_actions: z.array(OperatorSafeAXActionSchema).min(1).max(2).refine(
+      (actions) => ["press", "set_value", "press,set_value"].includes(actions.join(",")),
+      { message: "supported_actions must be unique and in canonical order" }
+    ).optional(),
     role: z.string().min(1).max(256),
     subrole: z.string().max(256).optional(),
     identifier: z.string().max(256).optional(),
@@ -175,6 +192,13 @@ export const AXNodeSchema: z.ZodType<any> = z.lazy(() =>
   }).strict().refine(
     (data) => (data.element_ref === undefined) === (data.supported_actions === undefined),
     { message: "element_ref and supported_actions must be present together" }
+  ).refine(
+    (data) => !data.supported_actions?.includes("set_value") || (
+      data.enabled === true &&
+      (data.role === "AXTextField" || data.role === "AXTextArea") &&
+      data.subrole !== "AXSecureTextField"
+    ),
+    { message: "set_value may be advertised only on enabled non-secure text fields or text areas" }
   )
 );
 
@@ -242,20 +266,42 @@ export const AXTreeDataSchema = z.object({
   { message: "AX tree node IDs must be unique" }
 );
 
-export const AXActionInputSchema = z.object({
+const AXActionAuthorityFields = {
   ax_snapshot_id: z.string().trim().min(1).max(256),
   app_instance_ref: z.string().trim().min(1).max(256),
   element_ref: z.string().trim().min(1).max(256),
   topology_version: TopologyVersionSchema,
-  action: z.literal("press"),
   intent: z.string().trim().min(1)
+};
+
+const AXPressActionInputSchema = z.object({
+  ...AXActionAuthorityFields,
+  action: z.literal("press"),
 }).strict();
+
+const AXSetValueActionInputSchema = z.object({
+  ...AXActionAuthorityFields,
+  action: z.literal("set_value"),
+  value: z.string().max(MAX_SET_VALUE_UTF8_BYTES).superRefine((value, ctx) => {
+    if (!isBoundedWellFormedUTF8(value)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `value must be well-formed UTF-8 no larger than ${MAX_SET_VALUE_UTF8_BYTES} bytes`
+      });
+    }
+  })
+}).strict();
+
+export const AXActionInputSchema = z.discriminatedUnion("action", [
+  AXPressActionInputSchema,
+  AXSetValueActionInputSchema
+]);
 
 export const AXActionResultDataSchema = z.object({
   action_id: z.string().min(1).max(256),
   status: z.literal("dispatched"),
   strategy: z.literal("ax_semantic"),
-  action: z.literal("press"),
+  action: OperatorSafeAXActionSchema,
   ax_snapshot_id: z.string().min(1).max(256),
   app_instance_ref: z.string().min(1).max(256),
   element_ref: z.string().min(1).max(256),

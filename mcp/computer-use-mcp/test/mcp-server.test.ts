@@ -14,7 +14,15 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 import { createComputerUseServer, validateAndDecodeBase64JPEG, parseJPEGDimensions } from "../src/index.js";
-import { validatePixelDimensions, AXTreeDataSchema, DragInputSchema } from "../src/schemas.js";
+import {
+  validatePixelDimensions,
+  AXActionInputSchema,
+  AXActionResultDataSchema,
+  AXTreeDataSchema,
+  DragInputSchema,
+  StatusDataSchema,
+  isBoundedWellFormedUTF8
+} from "../src/schemas.js";
 import { MockHostClient, UnixSocketHostClient, IPCResponseSchema } from "../src/host-client.js";
 
 const Ajv = (AjvModule as any).default || AjvModule;
@@ -71,6 +79,15 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
       "computer_use_status",
       "computer_use_type"
     ]);
+    const axActionTool = toolsResult.tools.find(
+      (tool) => tool.name === "computer_use_ax_action"
+    ) as any;
+    assert.deepEqual(
+      axActionTool.inputSchema.properties.action.enum,
+      ["press", "set_value"]
+    );
+    assert.equal(axActionTool.inputSchema.properties.value.maxLength, 4096);
+    assert.ok(axActionTool.inputSchema.allOf, "Tool metadata must conditionally require value only for set_value");
 
     const statusCall = await client.callTool({ name: "computer_use_status", arguments: {} });
     assert.ok(statusCall.content);
@@ -464,10 +481,13 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
       "ax_tree_response.json": { expectedValid: true, schemaTarget: "AxTreeResponse" },
       "ax_action_request.json": { expectedValid: true, schemaTarget: "AxActionRequest" },
       "ax_action_response.json": { expectedValid: true, schemaTarget: "AxActionResponse" },
+      "ax_set_value_request.json": { expectedValid: true, schemaTarget: "AxActionRequest" },
+      "ax_set_value_response.json": { expectedValid: true, schemaTarget: "AxActionResponse" },
       "move_request.json": { expectedValid: true, schemaTarget: "MoveRequest" },
       "scroll_request.json": { expectedValid: true, schemaTarget: "ScrollRequest" },
       "drag_request.json": { expectedValid: true, schemaTarget: "DragRequest" },
       "status_response.json": { expectedValid: true, schemaTarget: "StatusResponse" },
+      "status_press_only_response.json": { expectedValid: true, schemaTarget: "StatusResponse" },
       "observe_response.json": { expectedValid: true, schemaTarget: "ObserveResponse" },
       "permission_denied_response.json": { expectedValid: true, schemaTarget: "ErrorResponse" },
       "stale_topology_response.json": { expectedValid: true, schemaTarget: "ErrorResponse" },
@@ -476,6 +496,9 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
       "click_request_disabled.json": { expectedValid: true, schemaTarget: "ClickRequest" },
       "invalid_click_request_negative.json": { expectedValid: false },
       "invalid_method_request_negative.json": { expectedValid: false },
+      "invalid_ax_set_value_missing_value.json": { expectedValid: false },
+      "invalid_ax_press_with_value.json": { expectedValid: false },
+      "invalid_status_set_only_response.json": { expectedValid: false, schemaTarget: "StatusResponse" },
       "canonical_jpeg_mutations.json": { expectedValid: false }
     };
 
@@ -499,14 +522,54 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
 
       assert.equal(isValid, mapping.expectedValid, `Fixture '${file}' Ajv validation state (${isValid}) must match expected state (${mapping.expectedValid}): ${JSON.stringify(validateProtocol.errors)}`);
 
-      if (parsed.success === true) {
+      if (parsed.success === true && mapping.expectedValid) {
         const zodParse = IPCResponseSchema.safeParse(parsed);
         assert.ok(zodParse.success, `Response fixture '${file}' must validate against IPCResponseSchema: ${zodParse.error?.message}`);
+
+        if (file === "ax_action_response.json" || file === "ax_set_value_response.json") {
+          const axActionParse = AXActionResultDataSchema.safeParse(parsed.data);
+          assert.ok(axActionParse.success, `AX receipt fixture '${file}' must pass its strict action schema`);
+          assert.equal(parsed.data.value, undefined, `AX receipt fixture '${file}' must not contain a submitted value`);
+          assert.equal(parsed.data.global_hid_posts, 0);
+        }
 
         if (parsed.data?.image_data_base64) {
           const buf = validateAndDecodeBase64JPEG(parsed.data.image_data_base64, parsed.data.pixel_width, parsed.data.pixel_height);
           assert.ok(buf.length > 0, `Observe fixture '${file}' image buffer must be non-empty`);
         }
+      }
+      if (file === "ax_set_value_request.json") {
+        assert.equal(
+          AXActionInputSchema.safeParse(parsed.params).success,
+          true,
+          "set_value protocol fixture must pass the exact MCP action schema"
+        );
+      }
+      if (file === "ax_action_request.json") {
+        const pressActionParse = AXActionInputSchema.safeParse(parsed.params);
+        assert.equal(
+          pressActionParse.success,
+          true,
+          "press protocol fixture must pass the exact MCP action schema"
+        );
+        assert.equal(parsed.params.action, "press");
+      }
+      if (file === "status_press_only_response.json") {
+        const pressOnlyStatusParse = StatusDataSchema.safeParse(parsed.data);
+        assert.equal(
+          pressOnlyStatusParse.success,
+          true,
+          "press-only status fixture must pass the exact MCP status schema"
+        );
+        assert.equal(parsed.data.operator_safe_ax_available, true);
+        assert.deepEqual(parsed.data.operator_safe_ax_actions, ["press"]);
+      }
+      if (file === "invalid_status_set_only_response.json") {
+        assert.equal(
+          StatusDataSchema.safeParse(parsed.data).success,
+          false,
+          "set_value-only status fixture must fail the exact MCP status schema"
+        );
       }
     }
   });
@@ -1027,6 +1090,7 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
   test("M10-TOOL-SURFACE: Tests computer_use_ax_tree, computer_use_move, computer_use_scroll, computer_use_drag validation and forwarding", async () => {
     const mockHost = new MockHostClient();
     mockHost.tccState = "granted";
+    mockHost.axAvailable = true;
     mockHost.axTrusted = true;
     mockHost.inputMutationState = "enabled";
     const server = createComputerUseServer(mockHost);
@@ -1042,6 +1106,20 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
       client.connect(clientTransport)
     ]);
 
+    const semanticStatusCall = await client.callTool({
+      name: "computer_use_status",
+      arguments: {}
+    });
+    assert.equal((semanticStatusCall as any).isError, undefined);
+    const semanticStatusData = JSON.parse(
+      ((semanticStatusCall.content as any[])[0] as any).text
+    );
+    assert.equal(semanticStatusData.operator_safe_ax_available, true);
+    assert.deepEqual(
+      semanticStatusData.operator_safe_ax_actions,
+      ["press", "set_value"]
+    );
+
     // 1. computer_use_ax_tree
     const axCall = await client.callTool({
       name: "computer_use_ax_tree",
@@ -1053,7 +1131,7 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
     assert.ok(axData.tree);
     assert.ok(axData.ax_snapshot_id);
     assert.ok(axData.app_instance_ref);
-    assert.equal(axData.tree.supported_actions[0], "press");
+    assert.deepEqual(axData.tree.supported_actions, ["press", "set_value"]);
     assert.equal(axData.tree.identifier, "calculator-root");
     assert.equal(axData.tree.description, "Calculator");
 
@@ -1075,7 +1153,7 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
     assert.equal(axActionData.requires_reinspection, true);
     assert.equal(axActionData.global_hid_posts, 0);
 
-    const unsupportedAXAction = await client.callTool({
+    const missingSetValuePayload = await client.callTool({
       name: "computer_use_ax_action",
       arguments: {
         ax_snapshot_id: axData.ax_snapshot_id,
@@ -1083,10 +1161,35 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
         element_ref: axData.tree.element_ref,
         topology_version: axData.topology_version,
         action: "set_value",
-        intent: "Attempt an action outside the Phase 1 safe surface"
+        intent: "Attempt set_value without its required value"
       } as any
     });
-    assert.equal((unsupportedAXAction as any).isError, true);
+    assert.equal((missingSetValuePayload as any).isError, true);
+
+    const submittedValue = "operator-safe destination";
+    const setValueCall = await client.callTool({
+      name: "computer_use_ax_action",
+      arguments: {
+        ax_snapshot_id: axData.ax_snapshot_id,
+        app_instance_ref: axData.app_instance_ref,
+        element_ref: axData.tree.element_ref,
+        topology_version: axData.topology_version,
+        action: "set_value",
+        value: submittedValue,
+        intent: "Set the exact retained Calculator text field"
+      }
+    });
+    assert.equal((setValueCall as any).isError, undefined);
+    const setValueData = JSON.parse(((setValueCall.content as any[])[0] as any).text);
+    assert.equal(setValueData.action, "set_value");
+    assert.equal(setValueData.strategy, "ax_semantic");
+    assert.equal(setValueData.global_hid_posts, 0);
+    assert.equal(setValueData.value, undefined);
+    assert.equal(
+      JSON.stringify(setValueCall).includes(submittedValue),
+      false,
+      "MCP set_value receipts must never echo the submitted value"
+    );
 
     // Observe to get valid capture_id
     const obsCall = await client.callTool({ name: "computer_use_observe", arguments: {} });
@@ -1163,6 +1266,240 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
     await server.close();
   });
 
+  test("Press-only host status and semantic press remain compatible while set_value fails closed", async () => {
+    const mockHost = new MockHostClient();
+    mockHost.axAvailable = true;
+    mockHost.axTrusted = true;
+    mockHost.operatorSafeAXActions = ["press"];
+
+    const rawPressOnlyStatus = await mockHost.request("status");
+    assert.equal(StatusDataSchema.safeParse(rawPressOnlyStatus.data).success, true);
+    for (const invalidActions of [
+      ["set_value"],
+      ["set_value", "press"],
+      ["press", "press"],
+      ["press", "unknown"]
+    ]) {
+      assert.equal(StatusDataSchema.safeParse({
+        ...rawPressOnlyStatus.data,
+        operator_safe_ax_actions: invalidActions
+      }).success, false, `Invalid global AX actions must fail: ${invalidActions.join(",")}`);
+    }
+
+    const server = createComputerUseServer(mockHost);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client(
+      { name: "press-only-test-client", version: "1.0.0" },
+      { capabilities: {} }
+    );
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+    const statusCall = await client.callTool({
+      name: "computer_use_status",
+      arguments: {}
+    });
+    assert.equal((statusCall as any).isError, undefined);
+    const status = JSON.parse(((statusCall.content as any[])[0] as any).text);
+    assert.equal(status.operator_safe_ax_available, true);
+    assert.deepEqual(status.operator_safe_ax_actions, ["press"]);
+
+    const treeCall = await client.callTool({
+      name: "computer_use_ax_tree",
+      arguments: { app_id: "com.apple.calculator" }
+    });
+    assert.equal((treeCall as any).isError, undefined);
+    const tree = JSON.parse(((treeCall.content as any[])[0] as any).text);
+    assert.deepEqual(tree.tree.supported_actions, ["press"]);
+
+    const authority = {
+      ax_snapshot_id: tree.ax_snapshot_id,
+      app_instance_ref: tree.app_instance_ref,
+      element_ref: tree.tree.element_ref,
+      topology_version: tree.topology_version
+    };
+    const press = await client.callTool({
+      name: "computer_use_ax_action",
+      arguments: {
+        ...authority,
+        action: "press",
+        intent: "Exercise the advertised press-only action"
+      }
+    });
+    assert.equal((press as any).isError, undefined);
+    const pressReceipt = JSON.parse(((press.content as any[])[0] as any).text);
+    assert.equal(pressReceipt.action, "press");
+    assert.equal(pressReceipt.global_hid_posts, 0);
+
+    const unavailableSetValue = await client.callTool({
+      name: "computer_use_ax_action",
+      arguments: {
+        ...authority,
+        action: "set_value",
+        value: "",
+        intent: "Exercise capability-aware rejection"
+      }
+    });
+    assert.equal((unavailableSetValue as any).isError, true);
+    const unavailableError = JSON.parse(
+      ((unavailableSetValue.content as any[])[0] as any).text
+    );
+    assert.equal(unavailableError.error.code, "NONINTERFERING_ACTION_UNSUPPORTED");
+
+    mockHost.operatorSafeAXActions = [];
+    const unavailableStatusCall = await client.callTool({
+      name: "computer_use_status",
+      arguments: {}
+    });
+    assert.equal((unavailableStatusCall as any).isError, undefined);
+    const unavailableStatus = JSON.parse(
+      ((unavailableStatusCall.content as any[])[0] as any).text
+    );
+    assert.equal(unavailableStatus.operator_safe_ax_available, false);
+    assert.deepEqual(unavailableStatus.operator_safe_ax_actions, []);
+
+    await client.close();
+    await server.close();
+  });
+
+  test("Operator-safe set_value enforces UTF-8 bounds, typed single-dispatch failures, redacted receipts, and zero HID", async () => {
+    const authority = {
+      ax_snapshot_id: "ax-snap-set-value-test",
+      app_instance_ref: "app-inst-set-value-test",
+      element_ref: "ax-el-set-value-test",
+      topology_version: VALID_SHA256_TOPOLOGY_TOKEN,
+      action: "set_value" as const,
+      intent: "Update one retained non-secure text field"
+    };
+
+    assert.equal(isBoundedWellFormedUTF8(""), true, "Empty set_value clears a field");
+    assert.equal(isBoundedWellFormedUTF8("a".repeat(4_096)), true);
+    assert.equal(isBoundedWellFormedUTF8("é".repeat(2_048)), true);
+    assert.equal(isBoundedWellFormedUTF8("é".repeat(2_049)), false);
+    assert.equal(isBoundedWellFormedUTF8("😀".repeat(1_024)), true);
+    assert.equal(isBoundedWellFormedUTF8("😀".repeat(1_025)), false);
+    assert.equal(isBoundedWellFormedUTF8("\ud800"), false, "Lone surrogates are not well-formed UTF-8 input");
+
+    assert.equal(AXActionInputSchema.safeParse({ ...authority, value: "" }).success, true);
+    assert.equal(AXActionInputSchema.safeParse(authority).success, false);
+    assert.equal(AXActionInputSchema.safeParse({
+      ...authority,
+      value: "é".repeat(2_049)
+    }).success, false);
+    assert.equal(AXActionInputSchema.safeParse({
+      ...authority,
+      action: "press",
+      value: "must be rejected"
+    }).success, false, "press must reject a value payload and preserve press semantics");
+
+    const baseReceipt = {
+      action_id: "ax-act-set-value-test",
+      status: "dispatched" as const,
+      strategy: "ax_semantic" as const,
+      action: "set_value" as const,
+      ax_snapshot_id: authority.ax_snapshot_id,
+      app_instance_ref: authority.app_instance_ref,
+      element_ref: authority.element_ref,
+      topology_version: authority.topology_version,
+      requires_reinspection: true as const,
+      global_hid_posts: 0 as const,
+      duration_ms: 1
+    };
+    assert.equal(AXActionResultDataSchema.safeParse(baseReceipt).success, true);
+    assert.equal(AXActionResultDataSchema.safeParse({
+      ...baseReceipt,
+      global_hid_posts: 1
+    }).success, false, "Any nonzero HID receipt must fail closed");
+    assert.equal(AXActionResultDataSchema.safeParse({
+      ...baseReceipt,
+      value: "forbidden receipt echo"
+    }).success, false, "A set_value receipt must reject any echoed value field");
+
+    const typedErrors = [
+      "STALE_AX_SNAPSHOT",
+      "STALE_OPERATION",
+      "NONINTERFERING_ACTION_UNSUPPORTED",
+      "SECURE_AX_VALUE_UNSUPPORTED",
+      "AX_VALUE_NOT_SETTABLE",
+      "AX_ACTION_REPLAYED",
+      "AX_ELEMENT_DISABLED",
+      "USER_INTERVENED",
+      "OUTCOME_UNKNOWN"
+    ];
+    const queuedResponses: Array<Record<string, any>> = [
+      { id: "set-value-success", success: true, data: baseReceipt },
+      ...typedErrors.map((code) => ({
+        id: `set-value-${code.toLowerCase()}`,
+        success: false,
+        error: {
+          code,
+          message: code === "OUTCOME_UNKNOWN"
+            ? "AX dispatch outcome is unknown; obtain a fresh computer_use_ax_tree inspection"
+            : "Retained AX set_value request was rejected without returning its payload"
+        }
+      }))
+    ];
+    let hostRequestCount = 0;
+    const seenUTF8ByteCounts: number[] = [];
+    const host = {
+      request: async (method: string, params?: Record<string, unknown>) => {
+        assert.equal(method, "ax_action");
+        hostRequestCount += 1;
+        seenUTF8ByteCounts.push(Buffer.byteLength(params?.value as string, "utf8"));
+        const response = queuedResponses.shift();
+        assert.ok(response, "Each set_value invocation needs one queued host response");
+        return response;
+      }
+    };
+
+    const server = createComputerUseServer(host as any);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client(
+      { name: "set-value-test-client", version: "1.0.0" },
+      { capabilities: {} }
+    );
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+    const submittedValue = "private transient payload";
+    const success = await client.callTool({
+      name: "computer_use_ax_action",
+      arguments: { ...authority, value: submittedValue }
+    });
+    assert.equal((success as any).isError, undefined);
+    const successData = JSON.parse(((success.content as any[])[0] as any).text);
+    assert.equal(successData.action, "set_value");
+    assert.equal(successData.strategy, "ax_semantic");
+    assert.equal(successData.global_hid_posts, 0);
+    assert.equal(successData.value, undefined);
+    assert.equal(JSON.stringify(success).includes(submittedValue), false);
+
+    for (const code of typedErrors) {
+      const callsBefore = hostRequestCount;
+      const result = await client.callTool({
+        name: "computer_use_ax_action",
+        arguments: { ...authority, value: submittedValue }
+      });
+      assert.equal((result as any).isError, true);
+      const errorBody = JSON.parse(((result.content as any[])[0] as any).text);
+      assert.equal(errorBody.error.code, code);
+      assert.equal(JSON.stringify(result).includes(submittedValue), false);
+      assert.equal(
+        hostRequestCount,
+        callsBefore + 1,
+        `${code} must not trigger an automatic set_value retry`
+      );
+    }
+
+    assert.equal(hostRequestCount, 1 + typedErrors.length);
+    assert.deepEqual(
+      seenUTF8ByteCounts,
+      Array(1 + typedErrors.length).fill(Buffer.byteLength(submittedValue, "utf8"))
+    );
+    assert.equal(queuedResponses.length, 0);
+
+    await client.close();
+    await server.close();
+  });
+
   test("Live proof controller retries read-only inspection but never retries an outcome-unknown AX action", async () => {
     let cursor = __dirname;
     let repoRoot = "";
@@ -1180,11 +1517,46 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
       path.join(repoRoot, "bin/operator-safe-ax-live-proof.mjs")
     ).href;
     const {
+      ensureStatusGate,
       executeSuccessfulPressLifecycle,
       initializeController,
       performPressFlow,
       runReinspection
     } = await import(proofModuleUrl);
+    const canonicalSemanticStatus = {
+      connected: true,
+      accessibility_trusted: true,
+      ax_tree_inspection_available: true,
+      operator_safe_ax_available: true,
+      operator_safe_ax_actions: ["press", "set_value"],
+      supported_action_strategies: ["ax_semantic"]
+    };
+    assert.deepEqual(
+      ensureStatusGate(canonicalSemanticStatus).operator_safe_ax_actions,
+      ["press", "set_value"]
+    );
+    assert.deepEqual(
+      ensureStatusGate({
+        ...canonicalSemanticStatus,
+        operator_safe_ax_actions: ["press"]
+      }).operator_safe_ax_actions,
+      ["press"],
+      "The press proof controller must remain compatible with a press-only host"
+    );
+    for (const invalidActions of [
+      ["set_value"],
+      ["set_value", "press"],
+      ["press", "press"],
+      ["press", "unknown"]
+    ]) {
+      assert.throws(
+        () => ensureStatusGate({
+          ...canonicalSemanticStatus,
+          operator_safe_ax_actions: invalidActions
+        }),
+        /AX status gate failed/
+      );
+    }
     const topologyVersion = VALID_SHA256_TOPOLOGY_TOKEN;
     const treePayload = {
       target_app: {
@@ -2058,6 +2430,35 @@ describe("Defect 4 & 5 Hardened Validation Tests", () => {
       }
     };
     assert.equal(AXTreeDataSchema.safeParse(unpairedElementRefData).success, false);
+
+    const actionableTextData = {
+      ...negativeOriginData,
+      tree: {
+        id: "ax-text-1",
+        element_ref: "ax-el-text-1",
+        supported_actions: ["press", "set_value"],
+        role: "AXTextField",
+        enabled: true,
+        bounds: { x: 0, y: 0, width: 100, height: 20 }
+      }
+    };
+    assert.equal(AXTreeDataSchema.safeParse(actionableTextData).success, true);
+    assert.equal(AXTreeDataSchema.safeParse({
+      ...actionableTextData,
+      tree: { ...actionableTextData.tree, subrole: "AXSecureTextField" }
+    }).success, false, "Secure text must never advertise set_value");
+    assert.equal(AXTreeDataSchema.safeParse({
+      ...actionableTextData,
+      tree: { ...actionableTextData.tree, enabled: false }
+    }).success, false, "Disabled text must never advertise set_value");
+    assert.equal(AXTreeDataSchema.safeParse({
+      ...actionableTextData,
+      tree: { ...actionableTextData.tree, role: "AXButton" }
+    }).success, false, "Non-text roles must never advertise set_value");
+    assert.equal(AXTreeDataSchema.safeParse({
+      ...actionableTextData,
+      tree: { ...actionableTextData.tree, supported_actions: ["set_value", "press"] }
+    }).success, false, "AX actions must use canonical wire order");
   });
 
   test("DragInputSchema rejects right/middle mouse buttons", () => {

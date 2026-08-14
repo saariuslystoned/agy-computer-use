@@ -4,7 +4,7 @@
 - **Date**: 2026-07-21
 
 ## Context
-`agy-computer-use` enables Google Antigravity models (specifically Gemini 3.6 Flash) to perceive and interact with macOS desktop interfaces.
+`agy-computer-use` enables Google Antigravity models (currently Gemini 3.7 Flash) to perceive and interact with macOS desktop interfaces.
 
 ## Decision
 1. **Scope**:

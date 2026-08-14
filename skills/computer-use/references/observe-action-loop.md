@@ -11,6 +11,7 @@ computer_use_status
 computer_use_ax_tree(app_id)
   -> ax_snapshot_id + app_instance_ref + actionable element_ref
 computer_use_ax_action(..., action="press")
+  or computer_use_ax_action(..., action="set_value", value=<transient>)
   -> dispatched + requires_reinspection + global_hid_posts=0
 computer_use_ax_tree(same app_id)
   -> independently verify the intended state
@@ -22,9 +23,15 @@ Semantic/window/ancestry drift or any observed macOS session input counter
 change returns a typed stale/intervention error. A read-only tree inspection
 that returns `USER_INTERVENED` may be retried because it issued no lease. After
 `computer_use_ax_action` is called, however, every error may follow an
-already-dispatched press: never automatically repeat the action. Re-inspect,
+already-dispatched AX mutation: never automatically repeat the action or reuse
+the old value/ref. Re-inspect,
 verify the target state, and let the controller or operator decide whether a
 new action is still needed.
+
+Omit `value` for `press`. For an advertised `set_value`, `value` is required
+(empty is allowed), must be well-formed UTF-8 no larger than 4096 bytes, is
+call-scoped, and is never returned in the receipt or error. Secure fields never
+advertise `set_value` or receive an actionable ref.
 
 ## Exclusive global-HID loop
 
