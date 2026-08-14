@@ -30,6 +30,8 @@ This skill teaches Google Antigravity agents and Gemini models how to interact w
 - **ALWAYS** call `computer_use_status` to verify host connection, TCC permission state, Accessibility trust, operator-safe AX availability, and display topology.
 - Treat `operator_safe_ax_actions` as capability truth: `[]`, `["press"]`, or `["press", "set_value"]` are valid; never send `set_value` to a press-only host.
 - Call `computer_use_observe` to capture current desktop screen state and receive a valid `capture_id` and `topology_version`.
+- **Multi-display routing**: when `display_count > 1`, never assume the primary display contains the target. Use `computer_use_ax_tree` for the explicit target application, compare its window bounds with the topology returned by `computer_use_status`, and call `computer_use_observe` with the matching `display_id`. If the target display remains uncertain, inspect candidate displays one at a time with explicit `display_id`; do not treat one primary-display frame as the whole desktop.
+- `computer_use_observe` is display-scoped, not window-cropped, in v0.2.0. Use the target application's AX tree to locate its window inside the selected display. Never reuse a capture lease after changing displays.
 - Dynamic topology versions (`topology_version`) are required tokens returned from observation.
 
 ### 2. Accessibility Tree Inspection (`computer_use_ax_tree`)
