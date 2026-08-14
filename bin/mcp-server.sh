@@ -24,11 +24,6 @@ elif [ -n "${HOME:-}" ] && [ -x "$HOME/.cargo/bin/mise" ]; then
   MISE_BIN="$HOME/.cargo/bin/mise"
 fi
 
-if [ -n "$MISE_BIN" ]; then
-  cd "$REPO_ROOT"
-  exec "$MISE_BIN" exec -- node "$SCRIPT_DIR/mcp-server.mjs" "$@"
-fi
-
 NODE_VER=""
 PNPM_VER=""
 
@@ -45,6 +40,12 @@ NODE_NUM="$(echo "$NODE_VER" | sed 's/^v//')"
 if [ "$NODE_NUM" = "22.23.1" ] && [ "$PNPM_VER" = "10.33.0" ]; then
   cd "$REPO_ROOT"
   exec node "$SCRIPT_DIR/mcp-server.mjs" "$@"
+fi
+
+if [ -n "$MISE_BIN" ]; then
+  cd "$REPO_ROOT"
+  exec "$MISE_BIN" --no-config exec node@22.23.1 pnpm@10.33.0 -- \
+    node "$SCRIPT_DIR/mcp-server.mjs" "$@"
 fi
 
 echo "[mcp-server-launcher] ERROR: Unpinned or missing toolchain. Ambient Node.js (${NODE_VER:-missing}) or pnpm (${PNPM_VER:-missing}) does not match pinned versions (Node v22.23.1, pnpm 10.33.0). Please install mise (https://mise.jdx.dev) and run 'mise install'." >&2
