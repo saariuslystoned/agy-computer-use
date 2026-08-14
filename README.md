@@ -74,11 +74,11 @@ input stream and can move the operator's pointer or affect focus. Use those
 only in an explicitly exclusive GUI session, VM, or dedicated worker Mac.
 There is no fallback from the AX action tool to global HID.
 
-The native host and MCP bridge share one wire contract for the advertised
-`["press", "set_value"]` capability. This slice deliberately couples their
-rollout: update/restart both components from the same source revision. A
-press-only host paired with this MCP schema fails status validation rather than
-silently advertising a partial or unsafe action surface.
+The native host and MCP bridge accept three canonical operator-safe capability
+states: `[]`, `["press"]`, or `["press", "set_value"]`; availability is true
+for either nonempty state. A press-only host therefore remains compatible, and
+`set_value` is routed only when both status and the retained node advertise it.
+Set-value-only, reordered, duplicate, or unknown action metadata fails closed.
 
 ---
 

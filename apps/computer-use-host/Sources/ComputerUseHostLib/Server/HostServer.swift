@@ -189,6 +189,14 @@ public struct DefaultHostClock: HostClock {
 }
 
 public actor HostServer {
+    package static func isCanonicalOperatorSafeAXActionSubset(
+        _ actions: [String]
+    ) -> Bool {
+        actions.isEmpty ||
+            actions == ["press"] ||
+            actions == ["press", "set_value"]
+    }
+
     private var isConnected: Bool = false
     private let authorizer: ScreenRecordingAuthorizing
     private let topologyProvider: DisplayTopologyProviding
@@ -249,10 +257,18 @@ public actor HostServer {
                 self.activeTopology = currentTopology
                 let isGranted = authorizer.isScreenCaptureAccessGranted
                 let osAxTrusted = inputEngine.isMutationEnabled
+                let engineOperatorSafeAXActions =
+                    axActionEngine.supportedOperatorSafeActions
                 let operatorSafeAXAvailable =
                     axEngine.isAvailable &&
                     axActionEngine.isOperatorSafeActionAvailable &&
-                    axActionEngine.supportedOperatorSafeActions == ["press", "set_value"]
+                    Self.isCanonicalOperatorSafeAXActionSubset(
+                        engineOperatorSafeAXActions
+                    ) &&
+                    !engineOperatorSafeAXActions.isEmpty
+                let advertisedOperatorSafeAXActions = operatorSafeAXAvailable
+                    ? engineOperatorSafeAXActions
+                    : []
                 let supportedActionStrategies: [AnyCodable] =
                     (operatorSafeAXAvailable ? [.string("ax_semantic")] : []) +
                     (osAxTrusted ? [.string("exclusive_global_hid")] : [])
@@ -286,9 +302,9 @@ public actor HostServer {
                         "accessibility_trusted": .bool(osAxTrusted),
                         "ax_tree_inspection_available": .bool(axEngine.isAvailable),
                         "operator_safe_ax_available": .bool(operatorSafeAXAvailable),
-                        "operator_safe_ax_actions": operatorSafeAXAvailable
-                            ? .array([.string("press"), .string("set_value")])
-                            : .array([]),
+                        "operator_safe_ax_actions": .array(
+                            advertisedOperatorSafeAXActions.map(AnyCodable.string)
+                        ),
                         "supported_action_strategies": .array(supportedActionStrategies),
                         "global_hid_may_affect_pointer_or_focus": .bool(true),
                         "input_mutation_state": .string(osAxTrusted ? "enabled" : "disabled"),
@@ -471,8 +487,13 @@ public actor HostServer {
                 guard axActionEngine.isOperatorSafeActionAvailable else {
                     throw ComputerUseError.noninterferingActionUnsupported(action: action)
                 }
-                guard axActionEngine.supportedOperatorSafeActions == ["press", "set_value"],
-                      axActionEngine.supportedOperatorSafeActions.contains(action) else {
+                let supportedOperatorSafeActions =
+                    axActionEngine.supportedOperatorSafeActions
+                guard Self.isCanonicalOperatorSafeAXActionSubset(
+                    supportedOperatorSafeActions
+                ),
+                      !supportedOperatorSafeActions.isEmpty,
+                      supportedOperatorSafeActions.contains(action) else {
                     throw ComputerUseError.noninterferingActionUnsupported(action: action)
                 }
 

@@ -143,6 +143,7 @@
               "items": { "enum": ["press", "set_value"] },
               "oneOf": [
                 { "maxItems": 0 },
+                { "const": ["press"] },
                 { "const": ["press", "set_value"] }
               ]
             },
@@ -159,7 +160,45 @@
             "primary_display_id": { "type": "integer", "minimum": 1 },
             "display_count": { "type": "integer", "minimum": 1 },
             "topology": { "$ref": "#/definitions/DisplayTopology" }
-          }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "operator_safe_ax_actions": { "type": "array", "maxItems": 0 }
+                },
+                "required": ["operator_safe_ax_actions"]
+              },
+              "then": {
+                "properties": {
+                  "operator_safe_ax_available": { "const": false },
+                  "supported_action_strategies": {
+                    "not": {
+                      "type": "array",
+                      "contains": { "const": "ax_semantic" }
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "operator_safe_ax_actions": { "type": "array", "minItems": 1 }
+                },
+                "required": ["operator_safe_ax_actions"]
+              },
+              "then": {
+                "properties": {
+                  "operator_safe_ax_available": { "const": true },
+                  "supported_action_strategies": {
+                    "type": "array",
+                    "contains": { "const": "ax_semantic" }
+                  }
+                }
+              }
+            }
+          ]
         }
       }
     },

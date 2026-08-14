@@ -80,9 +80,10 @@ claim safe coordinate clicks, hover, drag/drop, arbitrary scroll, shortcuts,
 secure text entry, or full application coverage.
 
 The one-shot lease is consumed before set dispatch. Replay, secure, disabled,
-non-settable, stale, and user-intervened outcomes are typed. `cannotComplete`,
-input intervention during dispatch, or IPC ambiguity require a fresh explicit-
-app AX inspection and prohibit automatic retry.
+non-settable, stale, and user-intervened preflight outcomes are typed. Once the
+setter is invoked, every non-success AX result, input intervention during
+dispatch, or IPC ambiguity is `OUTCOME_UNKNOWN`, requires a fresh explicit-app
+AX inspection, and prohibits automatic retry.
 
 ### 3. Operator presentation planes
 

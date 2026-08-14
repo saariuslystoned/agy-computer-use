@@ -1,0 +1,36 @@
+{
+  "id": "req-status-press-only-001",
+  "success": true,
+  "data": {
+    "connected": true,
+    "tcc_permission_state": "granted",
+    "accessibility_available": true,
+    "accessibility_trusted": false,
+    "ax_tree_inspection_available": true,
+    "operator_safe_ax_available": true,
+    "operator_safe_ax_actions": ["press"],
+    "supported_action_strategies": ["ax_semantic"],
+    "global_hid_may_affect_pointer_or_focus": true,
+    "input_mutation_state": "disabled",
+    "topology_version": "top-sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "primary_display_id": 1,
+    "display_count": 1,
+    "topology": {
+      "version": "top-sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "primary_display_id": 1,
+      "displays": [
+        {
+          "id": 1,
+          "width_points": 1920,
+          "height_points": 1080,
+          "scale_factor": 2.0,
+          "origin_x": 0,
+          "origin_y": 0,
+          "pixel_width": 3840,
+          "pixel_height": 2160,
+          "rotation": 0
+        }
+      ]
+    }
+  }
+}

@@ -28,6 +28,7 @@ This skill teaches Google Antigravity agents and Gemini models how to interact w
   - `./bin/agy-computer-use host-stop`: Stops the native host process cleanly, awaiting exact native child close and terminal owner receipt (`native_closed: true`).
   - *Process Authority & Security*: Host lifecycle commands communicate with the owner control server on `control.sock` (terminal owner correlation) and strictly enforce the non-override canonical runtime directory policy (`/tmp/agy-computer-use-<uid>`).
 - **ALWAYS** call `computer_use_status` to verify host connection, TCC permission state, Accessibility trust, operator-safe AX availability, and display topology.
+- Treat `operator_safe_ax_actions` as capability truth: `[]`, `["press"]`, or `["press", "set_value"]` are valid; never send `set_value` to a press-only host.
 - Call `computer_use_observe` to capture current desktop screen state and receive a valid `capture_id` and `topology_version`.
 - Dynamic topology versions (`topology_version`) are required tokens returned from observation.
 
@@ -43,6 +44,7 @@ This skill teaches Google Antigravity agents and Gemini models how to interact w
 - Pass the exact `ax_snapshot_id`, `app_instance_ref`, `element_ref`, `topology_version`, one advertised `action`, and a nonblank `intent`.
 - For `press`, omit `value`. For `set_value`, pass `value` explicitly; empty is allowed for clearing, and the payload must be well-formed UTF-8 no larger than 4096 bytes. Do not duplicate the submitted value in `intent` or expect it in any receipt or error.
 - The lease is short-lived and consumed once. Stale, replayed (`AX_ACTION_REPLAYED`), secure (`SECURE_AX_VALUE_UNSUPPORTED`), disabled (`AX_ELEMENT_DISABLED`), non-settable (`AX_VALUE_NOT_SETTABLE`), mismatched, relabeled/reparented, moved-to-another-window, terminated-process, unsupported, or operator/system-input-intervened targets fail closed.
+- Secure, disabled, non-settable, and unsupported codes are preflight results. Once the AX setter is invoked, every non-success AX result is `OUTCOME_UNKNOWN`; never reinterpret a post-dispatch error as proof that no mutation occurred.
 - `status: "dispatched"` is not behavior proof. Always call `computer_use_ax_tree` again for the same explicit app and verify the intended semantic result before continuing.
 - A `USER_INTERVENED` error from read-only `computer_use_ax_tree` means no action lease was issued and that inspection may be retried. Once `computer_use_ax_action` is called, any `USER_INTERVENED`, `OUTCOME_UNKNOWN`, transport uncertainty, or other error may follow an already-dispatched AX mutation: never automatically repeat the action or reuse the old value/ref.
 - After any action-side error, run a fresh explicit-app `computer_use_ax_tree`, verify the target state, and let the controller or operator adjudicate whether another action is still needed. Never retry the old ref.

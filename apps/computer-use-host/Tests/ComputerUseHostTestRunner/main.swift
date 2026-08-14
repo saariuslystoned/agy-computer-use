@@ -6291,6 +6291,65 @@ public struct ComputerUseHostTestRunner {
             "Production set_value must re-read live capability and exact authority immediately before one setter call"
         )
 
+        let unrecognizedPostSetterAXError = unsafeBitCast(
+            Int32(99_999),
+            to: AXError.self
+        )
+        let postSetterAXErrors: [AXError] = [
+            .failure,
+            .illegalArgument,
+            .invalidUIElement,
+            .invalidUIElementObserver,
+            .cannotComplete,
+            .attributeUnsupported,
+            .actionUnsupported,
+            .notificationUnsupported,
+            .notImplemented,
+            .notificationAlreadyRegistered,
+            .notificationNotRegistered,
+            .apiDisabled,
+            .noValue,
+            .parameterizedAttributeUnsupported,
+            unrecognizedPostSetterAXError
+        ]
+        for postSetterAXError in postSetterAXErrors {
+            var injectedSetterCalls = 0
+            let dispatchedResult: Result<AXError, Error> = Result {
+                try DefaultAXInspector.performRevalidatedAXSetValue(
+                    value: "bounded-value",
+                    retainedSupportedActions: ["set_value"],
+                    observedEpoch: operatorEpoch,
+                    epochProvider: FixedOperatorInputEpochProvider(epoch: operatorEpoch),
+                    readLiveCapability: { setValueCapability },
+                    validateAuthority: {},
+                    setValue: { _ in
+                        injectedSetterCalls += 1
+                        return postSetterAXError
+                    }
+                )
+            }
+            switch dispatchedResult {
+            case .success:
+                assertTrue(
+                    false,
+                    "Every non-success AX result after set_value dispatch must be uncertain"
+                )
+            case .failure(let error as ComputerUseError):
+                assertEqual(error.errorCode, "OUTCOME_UNKNOWN")
+                assertTrue(
+                    error.errorMessage.contains("computer_use_ax_tree"),
+                    "Post-setter uncertainty must require a fresh AX inspection"
+                )
+            case .failure:
+                assertTrue(false, "Post-setter AX failure returned an unexpected error")
+            }
+            assertEqual(
+                injectedSetterCalls,
+                1,
+                "A non-success AX setter result must never cause an automatic retry"
+            )
+        }
+
         func revalidatedSetValueError(
             capability: AXActionCapability,
             authorityError: ComputerUseError? = nil
@@ -6391,16 +6450,26 @@ public struct ComputerUseHostTestRunner {
             var rejectNotSettableOnce = false
             var rejectUserIntervenedOnce = false
             var rejectOutcomeUnknownOnce = false
+            var advertisedOperatorSafeActions = ["press", "set_value"]
 
             var isAvailable: Bool { true }
             func isAccessibilityTrusted() -> Bool { true }
-            var isOperatorSafeActionAvailable: Bool { true }
-            var supportedOperatorSafeActions: [String] { ["press", "set_value"] }
+            var isOperatorSafeActionAvailable: Bool {
+                lock.lock()
+                defer { lock.unlock() }
+                return !advertisedOperatorSafeActions.isEmpty
+            }
+            var supportedOperatorSafeActions: [String] {
+                lock.lock()
+                defer { lock.unlock() }
+                return advertisedOperatorSafeActions
+            }
 
             func inspectTree(maxDepth: Int, appId: String, topologyVersion: String) throws -> AXTreeResultDTO {
                 let snapshotId: String
                 let appInstanceRef: String
                 let elementRef: String
+                let supportedActions: [String]
 
                 lock.lock()
                 nextSnapshotNumber += 1
@@ -6411,6 +6480,7 @@ public struct ComputerUseHostTestRunner {
                 activeAppInstanceRef = appInstanceRef
                 activeElementRef = elementRef
                 activeTopologyVersion = topologyVersion
+                supportedActions = advertisedOperatorSafeActions
                 lock.unlock()
 
                 return AXTreeResultDTO(
@@ -6429,7 +6499,7 @@ public struct ComputerUseHostTestRunner {
                     tree: AXNodeDTO(
                         id: "ax-AXButton-1",
                         elementRef: elementRef,
-                        supportedActions: ["press", "set_value"],
+                        supportedActions: supportedActions,
                         role: "AXTextField",
                         title: "Destination",
                         enabled: true,
@@ -6460,6 +6530,9 @@ public struct ComputerUseHostTestRunner {
                 ))
 
                 guard action == "press" || action == "set_value" else {
+                    throw ComputerUseError.noninterferingActionUnsupported(action: action)
+                }
+                guard advertisedOperatorSafeActions.contains(action) else {
                     throw ComputerUseError.noninterferingActionUnsupported(action: action)
                 }
                 if action == "set_value" {
@@ -6602,6 +6675,18 @@ public struct ComputerUseHostTestRunner {
                 lock.unlock()
             }
 
+            func advertiseOperatorSafeActions(_ actions: [String]) {
+                lock.lock()
+                advertisedOperatorSafeActions = actions
+                lock.unlock()
+            }
+
+            func resetActionCalls() {
+                lock.lock()
+                actionCalls.removeAll()
+                lock.unlock()
+            }
+
             var actionCallCount: Int {
                 lock.lock()
                 defer { lock.unlock() }
@@ -6719,7 +6804,10 @@ public struct ComputerUseHostTestRunner {
         assertEqual(untargetedTree.error?.code, "IPC_ERROR")
         assertEqual(semanticEngine.actionCallCount, 0)
 
-        func issueTargetedTree(_ id: String) async -> (String, String, String) {
+        func issueTargetedTree(
+            _ id: String,
+            expectedActions: [String] = ["press", "set_value"]
+        ) async -> (String, String, String) {
             let response = await semanticServer.handleRequest(IPCRequest(
                 id: id,
                 method: "ax_tree",
@@ -6736,7 +6824,7 @@ public struct ComputerUseHostTestRunner {
                 elementRef = root["element_ref"]?.rawValue as? String ?? ""
                 assertEqual(
                     root["supported_actions"],
-                    .array([.string("press"), .string("set_value")])
+                    .array(expectedActions.map(AnyCodable.string))
                 )
             } else {
                 assertTrue(false, "Targeted AX response must include a tree dictionary")
@@ -6771,6 +6859,74 @@ public struct ComputerUseHostTestRunner {
             }
             return params
         }
+
+        assertTrue(HostServer.isCanonicalOperatorSafeAXActionSubset([]))
+        assertTrue(HostServer.isCanonicalOperatorSafeAXActionSubset(["press"]))
+        assertTrue(HostServer.isCanonicalOperatorSafeAXActionSubset(["press", "set_value"]))
+        assertTrue(!HostServer.isCanonicalOperatorSafeAXActionSubset(["set_value"]))
+        assertTrue(!HostServer.isCanonicalOperatorSafeAXActionSubset(["set_value", "press"]))
+        assertTrue(!HostServer.isCanonicalOperatorSafeAXActionSubset(["press", "press"]))
+        assertTrue(!HostServer.isCanonicalOperatorSafeAXActionSubset(["press", "unknown"]))
+
+        semanticEngine.advertiseOperatorSafeActions(["press"])
+        let pressOnlyStatus = await semanticServer.handleRequest(IPCRequest(
+            id: "ax-status-press-only",
+            method: "status"
+        ))
+        assertTrue(pressOnlyStatus.success)
+        assertEqual(pressOnlyStatus.data?["operator_safe_ax_available"], .bool(true))
+        assertEqual(
+            pressOnlyStatus.data?["operator_safe_ax_actions"],
+            .array([.string("press")])
+        )
+        assertEqual(globalInputEngine.touchCount, 1)
+        globalInputEngine.resetTouches()
+
+        let pressOnlyLease = await issueTargetedTree(
+            "ax-tree-targeted-press-only",
+            expectedActions: ["press"]
+        )
+        let callsBeforePressOnlyAction = semanticEngine.actionCallCount
+        let pressOnlyAction = await semanticServer.handleRequest(IPCRequest(
+            id: "ax-action-press-only",
+            method: "ax_action",
+            params: semanticParams(
+                snapshotId: pressOnlyLease.0,
+                appInstanceRef: pressOnlyLease.1,
+                elementRef: pressOnlyLease.2
+            )
+        ))
+        assertTrue(pressOnlyAction.success)
+        assertEqual(pressOnlyAction.data?["action"], .string("press"))
+        assertEqual(pressOnlyAction.data?["global_hid_posts"], .int(0))
+        assertEqual(semanticEngine.actionCallCount, callsBeforePressOnlyAction + 1)
+
+        let pressOnlySetLease = await issueTargetedTree(
+            "ax-tree-targeted-press-only-set-rejected",
+            expectedActions: ["press"]
+        )
+        let callsBeforePressOnlySet = semanticEngine.actionCallCount
+        let pressOnlySet = await semanticServer.handleRequest(IPCRequest(
+            id: "ax-action-press-only-set-rejected",
+            method: "ax_action",
+            params: semanticParams(
+                snapshotId: pressOnlySetLease.0,
+                appInstanceRef: pressOnlySetLease.1,
+                elementRef: pressOnlySetLease.2,
+                action: "set_value",
+                value: "",
+                intent: "Attempt an unavailable semantic action"
+            )
+        ))
+        assertEqual(pressOnlySet.error?.code, "NONINTERFERING_ACTION_UNSUPPORTED")
+        assertEqual(
+            semanticEngine.actionCallCount,
+            callsBeforePressOnlySet,
+            "A press-only host must reject set_value before dispatch"
+        )
+        assertEqual(globalInputEngine.touchCount, 0)
+        semanticEngine.advertiseOperatorSafeActions(["press", "set_value"])
+        semanticEngine.resetActionCalls()
 
         let firstLease = await issueTargetedTree("ax-tree-targeted-1")
 
@@ -7050,6 +7206,7 @@ public struct ComputerUseHostTestRunner {
 
         let uncertainLease = await issueTargetedTree("ax-tree-targeted-uncertain")
         semanticEngine.rejectNextAsOutcomeUnknown()
+        let callsBeforeUncertain = semanticEngine.actionCallCount
         let uncertain = await semanticServer.handleRequest(IPCRequest(
             id: "ax-action-uncertain",
             method: "ax_action",
@@ -7067,6 +7224,24 @@ public struct ComputerUseHostTestRunner {
             uncertain.error?.message.contains("computer_use_ax_tree") == true,
             "AX dispatch uncertainty must require a fresh computer_use_ax_tree inspection"
         )
+        assertEqual(
+            semanticEngine.actionCallCount,
+            callsBeforeUncertain + 1,
+            "An uncertain set_value result must not be automatically retried"
+        )
+        let uncertainReplay = await semanticServer.handleRequest(IPCRequest(
+            id: "ax-action-uncertain-replay",
+            method: "ax_action",
+            params: semanticParams(
+                snapshotId: uncertainLease.0,
+                appInstanceRef: uncertainLease.1,
+                elementRef: uncertainLease.2,
+                action: "set_value",
+                value: "",
+                intent: "Prove the uncertain one-shot lease was consumed"
+            )
+        ))
+        assertEqual(uncertainReplay.error?.code, "AX_ACTION_REPLAYED")
 
         let unsafeReceiptLease = await issueTargetedTree("ax-tree-targeted-unsafe-receipt")
         semanticEngine.makeNextReceiptUnsafe()

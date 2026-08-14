@@ -25,15 +25,18 @@ focuses the target, uses the pasteboard, calls the global input engine, posts a
 `strategy: "ax_semantic"`, `requires_reinspection: true`, and
 `global_hid_posts: 0`; it does not contain the submitted value.
 
-Typed failures include `STALE_AX_SNAPSHOT`, `STALE_OPERATION`,
+Typed preflight failures include `STALE_AX_SNAPSHOT`, `STALE_OPERATION`,
 `AX_ACTION_REPLAYED`, `SECURE_AX_VALUE_UNSUPPORTED`, `AX_ELEMENT_DISABLED`,
-`AX_VALUE_NOT_SETTABLE`, `NONINTERFERING_ACTION_UNSUPPORTED`,
-`USER_INTERVENED`, and `OUTCOME_UNKNOWN`. After dispatch, intervention,
-uncertainty, or transport ambiguity, obtain a fresh explicit-app AX inspection
-and adjudicate observed state. Never reuse the old ref or automatically submit
-the value again.
+`AX_VALUE_NOT_SETTABLE`, `NONINTERFERING_ACTION_UNSUPPORTED`, and
+`USER_INTERVENED`. Once `AXUIElementSetAttributeValue` is invoked, every
+non-success AX result is `OUTCOME_UNKNOWN`, including unsupported,
+not-implemented, invalid-element, and cannot-complete results. Obtain a fresh
+explicit-app AX inspection and adjudicate observed state after every dispatch
+or uncertainty. Never reuse the old ref or automatically submit the value
+again.
 
 Native status, AX-node action metadata, MCP schemas, fixtures, and the mirrored
-skills share this contract and must roll out from the same source revision. A
-press-only host and set-value-aware MCP bridge are intentionally not negotiated;
-the mismatch fails validation.
+skills accept `[]`, `["press"]`, or canonical `["press", "set_value"]` global
+capability metadata. A press-only host remains compatible; `set_value` is never
+sent unless it is advertised. Set-value-only, reordered, duplicate, and unknown
+metadata fails validation.

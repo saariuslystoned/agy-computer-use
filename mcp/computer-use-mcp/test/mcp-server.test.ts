@@ -20,6 +20,7 @@ import {
   AXActionResultDataSchema,
   AXTreeDataSchema,
   DragInputSchema,
+  StatusDataSchema,
   isBoundedWellFormedUTF8
 } from "../src/schemas.js";
 import { MockHostClient, UnixSocketHostClient, IPCResponseSchema } from "../src/host-client.js";
@@ -486,6 +487,7 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
       "scroll_request.json": { expectedValid: true, schemaTarget: "ScrollRequest" },
       "drag_request.json": { expectedValid: true, schemaTarget: "DragRequest" },
       "status_response.json": { expectedValid: true, schemaTarget: "StatusResponse" },
+      "status_press_only_response.json": { expectedValid: true, schemaTarget: "StatusResponse" },
       "observe_response.json": { expectedValid: true, schemaTarget: "ObserveResponse" },
       "permission_denied_response.json": { expectedValid: true, schemaTarget: "ErrorResponse" },
       "stale_topology_response.json": { expectedValid: true, schemaTarget: "ErrorResponse" },
@@ -496,6 +498,7 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
       "invalid_method_request_negative.json": { expectedValid: false },
       "invalid_ax_set_value_missing_value.json": { expectedValid: false },
       "invalid_ax_press_with_value.json": { expectedValid: false },
+      "invalid_status_set_only_response.json": { expectedValid: false, schemaTarget: "StatusResponse" },
       "canonical_jpeg_mutations.json": { expectedValid: false }
     };
 
@@ -519,7 +522,7 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
 
       assert.equal(isValid, mapping.expectedValid, `Fixture '${file}' Ajv validation state (${isValid}) must match expected state (${mapping.expectedValid}): ${JSON.stringify(validateProtocol.errors)}`);
 
-      if (parsed.success === true) {
+      if (parsed.success === true && mapping.expectedValid) {
         const zodParse = IPCResponseSchema.safeParse(parsed);
         assert.ok(zodParse.success, `Response fixture '${file}' must validate against IPCResponseSchema: ${zodParse.error?.message}`);
 
@@ -540,6 +543,32 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
           AXActionInputSchema.safeParse(parsed.params).success,
           true,
           "set_value protocol fixture must pass the exact MCP action schema"
+        );
+      }
+      if (file === "ax_action_request.json") {
+        const pressActionParse = AXActionInputSchema.safeParse(parsed.params);
+        assert.equal(
+          pressActionParse.success,
+          true,
+          "press protocol fixture must pass the exact MCP action schema"
+        );
+        assert.equal(parsed.params.action, "press");
+      }
+      if (file === "status_press_only_response.json") {
+        const pressOnlyStatusParse = StatusDataSchema.safeParse(parsed.data);
+        assert.equal(
+          pressOnlyStatusParse.success,
+          true,
+          "press-only status fixture must pass the exact MCP status schema"
+        );
+        assert.equal(parsed.data.operator_safe_ax_available, true);
+        assert.deepEqual(parsed.data.operator_safe_ax_actions, ["press"]);
+      }
+      if (file === "invalid_status_set_only_response.json") {
+        assert.equal(
+          StatusDataSchema.safeParse(parsed.data).success,
+          false,
+          "set_value-only status fixture must fail the exact MCP status schema"
         );
       }
     }
@@ -1237,6 +1266,101 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
     await server.close();
   });
 
+  test("Press-only host status and semantic press remain compatible while set_value fails closed", async () => {
+    const mockHost = new MockHostClient();
+    mockHost.axAvailable = true;
+    mockHost.axTrusted = true;
+    mockHost.operatorSafeAXActions = ["press"];
+
+    const rawPressOnlyStatus = await mockHost.request("status");
+    assert.equal(StatusDataSchema.safeParse(rawPressOnlyStatus.data).success, true);
+    for (const invalidActions of [
+      ["set_value"],
+      ["set_value", "press"],
+      ["press", "press"],
+      ["press", "unknown"]
+    ]) {
+      assert.equal(StatusDataSchema.safeParse({
+        ...rawPressOnlyStatus.data,
+        operator_safe_ax_actions: invalidActions
+      }).success, false, `Invalid global AX actions must fail: ${invalidActions.join(",")}`);
+    }
+
+    const server = createComputerUseServer(mockHost);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client(
+      { name: "press-only-test-client", version: "1.0.0" },
+      { capabilities: {} }
+    );
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+    const statusCall = await client.callTool({
+      name: "computer_use_status",
+      arguments: {}
+    });
+    assert.equal((statusCall as any).isError, undefined);
+    const status = JSON.parse(((statusCall.content as any[])[0] as any).text);
+    assert.equal(status.operator_safe_ax_available, true);
+    assert.deepEqual(status.operator_safe_ax_actions, ["press"]);
+
+    const treeCall = await client.callTool({
+      name: "computer_use_ax_tree",
+      arguments: { app_id: "com.apple.calculator" }
+    });
+    assert.equal((treeCall as any).isError, undefined);
+    const tree = JSON.parse(((treeCall.content as any[])[0] as any).text);
+    assert.deepEqual(tree.tree.supported_actions, ["press"]);
+
+    const authority = {
+      ax_snapshot_id: tree.ax_snapshot_id,
+      app_instance_ref: tree.app_instance_ref,
+      element_ref: tree.tree.element_ref,
+      topology_version: tree.topology_version
+    };
+    const press = await client.callTool({
+      name: "computer_use_ax_action",
+      arguments: {
+        ...authority,
+        action: "press",
+        intent: "Exercise the advertised press-only action"
+      }
+    });
+    assert.equal((press as any).isError, undefined);
+    const pressReceipt = JSON.parse(((press.content as any[])[0] as any).text);
+    assert.equal(pressReceipt.action, "press");
+    assert.equal(pressReceipt.global_hid_posts, 0);
+
+    const unavailableSetValue = await client.callTool({
+      name: "computer_use_ax_action",
+      arguments: {
+        ...authority,
+        action: "set_value",
+        value: "",
+        intent: "Exercise capability-aware rejection"
+      }
+    });
+    assert.equal((unavailableSetValue as any).isError, true);
+    const unavailableError = JSON.parse(
+      ((unavailableSetValue.content as any[])[0] as any).text
+    );
+    assert.equal(unavailableError.error.code, "NONINTERFERING_ACTION_UNSUPPORTED");
+
+    mockHost.operatorSafeAXActions = [];
+    const unavailableStatusCall = await client.callTool({
+      name: "computer_use_status",
+      arguments: {}
+    });
+    assert.equal((unavailableStatusCall as any).isError, undefined);
+    const unavailableStatus = JSON.parse(
+      ((unavailableStatusCall.content as any[])[0] as any).text
+    );
+    assert.equal(unavailableStatus.operator_safe_ax_available, false);
+    assert.deepEqual(unavailableStatus.operator_safe_ax_actions, []);
+
+    await client.close();
+    await server.close();
+  });
+
   test("Operator-safe set_value enforces UTF-8 bounds, typed single-dispatch failures, redacted receipts, and zero HID", async () => {
     const authority = {
       ax_snapshot_id: "ax-snap-set-value-test",
@@ -1411,14 +1535,28 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
       ensureStatusGate(canonicalSemanticStatus).operator_safe_ax_actions,
       ["press", "set_value"]
     );
-    assert.throws(
-      () => ensureStatusGate({
+    assert.deepEqual(
+      ensureStatusGate({
         ...canonicalSemanticStatus,
         operator_safe_ax_actions: ["press"]
-      }),
-      /AX status gate failed/,
-      "The live proof controller must reject an older press-only host paired with this MCP revision"
+      }).operator_safe_ax_actions,
+      ["press"],
+      "The press proof controller must remain compatible with a press-only host"
     );
+    for (const invalidActions of [
+      ["set_value"],
+      ["set_value", "press"],
+      ["press", "press"],
+      ["press", "unknown"]
+    ]) {
+      assert.throws(
+        () => ensureStatusGate({
+          ...canonicalSemanticStatus,
+          operator_safe_ax_actions: invalidActions
+        }),
+        /AX status gate failed/
+      );
+    }
     const topologyVersion = VALID_SHA256_TOPOLOGY_TOKEN;
     const treePayload = {
       target_app: {

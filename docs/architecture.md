@@ -48,9 +48,10 @@
 - **Honest Outcome**: A successful `AXUIElementPerformAction` or
   `AXUIElementSetAttributeValue` receipt is `dispatched`, not verified. Gemini
   must reinspect the same explicit app before accepting the intended effect.
-- **Coupled Wire Contract**: Native status, per-node action advertisement, MCP
-  schemas, and protocol fixtures advance together. There is no press-only wire
-  negotiation in this revision; mismatched host/MCP revisions fail validation.
+- **Compatible Wire Contract**: Native status, per-node action advertisement,
+  MCP schemas, and protocol fixtures accept unavailable, press-only, or
+  canonical press-plus-set-value capability states. Set-value-only, reordered,
+  duplicate, and unknown global action metadata fails validation.
 - **Preview Boundary**: The future live operator HUD is tracked in
   [issue #8](https://github.com/saariuslystoned/agy-computer-use/issues/8) and
   remains separate from model observation, action authority, and Puppet's

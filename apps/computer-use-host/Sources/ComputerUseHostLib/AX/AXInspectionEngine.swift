@@ -745,9 +745,6 @@ public final class DefaultAXInspector: AXInspectionEngine, AXSemanticActionEngin
                 durationMs: max(0, durationMs)
             )
         case .actionUnsupported, .attributeUnsupported, .notImplemented:
-            if normalizedAction == "set_value" {
-                throw ComputerUseError.axValueNotSettable
-            }
             throw ComputerUseError.noninterferingActionUnsupported(action: normalizedAction)
         case .cannotComplete:
             throw ComputerUseError.axOutcomeUnknown(
@@ -865,12 +862,18 @@ public final class DefaultAXInspector: AXInspectionEngine, AXSemanticActionEngin
         let liveCapability = try readLiveCapability()
         try validateSetValueCapability(liveCapability)
         try validateAuthority()
-        return try performAXSetValueCheckingOperatorInput(
+        let result = try performAXSetValueCheckingOperatorInput(
             value: value,
             observedEpoch: observedEpoch,
             epochProvider: epochProvider,
             setValue: setValue
         )
+        guard result == .success else {
+            throw ComputerUseError.axOutcomeUnknown(
+                reason: "AX set_value returned a non-success result after dispatch; obtain a fresh computer_use_ax_tree inspection"
+            )
+        }
+        return result
     }
 
     package static func semanticFingerprint(components: [String]) -> String {

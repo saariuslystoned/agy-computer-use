@@ -239,11 +239,12 @@ function ensureStatusGate(status) {
   }
 
   const actions = Array.isArray(status.operator_safe_ax_actions) ? status.operator_safe_ax_actions : [];
-  if (
-    actions.length !== OPERATOR_SAFE_AX_ACTIONS.length ||
-    !actions.every((action, index) => action === OPERATOR_SAFE_AX_ACTIONS[index])
-  ) {
-    missing.push("operator_safe_ax_actions must be canonical ['press', 'set_value']");
+  const canonicalPressOnly = actions.length === 1 && actions[0] === "press";
+  const canonicalFull =
+    actions.length === OPERATOR_SAFE_AX_ACTIONS.length &&
+    actions.every((action, index) => action === OPERATOR_SAFE_AX_ACTIONS[index]);
+  if (!canonicalPressOnly && !canonicalFull) {
+    missing.push("operator_safe_ax_actions must be ['press'] or canonical ['press', 'set_value']");
   }
 
   const strategies = Array.isArray(status.supported_action_strategies) ? status.supported_action_strategies : [];

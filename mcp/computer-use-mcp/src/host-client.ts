@@ -36,12 +36,17 @@ export class MockHostClient implements HostClient {
   public tccState: "granted" | "denied" = "granted";
   public axAvailable: boolean = false;
   public axTrusted: boolean = false;
+  public operatorSafeAXActions: Array<"press" | "set_value"> = ["press", "set_value"];
   public inputMutationState: "enabled" | "disabled" = "disabled";
   public mockDisplayId: number = 1;
 
   public request: (method: string, params?: Record<string, unknown>, signal?: AbortSignal) => Promise<IPCResponse> = async (method, params) => {
     if (method === "status") {
       const topVer = "top-sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+      const operatorSafeAXActions = this.axAvailable
+        ? [...this.operatorSafeAXActions]
+        : [];
+      const operatorSafeAXAvailable = operatorSafeAXActions.length > 0;
       return {
         id: "mock-req",
         success: true,
@@ -51,10 +56,10 @@ export class MockHostClient implements HostClient {
           accessibility_available: this.axAvailable,
           accessibility_trusted: this.axTrusted,
           ax_tree_inspection_available: this.axAvailable,
-          operator_safe_ax_available: this.axAvailable,
-          operator_safe_ax_actions: this.axAvailable ? ["press", "set_value"] : [],
+          operator_safe_ax_available: operatorSafeAXAvailable,
+          operator_safe_ax_actions: operatorSafeAXActions,
           supported_action_strategies: [
-            ...(this.axAvailable ? ["ax_semantic"] : []),
+            ...(operatorSafeAXAvailable ? ["ax_semantic"] : []),
             ...(this.inputMutationState === "enabled" ? ["exclusive_global_hid"] : [])
           ],
           global_hid_may_affect_pointer_or_focus: true,
@@ -142,6 +147,7 @@ export class MockHostClient implements HostClient {
 
     if (method === "ax_tree") {
       const topVer = "top-sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+      const supportedActions = [...this.operatorSafeAXActions];
       return {
         id: "mock-ax",
         success: true,
@@ -160,8 +166,10 @@ export class MockHostClient implements HostClient {
           truncated: false,
           tree: {
             id: "ax-AXApplication-1",
-            element_ref: "ax-el-mock-001",
-            supported_actions: ["press", "set_value"],
+            ...(supportedActions.length > 0 ? {
+              element_ref: "ax-el-mock-001",
+              supported_actions: supportedActions
+            } : {}),
             role: "AXTextField",
             subrole: "AXStandard",
             identifier: "calculator-root",
@@ -176,6 +184,21 @@ export class MockHostClient implements HostClient {
     }
 
     if (method === "ax_action") {
+      const action = params?.action;
+      if (
+        !this.axAvailable ||
+        (action !== "press" && action !== "set_value") ||
+        !this.operatorSafeAXActions.includes(action)
+      ) {
+        return {
+          id: "mock-ax-action-unsupported",
+          success: false,
+          error: {
+            code: "NONINTERFERING_ACTION_UNSUPPORTED",
+            message: "Requested AX action is not advertised by this host"
+          }
+        };
+      }
       return {
         id: "mock-ax-action",
         success: true,
@@ -183,7 +206,7 @@ export class MockHostClient implements HostClient {
           action_id: "ax-act-mock-001",
           status: "dispatched",
           strategy: "ax_semantic",
-          action: params?.action,
+          action,
           ax_snapshot_id: params?.ax_snapshot_id,
           app_instance_ref: params?.app_instance_ref,
           element_ref: params?.element_ref,

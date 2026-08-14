@@ -100,8 +100,10 @@ export const StatusDataSchema = z.object({
   ax_tree_inspection_available: z.boolean().optional(),
   operator_safe_ax_available: z.boolean(),
   operator_safe_ax_actions: z.array(OperatorSafeAXActionSchema).max(2).refine(
-    (actions) => actions.length === 0 || actions.join(",") === "press,set_value",
-    { message: "operator_safe_ax_actions must be empty or canonical [press, set_value]" }
+    (actions) => actions.length === 0 ||
+      actions.join(",") === "press" ||
+      actions.join(",") === "press,set_value",
+    { message: "operator_safe_ax_actions must be empty, [press], or canonical [press, set_value]" }
   ),
   supported_action_strategies: z.array(
     z.enum(["ax_semantic", "exclusive_global_hid"])
@@ -122,7 +124,7 @@ export const StatusDataSchema = z.object({
   (data) => data.display_count === data.topology.displays.length,
   { message: "display_count must match topology.displays array length" }
 ).refine(
-  (data) => data.operator_safe_ax_available === (data.operator_safe_ax_actions.length === 2),
+  (data) => data.operator_safe_ax_available === (data.operator_safe_ax_actions.length > 0),
   { message: "operator_safe_ax_available must match operator_safe_ax_actions" }
 ).refine(
   (data) => data.operator_safe_ax_available === data.supported_action_strategies.includes("ax_semantic"),
