@@ -1,9 +1,32 @@
 # Observe-Action-Observe Loop Reference
 
 > [!NOTE]
-> **Milestone M10 Scope Note**: Nine active tools (`computer_use_status`, `computer_use_observe`, `computer_use_ax_tree`, `computer_use_click`, `computer_use_move`, `computer_use_type`, `computer_use_shortcut`, `computer_use_scroll`, `computer_use_drag`) are **active** in Milestone M10 (`v0.2.0-dogfood-m10`). Each input action atomically consumes the `capture_id` lease token from the latest `computer_use_observe`. Attempting a second input action without an intervening `computer_use_observe` fails closed with `STALE_CAPTURE`.
+> The ten-tool surface has two different lease loops. Prefer the exact-element AX loop on shared workstations. The display-coordinate loop uses global HID and is allowed only in an explicitly exclusive GUI session.
 
-## Sequence Diagram (Milestone M10 Active Loop)
+## Operator-safe AX loop
+
+```text
+computer_use_status
+  -> require operator-safe AX availability
+computer_use_ax_tree(app_id)
+  -> ax_snapshot_id + app_instance_ref + actionable element_ref
+computer_use_ax_action(..., action="press")
+  -> dispatched + requires_reinspection + global_hid_posts=0
+computer_use_ax_tree(same app_id)
+  -> independently verify the intended state
+```
+
+Never use a traversal `id`, `identifier`, `description`, title, label, index, or bounds as action authority.
+The opaque lease is consumed once. A dispatched action is not a verified effect.
+Semantic/window/ancestry drift or any observed macOS session input counter
+change returns a typed stale/intervention error. A read-only tree inspection
+that returns `USER_INTERVENED` may be retried because it issued no lease. After
+`computer_use_ax_action` is called, however, every error may follow an
+already-dispatched press: never automatically repeat the action. Re-inspect,
+verify the target state, and let the controller or operator decide whether a
+new action is still needed.
+
+## Exclusive global-HID loop
 
 ```text
 Antigravity Agent         MCP Server          Native ComputerUseHost

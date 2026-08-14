@@ -1,0 +1,17 @@
+{
+  "id": "req-ax-action-001",
+  "success": true,
+  "data": {
+    "action_id": "ax-act-fixture-001",
+    "status": "dispatched",
+    "strategy": "ax_semantic",
+    "action": "press",
+    "ax_snapshot_id": "ax-snap-fixture-001",
+    "app_instance_ref": "app-inst-fixture-001",
+    "element_ref": "ax-el-fixture-001",
+    "topology_version": "top-sha256-fb6c55499cfac6b4ad6aa412b55237d1560d7c36c41f7f148810a2d2479ab22d",
+    "requires_reinspection": true,
+    "global_hid_posts": 0,
+    "duration_ms": 1.25
+  }
+}

@@ -5,7 +5,7 @@
 [![Antigravity](https://img.shields.io/badge/Platform-Google%20Antigravity-green.svg)](https://antigravity.google)
 [![Build Status](https://img.shields.io/badge/v0.1-M10%2FD3%20Dogfood-blue.svg)](#)
 
-> Architecture specification and production-bounded M10/D3 nine-tool computer-use surface for Google Antigravity & Gemini 3.6 Flash on macOS.
+> Architecture specification and production-bounded ten-tool computer-use surface for Google Antigravity & Gemini 3.6 Flash on macOS.
 
 ---
 
@@ -13,7 +13,7 @@
 
 `agy-computer-use` defines an enterprise-grade Computer Use platform for macOS. It combines native macOS screen perception, display topology management, bounded input synthesis, and Unix domain socket IPC via a native host application and an MCP server bridge.
 
-Building on the completed **Milestone D2 & M9 foundations**, Milestone M10 implements and physically dogfoods the nine-tool MCP surface (`computer_use_status`, `computer_use_observe`, `computer_use_ax_tree`, `computer_use_click`, `computer_use_move`, `computer_use_type`, `computer_use_shortcut`, `computer_use_scroll`, `computer_use_drag`) for macOS desktop interactions.
+Building on the completed **Milestone D2 & M9 foundations**, the active surface adds `computer_use_ax_action` to the prior nine tools. It is the first operator-safe action path: one exact, retained AX element may receive one semantic `press` without moving the physical pointer, changing focus through global input, or falling back to HID synthesis. The one-shot lease also binds process birth, window/ancestry and semantic fingerprints, topology, and macOS session input counters.
 
 Local ad-hoc staged-app/TCC operation is proven via `ComputerUseHost.app`. Stable team code signing, distribution, and notarization remain human-gated future work.
 
@@ -33,9 +33,9 @@ flowchart TD
 
     subgraph Native ["Staged Background Host (ComputerUseHost)"]
         SocketServer["Unix Domain Socket Listener (0700)"]
-        AXEngine["AXUIElement Inspector (Active M10)"]
+        AXEngine["AX Inspector + One-Shot Semantic Action"]
         CapEngine["Screen Capture Engine (macOS 14+ SCScreenshotManager)"]
-        InputEngine["Input Synthesis Engine (Active M10 Bounded)"]
+        InputEngine["Exclusive Global-HID Input Engine"]
         CoordMapper["Coordinate & Display Scaler"]
     end
 
@@ -51,21 +51,28 @@ flowchart TD
 
 ---
 
-## Tool API Specifications (Milestone M10 Active Surface)
+## Tool API Specifications
 
-The MCP server exposes the following nine active tools to Gemini 3.6 Flash / Antigravity:
+The MCP server exposes the following ten active tools to Gemini 3.6 Flash / Antigravity:
 
 | Tool Name | Required Parameters | Description |
 |---|---|---|
 | `computer_use_status` | None | Returns host connectivity, active display topology, TCC permission state, and mutation lockout state. |
 | `computer_use_observe` | `display_id?` | Captures primary or target display screenshot, returning `capture_id`, `topology_version` (`top-sha256-...`), and JPEG image payload. |
-| `computer_use_ax_tree` | `app_id?`, `max_depth?` | Inspects accessibility UI element hierarchy (AXUIElement tree) of specified running application or frontmost application. Enforces depth, node, string caps, and secure text redaction. |
+| `computer_use_ax_tree` | `app_id`, `max_depth?` | Inspects one explicit app and returns a short-lived opaque snapshot/app lease plus opaque refs only for retained controls advertising `press`. |
+| `computer_use_ax_action` | `ax_snapshot_id`, `app_instance_ref`, `element_ref`, `topology_version`, `action`, `intent` | Consumes one lease and dispatches exact-element AX `press`; stale semantics, ancestry, topology, process identity, or operator/system input fail closed; never posts global HID and requires fresh inspection to verify effect. |
 | `computer_use_click` | `x`, `y`, `intent`, `capture_id`, `topology_version`, `button?`, `click_count?` | Dispatches single mouse click at normalized (0..999) coordinates on active display topology. |
 | `computer_use_move` | `x`, `y`, `intent`, `capture_id`, `topology_version` | Dispatches single mouse movement to normalized (0..999) coordinates without clicking. |
 | `computer_use_type` | `text`, `intent`, `capture_id`, `topology_version`, `press_enter?` | Synthesizes Unicode text entry into focused window/element. |
 | `computer_use_shortcut` | `keys`, `intent`, `capture_id`, `topology_version` | Dispatches bounded keyboard shortcut sequence (e.g. `['cmd', 'tab']`). |
 | `computer_use_scroll` | `x`, `y`, `delta_y`, `intent`, `capture_id`, `topology_version`, `delta_x?` | Dispatches finite scroll wheel input at normalized coordinates. |
 | `computer_use_drag` | `start_x`, `start_y`, `end_x`, `end_y`, `intent`, `capture_id`, `topology_version`, `button?` | Dispatches same-display drag from start to end coordinates with guaranteed button release. |
+
+`computer_use_ax_action` is the default shared-workstation mutation path. The
+coordinate, move, type, shortcut, scroll, and drag tools use the global macOS
+input stream and can move the operator's pointer or affect focus. Use those
+only in an explicitly exclusive GUI session, VM, or dedicated worker Mac.
+There is no fallback from the AX action tool to global HID.
 
 ---
 
@@ -84,6 +91,14 @@ The MCP server exposes the following nine active tools to Gemini 3.6 Flash / Ant
     ```bash
     ./bin/agy-computer-use host-start
     ```
+  - Start a stopped host and explicitly request the macOS Accessibility
+    enrollment prompt:
+    ```bash
+    ./bin/agy-computer-use host-start --request-accessibility
+    ```
+    Ordinary starts never request this prompt. The exact opt-in flag fails
+    closed if an owned host is already running; stop that host first. macOS
+    still requires the operator to approve the system prompt or toggle.
   - Check Host Status (read-only):
     ```bash
     ./bin/agy-computer-use host-status
@@ -98,7 +113,11 @@ The MCP server exposes the following nine active tools to Gemini 3.6 Flash / Ant
   - **Non-Override Runtime Directory Policy**: Public CLI host commands operate strictly on the canonical runtime directory (`/tmp/agy-computer-use-<uid>`), enforcing single-owner Unix domain socket permissions (`0700`) and inode identity validation to prevent socket hijacking or symlink attacks. Custom runtime directory overrides (`COMPUTER_USE_RUNTIME_DIR`) are restricted to isolated test harnesses and rejected or fail-closed in public production CLI operations.
 
 > [!NOTE]
-> Milestones D2 and M9 established the native observation foundation and bounded click/type/shortcut loop. Milestone M10/D3 implements and physically dogfoods the complete nine-tool v0.1 surface, including bounded AX inspection, pointer movement, scrolling, and same-display left-button dragging driven live via Google Antigravity. Local ad-hoc staged-app/TCC operation is proven; team signing/notarization remains future work. A denied Screen Recording or Accessibility state remains a human TCC gate.
+> Milestones D2 through M10 established display observation, AX inspection,
+> and global input synthesis. The current operator-safe slice adds exact
+> retained-element AX `press`; additional noninterfering action classes,
+> concurrent-operator cancellation, live HUD presentation, signing, and
+> notarization remain independently qualified follow-ups.
 
 - **Authoritative Native Swift Test Authority**:
   ```bash

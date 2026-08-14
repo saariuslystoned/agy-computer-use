@@ -1593,6 +1593,10 @@ public struct ComputerUseHostTestRunner {
             "accessibility_available": .bool(false),
             "accessibility_trusted": .bool(false),
             "ax_tree_inspection_available": .bool(false),
+            "operator_safe_ax_available": .bool(false),
+            "operator_safe_ax_actions": .array([]),
+            "supported_action_strategies": .array([]),
+            "global_hid_may_affect_pointer_or_focus": .bool(true),
             "input_mutation_state": .string("disabled"),
             "topology_version": .string(fakeTopo.version),
             "primary_display_id": .int(1),
@@ -1682,7 +1686,7 @@ public struct ComputerUseHostTestRunner {
                 let resp10a = try readIPCResponse(from: rawFd)
                 assertEqual(resp10a.id, "eintr-req-10")
                 assertTrue(resp10a.success)
-                assertEqual(resp10a.data?.count, 11, "Top-level response data dictionary must contain exactly 11 keys")
+                assertEqual(resp10a.data?.count, 15, "Top-level response data dictionary must contain exactly 15 keys")
                 assertEqual(resp10a.data, expectedDataDict, "Response data dictionary must match full expected status payload exactly")
             }()
 
@@ -1719,7 +1723,7 @@ public struct ComputerUseHostTestRunner {
                 let resp10b = try readIPCResponse(from: clientFd10b)
                 assertEqual(resp10b.id, "eintr-req-10-recovery")
                 assertTrue(resp10b.success)
-                assertEqual(resp10b.data?.count, 11, "Recovery response data dictionary must contain exactly 11 keys")
+                assertEqual(resp10b.data?.count, 15, "Recovery response data dictionary must contain exactly 15 keys")
                 assertEqual(resp10b.data, expectedDataDict, "Recovery response data dictionary must match full expected status payload exactly")
             }()
 
@@ -5667,7 +5671,82 @@ public struct ComputerUseHostTestRunner {
         assertTrue(!mainContent.contains("DisabledAXInspector()"), "ComputerUseHost main.swift MUST NOT construct DisabledAXInspector")
     }
 
+    private static func proveAXSemanticOperationGateSerialization() {
+        let operationGate = AXSemanticOperationGate()
+        let gateAttempted = DispatchSemaphore(value: 0)
+        let gateEntered = DispatchSemaphore(value: 0)
+        let gateCompleted = DispatchSemaphore(value: 0)
+        operationGate.lockOperation()
+        DispatchQueue.global(qos: .userInitiated).async {
+            gateAttempted.signal()
+            operationGate.lockOperation()
+            gateEntered.signal()
+            operationGate.unlockOperation()
+            gateCompleted.signal()
+        }
+        assertTrue(
+            gateAttempted.wait(timeout: .now() + .seconds(1)) == .success,
+            "Concurrent gate test worker must start"
+        )
+        assertTrue(
+            gateEntered.wait(timeout: .now() + .milliseconds(50)) == .timedOut,
+            "A second AX semantic operation must remain fenced while the first holds the gate"
+        )
+        operationGate.unlockOperation()
+        assertTrue(
+            gateEntered.wait(timeout: .now() + .seconds(1)) == .success,
+            "The fenced AX semantic operation must enter after release"
+        )
+        assertTrue(
+            gateCompleted.wait(timeout: .now() + .seconds(1)) == .success,
+            "The serialized AX semantic operation must finish"
+        )
+    }
+
     public static func run41_AXTreeInspectionTargetingRedactionCapsAndTruncation() async throws {
+        // Accessibility enrollment is an explicit, one-shot launch mode. Normal
+        // host starts and malformed/duplicated flags must never raise a TCC
+        // prompt. Tests inject the requester so they cannot touch live TCC state.
+        var promptRequestCount = 0
+        let ordinaryPromptResult = AccessibilityTrustPromptPolicy.requestIfEnabled(
+            arguments: ["/path/to/ComputerUseHost", "--agy-launch-generation", "generation-1"]
+        ) {
+            promptRequestCount += 1
+            return true
+        }
+        assertEqual(ordinaryPromptResult, nil)
+        assertEqual(promptRequestCount, 0)
+
+        let requestedPromptResult = AccessibilityTrustPromptPolicy.requestIfEnabled(
+            arguments: [
+                "/path/to/ComputerUseHost",
+                "--agy-launch-generation",
+                "generation-1",
+                AccessibilityTrustPromptPolicy.requestArgument
+            ]
+        ) {
+            promptRequestCount += 1
+            return false
+        }
+        assertEqual(requestedPromptResult, false)
+        assertEqual(promptRequestCount, 1)
+
+        let duplicatePromptResult = AccessibilityTrustPromptPolicy.requestIfEnabled(
+            arguments: [
+                "/path/to/ComputerUseHost",
+                AccessibilityTrustPromptPolicy.requestArgument,
+                AccessibilityTrustPromptPolicy.requestArgument
+            ]
+        ) {
+            promptRequestCount += 1
+            return true
+        }
+        assertEqual(duplicatePromptResult, nil)
+        assertEqual(promptRequestCount, 1)
+        assertTrue(!AccessibilityTrustPromptPolicy.shouldRequest(
+            arguments: ["/path/to/ComputerUseHost", "--request-accessibility-near-match"]
+        ))
+
         // 1. Sanitize text redaction & truncation tests
         let redacted = BoundedAXTraverser.sanitizeText("secret123", isSecure: true)
         assertEqual(redacted, "[REDACTED]")
@@ -5683,7 +5762,11 @@ public struct ComputerUseHostTestRunner {
         assertEqual(disabledInspector.isAccessibilityTrusted(), false)
         var disabledThrew = false
         do {
-            _ = try disabledInspector.inspectTree(maxDepth: 5, appId: "Finder")
+            _ = try disabledInspector.inspectTree(
+                maxDepth: 5,
+                appId: "Finder",
+                topologyVersion: "top-sha256-\(String(repeating: "0", count: 64))"
+            )
         } catch ComputerUseError.targetUnreachable {
             disabledThrew = true
         }
@@ -5694,7 +5777,11 @@ public struct ComputerUseHostTestRunner {
         if inspector.isAccessibilityTrusted() {
             var nonexistentThrew = false
             do {
-                _ = try inspector.inspectTree(maxDepth: 5, appId: "com.nonexistent.app.xyz.12345")
+                _ = try inspector.inspectTree(
+                    maxDepth: 5,
+                    appId: "com.nonexistent.app.xyz.12345",
+                    topologyVersion: "top-sha256-\(String(repeating: "0", count: 64))"
+                )
             } catch ComputerUseError.targetUnreachable {
                 nonexistentThrew = true
             }
@@ -5708,6 +5795,8 @@ public struct ComputerUseHostTestRunner {
             id: "n1",
             role: "AXWindow",
             subrole: "AXSecureTextField",
+            identifier: "operator-password-field",
+            description: "secret123",
             title: longText,
             value: "pass123",
             enabled: true,
@@ -5715,9 +5804,34 @@ public struct ComputerUseHostTestRunner {
             bounds: AXRect(x: 0, y: 0, width: 100, height: 100)
         )
         let sanitizedNode = BoundedAXTraverser.sanitizeNode(sampleNode, currentDepth: 1, maxDepth: 5, nodeCount: &count, maxNodes: 500, visited: &visited)
+        assertEqual(sanitizedNode?.identifier, "[REDACTED]")
+        assertEqual(sanitizedNode?.description, "[REDACTED]")
         assertEqual(sanitizedNode?.value, "[REDACTED]")
         assertTrue(sanitizedNode?.title?.hasSuffix("...") == true)
         assertEqual(count, 1)
+
+        count = 0
+        visited.removeAll()
+        let longPerceptionLabels = AXNodeDTO(
+            id: "n2",
+            role: "AXButton",
+            identifier: longText,
+            description: longText,
+            enabled: true,
+            bounds: AXRect(x: 0, y: 0, width: 10, height: 10)
+        )
+        let sanitizedLabels = BoundedAXTraverser.sanitizeNode(
+            longPerceptionLabels,
+            currentDepth: 1,
+            maxDepth: 5,
+            nodeCount: &count,
+            maxNodes: 500,
+            visited: &visited
+        )
+        assertEqual(sanitizedLabels?.identifier?.count, 256)
+        assertEqual(sanitizedLabels?.description?.count, 256)
+        assertTrue(sanitizedLabels?.identifier?.hasSuffix("...") == true)
+        assertTrue(sanitizedLabels?.description?.hasSuffix("...") == true)
 
         // 5. Preserve global negative display origins while rejecting negative sizes.
         let negativeOriginBounds = DefaultAXInspector.boundsRect(
@@ -5728,6 +5842,734 @@ public struct ComputerUseHostTestRunner {
         assertEqual(negativeOriginBounds.y, -143)
         assertEqual(negativeOriginBounds.width, 800)
         assertEqual(negativeOriginBounds.height, 0)
+
+        // 6. Semantic fingerprints and operator-input counters are exact,
+        // deterministic invalidation inputs. Lease expiry uses monotonic time.
+        let baseFingerprint = DefaultAXInspector.semanticFingerprint(
+            components: ["role=AXButton", "title=Continue", "bounds=10,20,80,24"]
+        )
+        assertEqual(baseFingerprint.count, 64)
+        assertEqual(
+            baseFingerprint,
+            DefaultAXInspector.semanticFingerprint(
+                components: ["role=AXButton", "title=Continue", "bounds=10,20,80,24"]
+            )
+        )
+        assertTrue(
+            baseFingerprint != DefaultAXInspector.semanticFingerprint(
+                components: ["role=AXButton", "title=Delete", "bounds=10,20,80,24"]
+            ),
+            "Relabeling a retained control must change its semantic fingerprint"
+        )
+        assertTrue(
+            baseFingerprint != DefaultAXInspector.semanticFingerprint(
+                components: ["role=AXButton", "title=Continue", "bounds=11,20,80,24"]
+            ),
+            "Moving a retained control must change its semantic fingerprint"
+        )
+
+        let operatorEpoch = OperatorInputEpoch(counters: [10, 20, 30])
+        assertTrue(!DefaultAXInspector.operatorInputChanged(
+            from: operatorEpoch,
+            to: OperatorInputEpoch(counters: [10, 20, 30])
+        ))
+        assertTrue(DefaultAXInspector.operatorInputChanged(
+            from: operatorEpoch,
+            to: OperatorInputEpoch(counters: [10, 21, 30])
+        ))
+
+        func authorityValidation(
+            windowIdentityMatches: Bool = true,
+            ancestryMatches: Bool = true,
+            elementFingerprintMatches: Bool = true,
+            windowFingerprintMatches: Bool = true,
+            operatorInputChanged: Bool = false
+        ) -> AXRetainedAuthorityValidation {
+            AXRetainedAuthorityValidation(
+                windowIdentityMatches: windowIdentityMatches,
+                ancestryMatches: ancestryMatches,
+                elementFingerprintMatches: elementFingerprintMatches,
+                windowFingerprintMatches: windowFingerprintMatches,
+                operatorInputChanged: operatorInputChanged
+            )
+        }
+
+        func retainedAuthorityError(
+            _ validation: AXRetainedAuthorityValidation
+        ) -> ComputerUseError? {
+            do {
+                try DefaultAXInspector.validateRetainedAuthority(validation)
+                return nil
+            } catch let error as ComputerUseError {
+                return error
+            } catch {
+                assertTrue(false, "Retained-authority validation returned an unexpected error")
+                return nil
+            }
+        }
+
+        assertEqual(retainedAuthorityError(authorityValidation()), nil)
+        assertEqual(
+            retainedAuthorityError(authorityValidation(windowIdentityMatches: false)),
+            .staleOperation(reason: "Retained AX element window identity changed")
+        )
+        assertEqual(
+            retainedAuthorityError(authorityValidation(ancestryMatches: false)),
+            .staleOperation(reason: "Retained AX element ancestry changed")
+        )
+        assertEqual(
+            retainedAuthorityError(authorityValidation(elementFingerprintMatches: false)),
+            .staleOperation(reason: "Retained AX element semantic identity changed")
+        )
+        assertEqual(
+            retainedAuthorityError(authorityValidation(windowFingerprintMatches: false)),
+            .staleOperation(reason: "Retained AX window semantic identity changed")
+        )
+        assertEqual(
+            retainedAuthorityError(authorityValidation(operatorInputChanged: true)),
+            .userIntervened(
+                reason: "Operator or system input changed while the AX action was being validated; the one-shot lease was consumed"
+            )
+        )
+
+        struct FixedOperatorInputEpochProvider: OperatorInputEpochProviding {
+            let epoch: OperatorInputEpoch
+
+            func currentEpoch() -> OperatorInputEpoch {
+                epoch
+            }
+        }
+
+        let unchangedDispatchResult = try DefaultAXInspector.performAXActionCheckingOperatorInput(
+            observedEpoch: operatorEpoch,
+            epochProvider: FixedOperatorInputEpochProvider(epoch: operatorEpoch)
+        ) {
+            .cannotComplete
+        }
+        assertEqual(unchangedDispatchResult.rawValue, AXError.cannotComplete.rawValue)
+
+        var dispatchInterventionError: ComputerUseError?
+        do {
+            _ = try DefaultAXInspector.performAXActionCheckingOperatorInput(
+                observedEpoch: operatorEpoch,
+                epochProvider: FixedOperatorInputEpochProvider(
+                    epoch: OperatorInputEpoch(counters: [10, 21, 30])
+                )
+            ) {
+                .cannotComplete
+            }
+        } catch let error as ComputerUseError {
+            dispatchInterventionError = error
+        }
+        assertEqual(
+            dispatchInterventionError,
+            .userIntervened(
+                reason: "Operator or system input changed during AX dispatch; the action outcome is unknown and requires fresh computer_use_ax_tree inspection"
+            )
+        )
+
+        // DefaultAXInspector uses this exact gate around complete inspect/action
+        // operations. Prove a second caller cannot enter until the first leaves.
+        proveAXSemanticOperationGateSerialization()
+
+        let leaseNow = ContinuousClock().now
+        assertTrue(DefaultAXInspector.isActionLeaseUnexpired(
+            now: leaseNow,
+            deadline: leaseNow + .milliseconds(1)
+        ))
+        assertTrue(!DefaultAXInspector.isActionLeaseUnexpired(
+            now: leaseNow,
+            deadline: leaseNow
+        ))
+        assertTrue(!DefaultAXInspector.isActionLeaseUnexpired(
+            now: leaseNow + .milliseconds(1),
+            deadline: leaseNow
+        ))
+        assertTrue(DefaultAXInspector.matchesProcessBirth(
+            expectedLaunchTime: 1_234.5,
+            currentLaunchTime: 1_234.5005
+        ))
+        assertTrue(!DefaultAXInspector.matchesProcessBirth(
+            expectedLaunchTime: 1_234.5,
+            currentLaunchTime: nil
+        ))
+        assertTrue(!DefaultAXInspector.matchesProcessBirth(
+            expectedLaunchTime: 1_234.5,
+            currentLaunchTime: 1_235.0
+        ))
+
+        // 7. Targeted AX snapshots and semantic actions stay on a dedicated,
+        // element-retaining engine and never enter the global input backend.
+        final class TargetedAXSemanticEngine: AXInspectionEngine, AXSemanticActionEngine, @unchecked Sendable {
+            struct ActionCall: Equatable {
+                let snapshotId: String
+                let appInstanceRef: String
+                let elementRef: String
+                let action: String
+                let topologyVersion: String
+            }
+
+            let lock = NSLock()
+            var nextSnapshotNumber = 0
+            var activeSnapshotId: String?
+            var activeAppInstanceRef: String?
+            var activeElementRef: String?
+            var activeTopologyVersion: String?
+            var actionCalls: [ActionCall] = []
+            var returnUnsafeReceiptOnce = false
+            var rejectUnsupportedOnce = false
+            var rejectUserIntervenedOnce = false
+            var rejectOutcomeUnknownOnce = false
+
+            var isAvailable: Bool { true }
+            func isAccessibilityTrusted() -> Bool { true }
+            var isOperatorSafeActionAvailable: Bool { true }
+            var supportedOperatorSafeActions: [String] { ["press"] }
+
+            func inspectTree(maxDepth: Int, appId: String, topologyVersion: String) throws -> AXTreeResultDTO {
+                let snapshotId: String
+                let appInstanceRef: String
+                let elementRef: String
+
+                lock.lock()
+                nextSnapshotNumber += 1
+                snapshotId = "ax-snap-test-\(nextSnapshotNumber)"
+                appInstanceRef = "app-inst-test-\(nextSnapshotNumber)"
+                elementRef = "ax-el-test-\(nextSnapshotNumber)"
+                activeSnapshotId = snapshotId
+                activeAppInstanceRef = appInstanceRef
+                activeElementRef = elementRef
+                activeTopologyVersion = topologyVersion
+                lock.unlock()
+
+                return AXTreeResultDTO(
+                    targetApp: AXTargetAppDTO(
+                        pid: 4242,
+                        bundleId: "com.example.operator-safe-target",
+                        name: "Operator Safe Target"
+                    ),
+                    axSnapshotId: snapshotId,
+                    appInstanceRef: appInstanceRef,
+                    expiresAtMs: 1_700_000_030_000,
+                    topologyVersion: topologyVersion,
+                    nodeCount: 1,
+                    maxDepthReached: min(maxDepth, 1),
+                    truncated: false,
+                    tree: AXNodeDTO(
+                        id: "ax-AXButton-1",
+                        elementRef: elementRef,
+                        supportedActions: ["press"],
+                        role: "AXButton",
+                        title: "Continue",
+                        enabled: true,
+                        focused: false,
+                        bounds: AXRect(x: 20, y: 30, width: 80, height: 24)
+                    )
+                )
+            }
+
+            func performSemanticAction(
+                snapshotId: String,
+                appInstanceRef: String,
+                elementRef: String,
+                action: String,
+                topologyVersion: String
+            ) throws -> AXSemanticActionResultDTO {
+                lock.lock()
+                defer { lock.unlock() }
+
+                actionCalls.append(ActionCall(
+                    snapshotId: snapshotId,
+                    appInstanceRef: appInstanceRef,
+                    elementRef: elementRef,
+                    action: action,
+                    topologyVersion: topologyVersion
+                ))
+
+                guard action == "press" else {
+                    throw ComputerUseError.noninterferingActionUnsupported(action: action)
+                }
+                guard let currentSnapshotId = activeSnapshotId else {
+                    throw ComputerUseError.staleAXSnapshot(current: "", received: snapshotId)
+                }
+                guard snapshotId == currentSnapshotId else {
+                    throw ComputerUseError.staleAXSnapshot(current: currentSnapshotId, received: snapshotId)
+                }
+                guard appInstanceRef == activeAppInstanceRef else {
+                    throw ComputerUseError.staleOperation(
+                        reason: "App instance reference does not match the retained AX snapshot"
+                    )
+                }
+                guard topologyVersion == activeTopologyVersion else {
+                    throw ComputerUseError.staleTopology(
+                        current: activeTopologyVersion ?? "",
+                        received: topologyVersion
+                    )
+                }
+                guard elementRef == activeElementRef else {
+                    throw ComputerUseError.targetUnreachable(
+                        reason: "Unknown or non-actionable AX element reference"
+                    )
+                }
+
+                // Once the complete retained identity matches, every dispatch
+                // attempt consumes the fake lease, including uncertain errors.
+                activeSnapshotId = nil
+                activeAppInstanceRef = nil
+                activeElementRef = nil
+                activeTopologyVersion = nil
+
+                if rejectUnsupportedOnce {
+                    rejectUnsupportedOnce = false
+                    throw ComputerUseError.noninterferingActionUnsupported(action: action)
+                }
+                if rejectUserIntervenedOnce {
+                    rejectUserIntervenedOnce = false
+                    throw ComputerUseError.userIntervened(
+                        reason: "Injected operator input counter change"
+                    )
+                }
+                if rejectOutcomeUnknownOnce {
+                    rejectOutcomeUnknownOnce = false
+                    throw ComputerUseError.axOutcomeUnknown(
+                        reason: "Injected AX dispatch uncertainty"
+                    )
+                }
+
+                let unsafeReceipt = returnUnsafeReceiptOnce
+                returnUnsafeReceiptOnce = false
+                return AXSemanticActionResultDTO(
+                    actionId: "ax-act-test-\(actionCalls.count)",
+                    status: "dispatched",
+                    action: action,
+                    axSnapshotId: snapshotId,
+                    appInstanceRef: appInstanceRef,
+                    elementRef: elementRef,
+                    topologyVersion: topologyVersion,
+                    requiresReinspection: !unsafeReceipt,
+                    globalHIDPosts: unsafeReceipt ? 1 : 0,
+                    durationMs: 1.25
+                )
+            }
+
+            func expireActiveLease() {
+                lock.lock()
+                activeSnapshotId = nil
+                activeAppInstanceRef = nil
+                activeElementRef = nil
+                activeTopologyVersion = nil
+                lock.unlock()
+            }
+
+            func makeNextReceiptUnsafe() {
+                lock.lock()
+                returnUnsafeReceiptOnce = true
+                lock.unlock()
+            }
+
+            func rejectNextAsUnsupported() {
+                lock.lock()
+                rejectUnsupportedOnce = true
+                lock.unlock()
+            }
+
+            func rejectNextAsOutcomeUnknown() {
+                lock.lock()
+                rejectOutcomeUnknownOnce = true
+                lock.unlock()
+            }
+
+            func rejectNextAsUserIntervened() {
+                lock.lock()
+                rejectUserIntervenedOnce = true
+                lock.unlock()
+            }
+
+            var actionCallCount: Int {
+                lock.lock()
+                defer { lock.unlock() }
+                return actionCalls.count
+            }
+        }
+
+        final class ZeroGlobalInputEngine: InputSynthesisEngine, @unchecked Sendable {
+            let lock = NSLock()
+            var touches: [String] = []
+
+            func record(_ name: String) {
+                lock.lock()
+                touches.append(name)
+                lock.unlock()
+            }
+
+            var isMutationEnabled: Bool {
+                record("isMutationEnabled")
+                return true
+            }
+
+            func performClick(gridX: Int, gridY: Int, button: MouseButton, clickCount: Int, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO {
+                record("performClick")
+                throw ComputerUseError.operatorExclusiveRequired(action: "click")
+            }
+
+            func performMove(gridX: Int, gridY: Int, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO {
+                record("performMove")
+                throw ComputerUseError.operatorExclusiveRequired(action: "move")
+            }
+
+            func performDrag(startX: Int, startY: Int, endX: Int, endY: Int, button: MouseButton, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO {
+                record("performDrag")
+                throw ComputerUseError.operatorExclusiveRequired(action: "drag")
+            }
+
+            func performType(text: String, pressEnter: Bool, captureId: String, currentCaptureId: String) throws -> ActionResultDTO {
+                record("performType")
+                throw ComputerUseError.operatorExclusiveRequired(action: "type")
+            }
+
+            func performShortcut(keys: [String], captureId: String, currentCaptureId: String) throws -> ActionResultDTO {
+                record("performShortcut")
+                throw ComputerUseError.operatorExclusiveRequired(action: "shortcut")
+            }
+
+            func performScroll(gridX: Int, gridY: Int, deltaX: Int, deltaY: Int, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO {
+                record("performScroll")
+                throw ComputerUseError.operatorExclusiveRequired(action: "scroll")
+            }
+
+            func releaseHeldInputs() {
+                record("releaseHeldInputs")
+            }
+
+            var touchCount: Int {
+                lock.lock()
+                defer { lock.unlock() }
+                return touches.count
+            }
+
+            func resetTouches() {
+                lock.lock()
+                touches.removeAll()
+                lock.unlock()
+            }
+        }
+
+        let semanticTopology = try FakeDisplayTopologyProvider().getTopology()
+        let semanticEngine = TargetedAXSemanticEngine()
+        let globalInputEngine = ZeroGlobalInputEngine()
+        let semanticServer = HostServer(
+            authorizer: FakeScreenRecordingAuthorizer(granted: true),
+            topologyProvider: FakeDisplayTopologyProvider(topology: semanticTopology),
+            captureEngine: FakeCaptureEngine(),
+            axEngine: semanticEngine,
+            axActionEngine: semanticEngine,
+            inputEngine: globalInputEngine
+        )
+
+        let semanticStatus = await semanticServer.handleRequest(IPCRequest(
+            id: "ax-status",
+            method: "status"
+        ))
+        assertTrue(semanticStatus.success)
+        assertEqual(semanticStatus.data?["operator_safe_ax_available"], .bool(true))
+        assertEqual(semanticStatus.data?["operator_safe_ax_actions"], .array([.string("press")]))
+        assertEqual(
+            semanticStatus.data?["supported_action_strategies"],
+            .array([.string("ax_semantic"), .string("exclusive_global_hid")])
+        )
+        assertEqual(
+            semanticStatus.data?["global_hid_may_affect_pointer_or_focus"],
+            .bool(true)
+        )
+        assertEqual(globalInputEngine.touchCount, 1, "Status may inspect global-HID availability once")
+        globalInputEngine.resetTouches()
+
+        let untargetedTree = await semanticServer.handleRequest(IPCRequest(
+            id: "ax-tree-untargeted",
+            method: "ax_tree",
+            params: ["max_depth": .int(3)]
+        ))
+        assertTrue(!untargetedTree.success)
+        assertEqual(untargetedTree.error?.code, "IPC_ERROR")
+        assertEqual(semanticEngine.actionCallCount, 0)
+
+        func issueTargetedTree(_ id: String) async -> (String, String, String) {
+            let response = await semanticServer.handleRequest(IPCRequest(
+                id: id,
+                method: "ax_tree",
+                params: [
+                    "max_depth": .int(3),
+                    "app_id": .string("com.example.operator-safe-target")
+                ]
+            ))
+            assertTrue(response.success, "Explicit app-targeted AX inspection must succeed")
+            let snapshotId = response.data?["ax_snapshot_id"]?.rawValue as? String ?? ""
+            let appInstanceRef = response.data?["app_instance_ref"]?.rawValue as? String ?? ""
+            var elementRef = ""
+            if case .dictionary(let root)? = response.data?["tree"] {
+                elementRef = root["element_ref"]?.rawValue as? String ?? ""
+                assertEqual(root["supported_actions"], .array([.string("press")]))
+            } else {
+                assertTrue(false, "Targeted AX response must include a tree dictionary")
+            }
+            assertTrue(!snapshotId.isEmpty)
+            assertTrue(!appInstanceRef.isEmpty)
+            assertTrue(!elementRef.isEmpty)
+            assertEqual(response.data?["topology_version"], .string(semanticTopology.version))
+            assertEqual(response.data?["expires_at_ms"], .int(1_700_000_030_000))
+            return (snapshotId, appInstanceRef, elementRef)
+        }
+
+        func semanticParams(
+            snapshotId: String,
+            appInstanceRef: String,
+            elementRef: String,
+            topologyVersion: String = semanticTopology.version,
+            action: String = "press",
+            intent: String = "Press the retained Continue button"
+        ) -> [String: AnyCodable] {
+            [
+                "ax_snapshot_id": .string(snapshotId),
+                "app_instance_ref": .string(appInstanceRef),
+                "element_ref": .string(elementRef),
+                "topology_version": .string(topologyVersion),
+                "action": .string(action),
+                "intent": .string(intent)
+            ]
+        }
+
+        let firstLease = await issueTargetedTree("ax-tree-targeted-1")
+
+        let malformedIntent = await semanticServer.handleRequest(IPCRequest(
+            id: "ax-action-malformed-intent",
+            method: "ax_action",
+            params: semanticParams(
+                snapshotId: firstLease.0,
+                appInstanceRef: firstLease.1,
+                elementRef: firstLease.2,
+                intent: "   "
+            )
+        ))
+        assertEqual(malformedIntent.error?.code, "IPC_ERROR")
+        assertEqual(semanticEngine.actionCallCount, 0)
+
+        let unsupportedRequest = await semanticServer.handleRequest(IPCRequest(
+            id: "ax-action-unsupported",
+            method: "ax_action",
+            params: semanticParams(
+                snapshotId: firstLease.0,
+                appInstanceRef: firstLease.1,
+                elementRef: firstLease.2,
+                action: "focus"
+            )
+        ))
+        assertEqual(unsupportedRequest.error?.code, "NONINTERFERING_ACTION_UNSUPPORTED")
+        assertEqual(semanticEngine.actionCallCount, 0)
+
+        let staleLiveTopology = await semanticServer.handleRequest(IPCRequest(
+            id: "ax-action-stale-live-topology",
+            method: "ax_action",
+            params: semanticParams(
+                snapshotId: firstLease.0,
+                appInstanceRef: firstLease.1,
+                elementRef: firstLease.2,
+                topologyVersion: "top-stale"
+            )
+        ))
+        assertEqual(staleLiveTopology.error?.code, "STALE_TOPOLOGY")
+        assertEqual(semanticEngine.actionCallCount, 0)
+
+        let wrongSnapshot = await semanticServer.handleRequest(IPCRequest(
+            id: "ax-action-wrong-snapshot",
+            method: "ax_action",
+            params: semanticParams(
+                snapshotId: "ax-snap-wrong",
+                appInstanceRef: firstLease.1,
+                elementRef: firstLease.2
+            )
+        ))
+        assertEqual(wrongSnapshot.error?.code, "STALE_AX_SNAPSHOT")
+
+        let wrongApp = await semanticServer.handleRequest(IPCRequest(
+            id: "ax-action-wrong-app",
+            method: "ax_action",
+            params: semanticParams(
+                snapshotId: firstLease.0,
+                appInstanceRef: "app-inst-wrong",
+                elementRef: firstLease.2
+            )
+        ))
+        assertEqual(wrongApp.error?.code, "STALE_OPERATION")
+
+        let wrongElement = await semanticServer.handleRequest(IPCRequest(
+            id: "ax-action-wrong-element",
+            method: "ax_action",
+            params: semanticParams(
+                snapshotId: firstLease.0,
+                appInstanceRef: firstLease.1,
+                elementRef: "ax-el-wrong"
+            )
+        ))
+        assertEqual(wrongElement.error?.code, "TARGET_UNREACHABLE")
+
+        let validAction = await semanticServer.handleRequest(IPCRequest(
+            id: "ax-action-valid",
+            method: "ax_action",
+            params: semanticParams(
+                snapshotId: firstLease.0,
+                appInstanceRef: firstLease.1,
+                elementRef: firstLease.2
+            )
+        ))
+        assertTrue(validAction.success)
+        assertEqual(validAction.data?["status"], .string("dispatched"))
+        assertEqual(validAction.data?["strategy"], .string("ax_semantic"))
+        assertEqual(validAction.data?["action"], .string("press"))
+        assertEqual(validAction.data?["ax_snapshot_id"], .string(firstLease.0))
+        assertEqual(validAction.data?["app_instance_ref"], .string(firstLease.1))
+        assertEqual(validAction.data?["element_ref"], .string(firstLease.2))
+        assertEqual(validAction.data?["topology_version"], .string(semanticTopology.version))
+        assertEqual(validAction.data?["requires_reinspection"], .bool(true))
+        assertEqual(validAction.data?["global_hid_posts"], .int(0))
+        assertEqual(validAction.data?["duration_ms"], .double(1.25))
+
+        let replay = await semanticServer.handleRequest(IPCRequest(
+            id: "ax-action-replay",
+            method: "ax_action",
+            params: semanticParams(
+                snapshotId: firstLease.0,
+                appInstanceRef: firstLease.1,
+                elementRef: firstLease.2
+            )
+        ))
+        assertEqual(replay.error?.code, "STALE_AX_SNAPSHOT")
+
+        let expiredLease = await issueTargetedTree("ax-tree-targeted-expired")
+        semanticEngine.expireActiveLease()
+        let expired = await semanticServer.handleRequest(IPCRequest(
+            id: "ax-action-expired",
+            method: "ax_action",
+            params: semanticParams(
+                snapshotId: expiredLease.0,
+                appInstanceRef: expiredLease.1,
+                elementRef: expiredLease.2
+            )
+        ))
+        assertEqual(expired.error?.code, "STALE_AX_SNAPSHOT")
+
+        let unsupportedLease = await issueTargetedTree("ax-tree-targeted-engine-unsupported")
+        semanticEngine.rejectNextAsUnsupported()
+        let engineUnsupported = await semanticServer.handleRequest(IPCRequest(
+            id: "ax-action-engine-unsupported",
+            method: "ax_action",
+            params: semanticParams(
+                snapshotId: unsupportedLease.0,
+                appInstanceRef: unsupportedLease.1,
+                elementRef: unsupportedLease.2
+            )
+        ))
+        assertEqual(engineUnsupported.error?.code, "NONINTERFERING_ACTION_UNSUPPORTED")
+
+        let interventionLease = await issueTargetedTree("ax-tree-targeted-intervention")
+        semanticEngine.rejectNextAsUserIntervened()
+        let intervention = await semanticServer.handleRequest(IPCRequest(
+            id: "ax-action-user-intervened",
+            method: "ax_action",
+            params: semanticParams(
+                snapshotId: interventionLease.0,
+                appInstanceRef: interventionLease.1,
+                elementRef: interventionLease.2
+            )
+        ))
+        assertEqual(intervention.error?.code, "USER_INTERVENED")
+
+        let uncertainLease = await issueTargetedTree("ax-tree-targeted-uncertain")
+        semanticEngine.rejectNextAsOutcomeUnknown()
+        let uncertain = await semanticServer.handleRequest(IPCRequest(
+            id: "ax-action-uncertain",
+            method: "ax_action",
+            params: semanticParams(
+                snapshotId: uncertainLease.0,
+                appInstanceRef: uncertainLease.1,
+                elementRef: uncertainLease.2
+            )
+        ))
+        assertEqual(uncertain.error?.code, "OUTCOME_UNKNOWN")
+        assertTrue(
+            uncertain.error?.message.contains("computer_use_ax_tree") == true,
+            "AX dispatch uncertainty must require a fresh computer_use_ax_tree inspection"
+        )
+
+        let unsafeReceiptLease = await issueTargetedTree("ax-tree-targeted-unsafe-receipt")
+        semanticEngine.makeNextReceiptUnsafe()
+        let unsafeReceipt = await semanticServer.handleRequest(IPCRequest(
+            id: "ax-action-unsafe-receipt",
+            method: "ax_action",
+            params: semanticParams(
+                snapshotId: unsafeReceiptLease.0,
+                appInstanceRef: unsafeReceiptLease.1,
+                elementRef: unsafeReceiptLease.2
+            )
+        ))
+        assertEqual(unsafeReceipt.error?.code, "OUTCOME_UNKNOWN")
+        assertTrue(
+            unsafeReceipt.error?.message.contains("computer_use_ax_tree") == true,
+            "An unsafe AX receipt must require a fresh computer_use_ax_tree inspection"
+        )
+
+        let disabledGlobalInput = ZeroGlobalInputEngine()
+        let disabledActionServer = HostServer(
+            authorizer: FakeScreenRecordingAuthorizer(granted: true),
+            topologyProvider: FakeDisplayTopologyProvider(topology: semanticTopology),
+            captureEngine: FakeCaptureEngine(),
+            axEngine: semanticEngine,
+            axActionEngine: DisabledAXSemanticActionEngine(),
+            inputEngine: disabledGlobalInput
+        )
+        let disabledAction = await disabledActionServer.handleRequest(IPCRequest(
+            id: "ax-action-disabled",
+            method: "ax_action",
+            params: semanticParams(
+                snapshotId: "ax-snap-disabled",
+                appInstanceRef: "app-inst-disabled",
+                elementRef: "ax-el-disabled"
+            )
+        ))
+        assertEqual(disabledAction.error?.code, "NONINTERFERING_ACTION_UNSUPPORTED")
+
+        assertEqual(
+            globalInputEngine.touchCount,
+            0,
+            "Every semantic AX success and error path must make exactly zero global input-engine calls"
+        )
+        assertEqual(
+            disabledGlobalInput.touchCount,
+            0,
+            "Disabled semantic AX routing must not fall back to global input"
+        )
+
+        // Production must inject the exact same DefaultAXInspector instance for
+        // inspection and semantic action so retained element identity survives.
+        let pwd = FileManager.default.currentDirectoryPath
+        let mainPath = FileManager.default.fileExists(atPath: "\(pwd)/Sources/ComputerUseHost/main.swift")
+            ? "\(pwd)/Sources/ComputerUseHost/main.swift"
+            : "\(pwd)/apps/computer-use-host/Sources/ComputerUseHost/main.swift"
+        let mainSource = try String(contentsOfFile: mainPath, encoding: .utf8)
+        assertTrue(mainSource.contains("let axEngine = DefaultAXInspector()"))
+        assertTrue(mainSource.contains("axEngine: axEngine"))
+        assertTrue(mainSource.contains("axActionEngine: axEngine"))
+
+        let axInspectorPath = FileManager.default.fileExists(
+            atPath: "\(pwd)/Sources/ComputerUseHostLib/AX/AXInspectionEngine.swift"
+        )
+            ? "\(pwd)/Sources/ComputerUseHostLib/AX/AXInspectionEngine.swift"
+            : "\(pwd)/apps/computer-use-host/Sources/ComputerUseHostLib/AX/AXInspectionEngine.swift"
+        let axInspectorSource = try String(contentsOfFile: axInspectorPath, encoding: .utf8)
+        assertTrue(axInspectorSource.contains("private let operationGate = AXSemanticOperationGate()"))
+        assertTrue(axInspectorSource.contains("kAXIdentifierAttribute as CFString"))
+        assertTrue(axInspectorSource.contains("kAXDescriptionAttribute as CFString"))
+        assertTrue(axInspectorSource.contains("try Self.validateRetainedAuthority("))
+        assertTrue(axInspectorSource.contains("try Self.performAXActionCheckingOperatorInput("))
     }
 
     public static func run42_MoveScrollDragPointerValidationStaleCaptureSingleUseLeaseAndUnconditionalRelease() async throws {

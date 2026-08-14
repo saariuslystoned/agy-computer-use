@@ -1,11 +1,12 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "ComputerUseIPCProtocol",
-  "description": "IPC request and response schemas for the D2 observation foundation and M10 nine-tool surface",
+  "description": "IPC request and response schemas for display observation, explicit AX inspection, operator-safe semantic AX action, and exclusive global-HID actions",
   "oneOf": [
     { "$ref": "#/definitions/StatusRequest" },
     { "$ref": "#/definitions/ObserveRequest" },
     { "$ref": "#/definitions/AxTreeRequest" },
+    { "$ref": "#/definitions/AxActionRequest" },
     { "$ref": "#/definitions/ClickRequest" },
     { "$ref": "#/definitions/MoveRequest" },
     { "$ref": "#/definitions/TypeRequest" },
@@ -15,6 +16,7 @@
     { "$ref": "#/definitions/StatusResponse" },
     { "$ref": "#/definitions/ObserveResponse" },
     { "$ref": "#/definitions/AxTreeResponse" },
+    { "$ref": "#/definitions/AxActionResponse" },
     { "$ref": "#/definitions/ActionResultResponse" },
     { "$ref": "#/definitions/ErrorResponse" }
   ],
@@ -46,13 +48,14 @@
     },
     "AxTreeRequest": {
       "type": "object",
-      "required": ["id", "method"],
+      "required": ["id", "method", "params"],
       "additionalProperties": false,
       "properties": {
         "id": { "type": "string", "minLength": 1 },
         "method": { "const": "ax_tree" },
         "params": {
           "type": "object",
+          "required": ["app_id"],
           "additionalProperties": false,
           "properties": {
             "app_id": { "type": "string", "minLength": 1 },
@@ -115,6 +118,10 @@
             "tcc_permission_state",
             "accessibility_available",
             "accessibility_trusted",
+            "operator_safe_ax_available",
+            "operator_safe_ax_actions",
+            "supported_action_strategies",
+            "global_hid_may_affect_pointer_or_focus",
             "input_mutation_state",
             "topology_version",
             "primary_display_id",
@@ -128,6 +135,19 @@
             "accessibility_available": { "type": "boolean" },
             "accessibility_trusted": { "type": "boolean" },
             "ax_tree_inspection_available": { "type": "boolean" },
+            "operator_safe_ax_available": { "type": "boolean" },
+            "operator_safe_ax_actions": {
+              "type": "array",
+              "maxItems": 1,
+              "items": { "const": "press" }
+            },
+            "supported_action_strategies": {
+              "type": "array",
+              "maxItems": 2,
+              "uniqueItems": true,
+              "items": { "enum": ["ax_semantic", "exclusive_global_hid"] }
+            },
+            "global_hid_may_affect_pointer_or_focus": { "const": true },
             "pid": { "type": "integer", "minimum": 1 },
             "input_mutation_state": { "enum": ["enabled", "disabled"] },
             "topology_version": { "type": "string", "pattern": "^top-sha256-[0-9a-f]{64}$" },
@@ -199,8 +219,17 @@
       "additionalProperties": false,
       "properties": {
         "id": { "type": "string", "minLength": 1 },
+        "element_ref": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "supported_actions": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": { "const": "press" }
+        },
         "role": { "type": "string", "minLength": 1 },
         "subrole": { "type": "string" },
+        "identifier": { "type": "string", "maxLength": 256 },
+        "description": { "type": "string", "maxLength": 256 },
         "title": { "type": "string" },
         "value": { "type": "string" },
         "enabled": { "type": "boolean" },
@@ -231,7 +260,7 @@
         "success": { "const": true },
         "data": {
           "type": "object",
-          "required": ["target_app", "topology_version", "node_count", "max_depth_reached", "truncated", "tree"],
+          "required": ["target_app", "ax_snapshot_id", "app_instance_ref", "expires_at_ms", "topology_version", "node_count", "max_depth_reached", "truncated", "tree"],
           "additionalProperties": false,
           "properties": {
             "target_app": {
@@ -244,11 +273,36 @@
                 "name": { "type": "string" }
               }
             },
+            "ax_snapshot_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+            "app_instance_ref": { "type": "string", "minLength": 1, "maxLength": 256 },
+            "expires_at_ms": { "type": "integer", "minimum": 1 },
             "topology_version": { "type": "string", "pattern": "^top-sha256-[0-9a-f]{64}$" },
             "node_count": { "type": "integer", "minimum": 0 },
             "max_depth_reached": { "type": "integer", "minimum": 0 },
             "truncated": { "type": "boolean" },
             "tree": { "$ref": "#/definitions/AxNode" }
+          }
+        }
+      }
+    },
+    "AxActionRequest": {
+      "type": "object",
+      "required": ["id", "method", "params"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "method": { "const": "ax_action" },
+        "params": {
+          "type": "object",
+          "required": ["ax_snapshot_id", "app_instance_ref", "element_ref", "topology_version", "action", "intent"],
+          "additionalProperties": false,
+          "properties": {
+            "ax_snapshot_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+            "app_instance_ref": { "type": "string", "minLength": 1, "maxLength": 256 },
+            "element_ref": { "type": "string", "minLength": 1, "maxLength": 256 },
+            "topology_version": { "type": "string", "pattern": "^top-sha256-[0-9a-f]{64}$" },
+            "action": { "const": "press" },
+            "intent": { "type": "string", "minLength": 1 }
           }
         }
       }
@@ -415,6 +469,45 @@
             "action_id": { "type": "string", "minLength": 1 },
             "status": { "enum": ["dispatched", "indeterminate"] },
             "capture_id": { "type": "string", "minLength": 1 },
+            "duration_ms": { "type": "number", "minimum": 0 }
+          }
+        }
+      }
+    },
+    "AxActionResponse": {
+      "type": "object",
+      "required": ["id", "success", "data"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "success": { "const": true },
+        "data": {
+          "type": "object",
+          "required": [
+            "action_id",
+            "status",
+            "strategy",
+            "action",
+            "ax_snapshot_id",
+            "app_instance_ref",
+            "element_ref",
+            "topology_version",
+            "requires_reinspection",
+            "global_hid_posts",
+            "duration_ms"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "action_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+            "status": { "const": "dispatched" },
+            "strategy": { "const": "ax_semantic" },
+            "action": { "const": "press" },
+            "ax_snapshot_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+            "app_instance_ref": { "type": "string", "minLength": 1, "maxLength": 256 },
+            "element_ref": { "type": "string", "minLength": 1, "maxLength": 256 },
+            "topology_version": { "type": "string", "pattern": "^top-sha256-[0-9a-f]{64}$" },
+            "requires_reinspection": { "const": true },
+            "global_hid_posts": { "const": 0 },
             "duration_ms": { "type": "number", "minimum": 0 }
           }
         }
