@@ -908,7 +908,7 @@ test('M9-LAUNCHSERVICES: Staged app launch uses LaunchServices open with exact f
   let spawnedChildPid = null;
   const expectedMockCommand = () => (
     spawnedChildPid && supervisor
-      ? `${process.execPath} ${mockNativeBin} ${paths.hostSocketPath} --agy-launch-generation ${supervisor.generation}`
+      ? `${process.execPath} ${mockNativeBin} ${paths.hostSocketPath} --agy-launch-generation ${supervisor.generation} --request-accessibility`
       : null
   );
   const ownedMockChildIsAlive = () => {
@@ -1036,7 +1036,8 @@ if (socketPath) {
 
   const startRes = await supervisor.start({
     openBinary: mockOpenBin,
-    readinessTimeoutMs: 3000
+    readinessTimeoutMs: 3000,
+    requestAccessibility: true
   });
 
   assert.equal(startRes.status, 'running');
@@ -1060,6 +1061,7 @@ if (socketPath) {
   assert.equal(loggedArgs[8], '--args', 'Flag 9 must begin native app arguments');
   assert.equal(loggedArgs[9], '--agy-launch-generation', 'Flag 10 must identify the launch-generation argument');
   assert.equal(loggedArgs[10], supervisor.generation, 'Flag 11 must bind the native process to this supervisor generation');
+  assert.equal(loggedArgs[11], '--request-accessibility', 'Flag 12 must opt into the native Accessibility prompt');
 
   process.kill(spawnedChildPid, 'SIGTERM');
   const shutdownStarted = Date.now();

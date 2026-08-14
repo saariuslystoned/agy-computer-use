@@ -1,6 +1,34 @@
 import Foundation
-import ApplicationServices
+@preconcurrency import ApplicationServices
 import AppKit
+import CryptoKit
+
+public enum AccessibilityTrustPromptPolicy {
+    public static let requestArgument = "--request-accessibility"
+
+    public static func shouldRequest(arguments: [String]) -> Bool {
+        arguments.filter { $0 == requestArgument }.count == 1
+    }
+
+    public static func requestIfEnabled(
+        arguments: [String],
+        requester: () -> Bool
+    ) -> Bool? {
+        guard shouldRequest(arguments: arguments) else {
+            return nil
+        }
+        return requester()
+    }
+
+    public static func requestFromSystemIfEnabled(arguments: [String]) -> Bool? {
+        requestIfEnabled(arguments: arguments) {
+            let options = [
+                kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true
+            ] as CFDictionary
+            return AXIsProcessTrustedWithOptions(options)
+        }
+    }
+}
 
 public struct AXRect: Codable, Equatable, Sendable {
     public let x: Double
@@ -36,8 +64,12 @@ public struct AXTargetAppDTO: Codable, Equatable, Sendable {
 
 public struct AXNodeDTO: Codable, Equatable, Sendable {
     public let id: String
+    public let elementRef: String?
+    public let supportedActions: [String]?
     public let role: String
     public let subrole: String?
+    public let identifier: String?
+    public let description: String?
     public let title: String?
     public let value: String?
     public let enabled: Bool?
@@ -45,10 +77,30 @@ public struct AXNodeDTO: Codable, Equatable, Sendable {
     public let bounds: AXRect
     public let children: [AXNodeDTO]?
 
-    public init(id: String, role: String, subrole: String? = nil, title: String? = nil, value: String? = nil, enabled: Bool? = nil, focused: Bool? = nil, bounds: AXRect, children: [AXNodeDTO]? = nil) {
+    enum CodingKeys: String, CodingKey {
+        case id
+        case elementRef = "element_ref"
+        case supportedActions = "supported_actions"
+        case role
+        case subrole
+        case identifier
+        case description
+        case title
+        case value
+        case enabled
+        case focused
+        case bounds
+        case children
+    }
+
+    public init(id: String, elementRef: String? = nil, supportedActions: [String]? = nil, role: String, subrole: String? = nil, identifier: String? = nil, description: String? = nil, title: String? = nil, value: String? = nil, enabled: Bool? = nil, focused: Bool? = nil, bounds: AXRect, children: [AXNodeDTO]? = nil) {
         self.id = id
+        self.elementRef = elementRef
+        self.supportedActions = supportedActions
         self.role = role
         self.subrole = subrole
+        self.identifier = identifier
+        self.description = description
         self.title = title
         self.value = value
         self.enabled = enabled
@@ -60,6 +112,9 @@ public struct AXNodeDTO: Codable, Equatable, Sendable {
 
 public struct AXTreeResultDTO: Codable, Equatable, Sendable {
     public let targetApp: AXTargetAppDTO
+    public let axSnapshotId: String
+    public let appInstanceRef: String
+    public let expiresAtMs: Int
     public let topologyVersion: String
     public let nodeCount: Int
     public let maxDepthReached: Int
@@ -68,6 +123,9 @@ public struct AXTreeResultDTO: Codable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case targetApp = "target_app"
+        case axSnapshotId = "ax_snapshot_id"
+        case appInstanceRef = "app_instance_ref"
+        case expiresAtMs = "expires_at_ms"
         case topologyVersion = "topology_version"
         case nodeCount = "node_count"
         case maxDepthReached = "max_depth_reached"
@@ -75,8 +133,11 @@ public struct AXTreeResultDTO: Codable, Equatable, Sendable {
         case tree
     }
 
-    public init(targetApp: AXTargetAppDTO, topologyVersion: String, nodeCount: Int, maxDepthReached: Int, truncated: Bool, tree: AXNodeDTO) {
+    public init(targetApp: AXTargetAppDTO, axSnapshotId: String, appInstanceRef: String, expiresAtMs: Int, topologyVersion: String, nodeCount: Int, maxDepthReached: Int, truncated: Bool, tree: AXNodeDTO) {
         self.targetApp = targetApp
+        self.axSnapshotId = axSnapshotId
+        self.appInstanceRef = appInstanceRef
+        self.expiresAtMs = expiresAtMs
         self.topologyVersion = topologyVersion
         self.nodeCount = nodeCount
         self.maxDepthReached = maxDepthReached
@@ -85,15 +146,94 @@ public struct AXTreeResultDTO: Codable, Equatable, Sendable {
     }
 }
 
+public struct AXSemanticActionResultDTO: Codable, Equatable, Sendable {
+    public let actionId: String
+    public let status: String
+    public let strategy: String
+    public let action: String
+    public let axSnapshotId: String
+    public let appInstanceRef: String
+    public let elementRef: String
+    public let topologyVersion: String
+    public let requiresReinspection: Bool
+    public let globalHIDPosts: Int
+    public let durationMs: Double
+
+    enum CodingKeys: String, CodingKey {
+        case actionId = "action_id"
+        case status
+        case strategy
+        case action
+        case axSnapshotId = "ax_snapshot_id"
+        case appInstanceRef = "app_instance_ref"
+        case elementRef = "element_ref"
+        case topologyVersion = "topology_version"
+        case requiresReinspection = "requires_reinspection"
+        case globalHIDPosts = "global_hid_posts"
+        case durationMs = "duration_ms"
+    }
+
+    public init(
+        actionId: String,
+        status: String,
+        strategy: String = "ax_semantic",
+        action: String,
+        axSnapshotId: String,
+        appInstanceRef: String,
+        elementRef: String,
+        topologyVersion: String,
+        requiresReinspection: Bool = true,
+        globalHIDPosts: Int = 0,
+        durationMs: Double
+    ) {
+        self.actionId = actionId
+        self.status = status
+        self.strategy = strategy
+        self.action = action
+        self.axSnapshotId = axSnapshotId
+        self.appInstanceRef = appInstanceRef
+        self.elementRef = elementRef
+        self.topologyVersion = topologyVersion
+        self.requiresReinspection = requiresReinspection
+        self.globalHIDPosts = globalHIDPosts
+        self.durationMs = durationMs
+    }
+}
+
 public protocol AXInspectionEngine: Sendable {
     var isAvailable: Bool { get }
     func isAccessibilityTrusted() -> Bool
-    func inspectTree(maxDepth: Int, appId: String?, topologyVersion: String) throws -> AXTreeResultDTO
+    func inspectTree(maxDepth: Int, appId: String, topologyVersion: String) throws -> AXTreeResultDTO
 }
 
-public extension AXInspectionEngine {
-    func inspectTree(maxDepth: Int = 10, appId: String? = nil) throws -> AXTreeResultDTO {
-        try inspectTree(maxDepth: maxDepth, appId: appId, topologyVersion: "")
+public protocol AXSemanticActionEngine: Sendable {
+    var isOperatorSafeActionAvailable: Bool { get }
+    var supportedOperatorSafeActions: [String] { get }
+    func performSemanticAction(
+        snapshotId: String,
+        appInstanceRef: String,
+        elementRef: String,
+        action: String,
+        value: String?,
+        topologyVersion: String
+    ) throws -> AXSemanticActionResultDTO
+}
+
+public struct DisabledAXSemanticActionEngine: AXSemanticActionEngine {
+    public init() {}
+
+    public var isOperatorSafeActionAvailable: Bool { false }
+    public var supportedOperatorSafeActions: [String] { [] }
+
+    public func performSemanticAction(
+        snapshotId: String,
+        appInstanceRef: String,
+        elementRef: String,
+        action: String,
+        value: String?,
+        topologyVersion: String
+    ) throws -> AXSemanticActionResultDTO {
+        throw ComputerUseError.noninterferingActionUnsupported(action: action)
     }
 }
 
@@ -106,13 +246,171 @@ public struct DisabledAXInspector: AXInspectionEngine {
         return false
     }
 
-    public func inspectTree(maxDepth: Int = 10, appId: String? = nil, topologyVersion: String = "") throws -> AXTreeResultDTO {
+    public func inspectTree(maxDepth: Int, appId: String, topologyVersion: String) throws -> AXTreeResultDTO {
         throw ComputerUseError.targetUnreachable(reason: "AX tree inspection is unavailable in this build phase")
     }
 }
 
-public struct DefaultAXInspector: AXInspectionEngine {
-    public init() {}
+package struct OperatorInputEpoch: Equatable, Sendable {
+    package let counters: [UInt32]
+
+    package init(counters: [UInt32]) {
+        self.counters = counters
+    }
+}
+
+package protocol OperatorInputEpochProviding: Sendable {
+    func currentEpoch() -> OperatorInputEpoch
+}
+
+package final class AXSemanticOperationGate: @unchecked Sendable {
+    private let lock = NSLock()
+
+    package init() {}
+
+    package func lockOperation() {
+        lock.lock()
+    }
+
+    package func unlockOperation() {
+        lock.unlock()
+    }
+}
+
+package struct AXRetainedAuthorityValidation: Equatable, Sendable {
+    package let windowIdentityMatches: Bool
+    package let ancestryMatches: Bool
+    package let elementFingerprintMatches: Bool
+    package let windowFingerprintMatches: Bool
+    package let operatorInputChanged: Bool
+
+    package init(
+        windowIdentityMatches: Bool,
+        ancestryMatches: Bool,
+        elementFingerprintMatches: Bool,
+        windowFingerprintMatches: Bool,
+        operatorInputChanged: Bool
+    ) {
+        self.windowIdentityMatches = windowIdentityMatches
+        self.ancestryMatches = ancestryMatches
+        self.elementFingerprintMatches = elementFingerprintMatches
+        self.windowFingerprintMatches = windowFingerprintMatches
+        self.operatorInputChanged = operatorInputChanged
+    }
+}
+
+package struct AXActionCapability: Equatable, Sendable {
+    package let role: String
+    package let subrole: String?
+    package let enabled: Bool
+    package let pressSupported: Bool
+    package let valueAttributeSettable: Bool
+
+    package init(
+        role: String,
+        subrole: String?,
+        enabled: Bool,
+        pressSupported: Bool,
+        valueAttributeSettable: Bool
+    ) {
+        self.role = role
+        self.subrole = subrole
+        self.enabled = enabled
+        self.pressSupported = pressSupported
+        self.valueAttributeSettable = valueAttributeSettable
+    }
+}
+
+package struct AXConsumedSnapshotTombstones: Sendable {
+    private let capacity: Int
+    private var ids = Set<String>()
+    private var order: [String] = []
+
+    package init(capacity: Int) {
+        precondition(capacity > 0)
+        self.capacity = capacity
+    }
+
+    package func contains(_ snapshotId: String) -> Bool {
+        ids.contains(snapshotId)
+    }
+
+    package mutating func remember(_ snapshotId: String) {
+        guard ids.insert(snapshotId).inserted else {
+            return
+        }
+        order.append(snapshotId)
+        if order.count > capacity {
+            ids.remove(order.removeFirst())
+        }
+    }
+}
+
+private struct SystemOperatorInputEpochProvider: OperatorInputEpochProviding {
+    private static let observedEventTypes: [CGEventType] = [
+        .leftMouseDown,
+        .leftMouseUp,
+        .rightMouseDown,
+        .rightMouseUp,
+        .mouseMoved,
+        .leftMouseDragged,
+        .rightMouseDragged,
+        .keyDown,
+        .keyUp,
+        .flagsChanged,
+        .scrollWheel,
+        .otherMouseDown,
+        .otherMouseUp,
+        .otherMouseDragged
+    ]
+
+    func currentEpoch() -> OperatorInputEpoch {
+        OperatorInputEpoch(counters: Self.observedEventTypes.map {
+            CGEventSource.counterForEventType(.combinedSessionState, eventType: $0)
+        })
+    }
+}
+
+private struct RetainedAXElement {
+    let element: AXUIElement
+    let window: AXUIElement
+    let elementFingerprint: String
+    let windowFingerprint: String
+    let ancestry: [AXUIElement]
+    let supportedActions: [String]
+}
+
+private struct RetainedAXSnapshot {
+    let snapshotId: String
+    let appInstanceRef: String
+    let pid: pid_t
+    let bundleId: String?
+    let launchTime: TimeInterval
+    let topologyVersion: String
+    let leaseDeadline: ContinuousClock.Instant
+    let operatorInputEpoch: OperatorInputEpoch
+    let elements: [String: RetainedAXElement]
+}
+
+public final class DefaultAXInspector: AXInspectionEngine, AXSemanticActionEngine, @unchecked Sendable {
+    private static let actionLeaseLifetimeMs = 30_000
+    package static let maxSetValueUTF8Bytes = 4_096
+    private static let maxRememberedConsumedSnapshots = 64
+
+    private let operationGate = AXSemanticOperationGate()
+    private let operatorInputEpochProvider: any OperatorInputEpochProviding
+    private var activeSnapshot: RetainedAXSnapshot?
+    private var consumedSnapshots = AXConsumedSnapshotTombstones(
+        capacity: maxRememberedConsumedSnapshots
+    )
+
+    public convenience init() {
+        self.init(operatorInputEpochProvider: SystemOperatorInputEpochProvider())
+    }
+
+    package init(operatorInputEpochProvider: any OperatorInputEpochProviding) {
+        self.operatorInputEpochProvider = operatorInputEpochProvider
+    }
 
     public var isAvailable: Bool {
         return AXIsProcessTrusted()
@@ -122,30 +420,47 @@ public struct DefaultAXInspector: AXInspectionEngine {
         return AXIsProcessTrusted()
     }
 
-    public func inspectTree(maxDepth requestedMaxDepth: Int = 10, appId: String? = nil, topologyVersion: String = "") throws -> AXTreeResultDTO {
+    public var isOperatorSafeActionAvailable: Bool {
+        isAccessibilityTrusted()
+    }
+
+    public var supportedOperatorSafeActions: [String] {
+        isOperatorSafeActionAvailable ? ["press", "set_value"] : []
+    }
+
+    public func inspectTree(maxDepth requestedMaxDepth: Int, appId: String, topologyVersion: String) throws -> AXTreeResultDTO {
+        operationGate.lockOperation()
+        defer { operationGate.unlockOperation() }
+
         guard isAccessibilityTrusted() else {
             throw ComputerUseError.permissionDenied(permission: "accessibility")
         }
 
+        activeSnapshot = nil
+
         let runningApps = NSWorkspace.shared.runningApplications
         var targetApp: NSRunningApplication? = nil
 
-        if let query = appId?.trimmingCharacters(in: .whitespacesAndNewlines), !query.isEmpty {
-            let matches = runningApps.filter { app in
-                app.bundleIdentifier == query ||
-                app.localizedName == query ||
-                String(app.processIdentifier) == query
-            }
-            if matches.isEmpty {
-                throw ComputerUseError.targetUnreachable(reason: "No running application matches identifier '\(query)'")
-            }
-            if matches.count > 1 {
-                throw ComputerUseError.targetUnreachable(reason: "Ambiguous application identifier '\(query)' matches \(matches.count) running processes")
-            }
-            targetApp = matches.first
-        } else {
-            targetApp = NSWorkspace.shared.menuBarOwningApplication ?? NSWorkspace.shared.frontmostApplication
+        let explicitAppSelector = appId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !explicitAppSelector.isEmpty else {
+            throw ComputerUseError.ipcError(reason: "app_id parameter is required and must be nonblank")
         }
+        guard !topologyVersion.isEmpty else {
+            throw ComputerUseError.staleTopology(current: "", received: topologyVersion)
+        }
+
+        let matches = runningApps.filter { app in
+            app.bundleIdentifier == explicitAppSelector ||
+            app.localizedName == explicitAppSelector ||
+            String(app.processIdentifier) == explicitAppSelector
+        }
+        if matches.isEmpty {
+            throw ComputerUseError.targetUnreachable(reason: "No running application matches identifier '\(explicitAppSelector)'")
+        }
+        if matches.count > 1 {
+            throw ComputerUseError.targetUnreachable(reason: "Ambiguous application identifier '\(explicitAppSelector)' matches \(matches.count) running processes")
+        }
+        targetApp = matches.first
 
         guard let app = targetApp, !app.isTerminated else {
             throw ComputerUseError.targetUnreachable(reason: "Target application is unavailable or terminated")
@@ -159,6 +474,17 @@ public struct DefaultAXInspector: AXInspectionEngine {
 
         let maxDepth = min(max(1, requestedMaxDepth), BoundedAXTraverser.defaultMaxDepth)
         let maxNodes = BoundedAXTraverser.defaultMaxNodes
+        guard let launchTime = app.launchDate?.timeIntervalSince1970,
+              launchTime.isFinite,
+              launchTime > 0 else {
+            throw ComputerUseError.staleOperation(reason: "Target application process birth identity is unavailable")
+        }
+        let operatorInputEpochBefore = operatorInputEpochProvider.currentEpoch()
+        let snapshotId = "ax-snap-\(UUID().uuidString.lowercased())"
+        let appInstanceRef = "app-inst-\(UUID().uuidString.lowercased())"
+        let expiresAtMs = Int(Date().timeIntervalSince1970 * 1_000) + Self.actionLeaseLifetimeMs
+        let leaseDeadline = ContinuousClock().now + .milliseconds(Int64(Self.actionLeaseLifetimeMs))
+        var retainedElements: [String: RetainedAXElement] = [:]
 
         var nodeCount = 0
         var maxDepthReached = 0
@@ -178,7 +504,8 @@ public struct DefaultAXInspector: AXInspectionEngine {
             isTruncated: &isTruncated,
             visited: &visited,
             deadline: deadline,
-            didTimeout: &didTimeout
+            didTimeout: &didTimeout,
+            retainedElements: &retainedElements
         ), !didTimeout else {
             if didTimeout {
                 throw ComputerUseError.targetUnreachable(reason: "AX tree inspection timed out after 5.0 seconds")
@@ -186,14 +513,255 @@ public struct DefaultAXInspector: AXInspectionEngine {
             throw ComputerUseError.targetUnreachable(reason: "Failed to extract root AX element for application '\(app.localizedName ?? "\(pid)")'")
         }
 
+        let operatorInputEpochAfter = operatorInputEpochProvider.currentEpoch()
+        guard !Self.operatorInputChanged(
+            from: operatorInputEpochBefore,
+            to: operatorInputEpochAfter
+        ) else {
+            throw ComputerUseError.userIntervened(
+                reason: "Operator or system input changed during AX inspection; no action lease was issued"
+            )
+        }
+
+        activeSnapshot = RetainedAXSnapshot(
+            snapshotId: snapshotId,
+            appInstanceRef: appInstanceRef,
+            pid: pid,
+            bundleId: app.bundleIdentifier,
+            launchTime: launchTime,
+            topologyVersion: topologyVersion,
+            leaseDeadline: leaseDeadline,
+            operatorInputEpoch: operatorInputEpochAfter,
+            elements: retainedElements
+        )
+
         return AXTreeResultDTO(
             targetApp: appDTO,
+            axSnapshotId: snapshotId,
+            appInstanceRef: appInstanceRef,
+            expiresAtMs: expiresAtMs,
             topologyVersion: topologyVersion,
             nodeCount: nodeCount,
             maxDepthReached: maxDepthReached,
             truncated: isTruncated,
             tree: rootNode
         )
+    }
+
+    public func performSemanticAction(
+        snapshotId: String,
+        appInstanceRef: String,
+        elementRef: String,
+        action: String,
+        value: String?,
+        topologyVersion: String
+    ) throws -> AXSemanticActionResultDTO {
+        operationGate.lockOperation()
+        defer { operationGate.unlockOperation() }
+
+        guard isAccessibilityTrusted() else {
+            throw ComputerUseError.permissionDenied(permission: "accessibility")
+        }
+
+        let normalizedAction = action.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard normalizedAction == "press" || normalizedAction == "set_value" else {
+            throw ComputerUseError.noninterferingActionUnsupported(action: normalizedAction)
+        }
+        let setValue: String?
+        if normalizedAction == "set_value" {
+            setValue = try Self.validateSetValueInput(value)
+        } else {
+            guard value == nil else {
+                throw ComputerUseError.ipcError(
+                    reason: "value parameter is valid only when action is set_value"
+                )
+            }
+            setValue = nil
+        }
+
+        let retained: RetainedAXSnapshot
+        let retainedElement: RetainedAXElement
+        guard let current = activeSnapshot else {
+            if consumedSnapshots.contains(snapshotId) {
+                throw ComputerUseError.axActionReplayed
+            }
+            throw ComputerUseError.staleAXSnapshot(current: "", received: snapshotId)
+        }
+        guard current.snapshotId == snapshotId else {
+            if consumedSnapshots.contains(snapshotId) {
+                throw ComputerUseError.axActionReplayed
+            }
+            throw ComputerUseError.staleAXSnapshot(current: current.snapshotId, received: snapshotId)
+        }
+        guard current.appInstanceRef == appInstanceRef else {
+            throw ComputerUseError.staleOperation(reason: "App instance reference does not match the retained AX snapshot")
+        }
+        guard current.topologyVersion == topologyVersion else {
+            throw ComputerUseError.staleTopology(current: current.topologyVersion, received: topologyVersion)
+        }
+        guard Self.isActionLeaseUnexpired(
+            now: ContinuousClock().now,
+            deadline: current.leaseDeadline
+        ) else {
+            activeSnapshot = nil
+            throw ComputerUseError.staleAXSnapshot(current: "", received: snapshotId)
+        }
+        guard let element = current.elements[elementRef] else {
+            throw ComputerUseError.targetUnreachable(reason: "Unknown or non-actionable AX element reference")
+        }
+
+        retained = current
+        retainedElement = element
+        consumeSnapshot(current)
+
+        guard !Self.operatorInputChanged(
+            from: retained.operatorInputEpoch,
+            to: operatorInputEpochProvider.currentEpoch()
+        ) else {
+            throw ComputerUseError.userIntervened(
+                reason: "Operator or system input changed after AX inspection; the one-shot lease was consumed"
+            )
+        }
+
+        guard let runningApp = NSRunningApplication(processIdentifier: retained.pid),
+              !runningApp.isTerminated else {
+            throw ComputerUseError.staleOperation(reason: "Target application process is no longer running")
+        }
+        guard runningApp.bundleIdentifier == retained.bundleId else {
+            throw ComputerUseError.staleOperation(reason: "Target application bundle identity changed")
+        }
+        guard Self.matchesProcessBirth(
+            expectedLaunchTime: retained.launchTime,
+            currentLaunchTime: runningApp.launchDate?.timeIntervalSince1970
+        ) else {
+            throw ComputerUseError.staleOperation(reason: "Target application process birth identity changed")
+        }
+
+        var elementPID: pid_t = 0
+        guard AXUIElementGetPid(retainedElement.element, &elementPID) == .success,
+              elementPID == retained.pid else {
+            throw ComputerUseError.staleOperation(reason: "Retained AX element process identity changed")
+        }
+
+        var windowPID: pid_t = 0
+        guard AXUIElementGetPid(retainedElement.window, &windowPID) == .success,
+              windowPID == retained.pid else {
+            throw ComputerUseError.staleOperation(reason: "Retained AX window process identity changed")
+        }
+
+        if normalizedAction == "press" {
+            var enabledValue: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(
+                retainedElement.element,
+                kAXEnabledAttribute as CFString,
+                &enabledValue
+            ) == .success,
+                  let enabled = enabledValue as? Bool else {
+                throw ComputerUseError.staleOperation(
+                    reason: "Retained AX element enabled state is unavailable"
+                )
+            }
+            guard enabled else {
+                throw ComputerUseError.targetUnreachable(reason: "Retained AX element is disabled")
+            }
+            guard Self.pressIsSupported(for: retainedElement.element) else {
+                throw ComputerUseError.noninterferingActionUnsupported(action: normalizedAction)
+            }
+        }
+        let validateCurrentAuthority = {
+            let currentWindow = Self.windowElement(for: retainedElement.element)
+            let currentAncestry = Self.ancestryPath(
+                from: retainedElement.element,
+                to: retainedElement.window
+            )
+            try Self.validateRetainedAuthority(AXRetainedAuthorityValidation(
+                windowIdentityMatches: currentWindow.map {
+                    CFEqual($0, retainedElement.window)
+                } ?? false,
+                ancestryMatches: currentAncestry.map {
+                    Self.ancestryMatches($0, retainedElement.ancestry)
+                } ?? false,
+                elementFingerprintMatches:
+                    Self.semanticFingerprint(for: retainedElement.element) == retainedElement.elementFingerprint,
+                windowFingerprintMatches:
+                    Self.semanticFingerprint(for: retainedElement.window) == retainedElement.windowFingerprint,
+                operatorInputChanged: Self.operatorInputChanged(
+                    from: retained.operatorInputEpoch,
+                    to: self.operatorInputEpochProvider.currentEpoch()
+                )
+            ))
+        }
+
+        let startedAt = ContinuousClock().now
+        let axResult: AXError
+        if let setValue {
+            axResult = try Self.performRevalidatedAXSetValue(
+                value: setValue,
+                retainedSupportedActions: retainedElement.supportedActions,
+                observedEpoch: retained.operatorInputEpoch,
+                epochProvider: operatorInputEpochProvider,
+                readLiveCapability: {
+                    try Self.currentSetValueCapability(for: retainedElement.element)
+                },
+                validateAuthority: validateCurrentAuthority
+            ) { transientValue in
+                AXUIElementSetAttributeValue(
+                    retainedElement.element,
+                    kAXValueAttribute as CFString,
+                    transientValue
+                )
+            }
+        } else {
+            guard retainedElement.supportedActions.contains(normalizedAction) else {
+                throw ComputerUseError.noninterferingActionUnsupported(action: normalizedAction)
+            }
+            try validateCurrentAuthority()
+            axResult = try Self.performAXActionCheckingOperatorInput(
+                observedEpoch: retained.operatorInputEpoch,
+                epochProvider: operatorInputEpochProvider
+            ) {
+                AXUIElementPerformAction(
+                    retainedElement.element,
+                    kAXPressAction as CFString
+                )
+            }
+        }
+        let duration = ContinuousClock().now - startedAt
+        let durationComponents = duration.components
+        let durationMs =
+            Double(durationComponents.seconds) * 1_000 +
+            Double(durationComponents.attoseconds) / 1_000_000_000_000_000
+
+        switch axResult {
+        case .success:
+            return AXSemanticActionResultDTO(
+                actionId: "ax-act-\(UUID().uuidString.lowercased())",
+                status: "dispatched",
+                action: normalizedAction,
+                axSnapshotId: snapshotId,
+                appInstanceRef: appInstanceRef,
+                elementRef: elementRef,
+                topologyVersion: topologyVersion,
+                durationMs: max(0, durationMs)
+            )
+        case .actionUnsupported, .attributeUnsupported, .notImplemented:
+            throw ComputerUseError.noninterferingActionUnsupported(action: normalizedAction)
+        case .cannotComplete:
+            throw ComputerUseError.axOutcomeUnknown(
+                reason: "AX \(normalizedAction) could not complete before the target state was re-inspected"
+            )
+        case .invalidUIElement:
+            throw ComputerUseError.staleOperation(reason: "Retained AX element is no longer valid")
+        default:
+            throw ComputerUseError.targetUnreachable(
+                reason: "AX \(normalizedAction) failed with AX error \(axResult.rawValue)"
+            )
+        }
+    }
+
+    private func consumeSnapshot(_ snapshot: RetainedAXSnapshot) {
+        activeSnapshot = nil
+        consumedSnapshots.remember(snapshot.snapshotId)
     }
 
     package static func boundsRect(position: CGPoint, size: CGSize) -> AXRect {
@@ -203,6 +771,502 @@ public struct DefaultAXInspector: AXInspectionEngine {
             width: max(0.0, Double(size.width)),
             height: max(0.0, Double(size.height))
         )
+    }
+
+    package static func operatorInputChanged(
+        from observed: OperatorInputEpoch,
+        to current: OperatorInputEpoch
+    ) -> Bool {
+        observed != current
+    }
+
+    package static func validateRetainedAuthority(
+        _ validation: AXRetainedAuthorityValidation
+    ) throws {
+        guard validation.windowIdentityMatches else {
+            throw ComputerUseError.staleOperation(
+                reason: "Retained AX element window identity changed"
+            )
+        }
+        guard validation.ancestryMatches else {
+            throw ComputerUseError.staleOperation(
+                reason: "Retained AX element ancestry changed"
+            )
+        }
+        guard validation.elementFingerprintMatches else {
+            throw ComputerUseError.staleOperation(
+                reason: "Retained AX element semantic identity changed"
+            )
+        }
+        guard validation.windowFingerprintMatches else {
+            throw ComputerUseError.staleOperation(
+                reason: "Retained AX window semantic identity changed"
+            )
+        }
+        guard !validation.operatorInputChanged else {
+            throw ComputerUseError.userIntervened(
+                reason: "Operator or system input changed while the AX action was being validated; the one-shot lease was consumed"
+            )
+        }
+    }
+
+    package static func performAXActionCheckingOperatorInput(
+        observedEpoch: OperatorInputEpoch,
+        epochProvider: any OperatorInputEpochProviding,
+        perform: () -> AXError
+    ) throws -> AXError {
+        let result = perform()
+        guard !operatorInputChanged(
+            from: observedEpoch,
+            to: epochProvider.currentEpoch()
+        ) else {
+            throw ComputerUseError.userIntervened(
+                reason: "Operator or system input changed during AX dispatch; the action outcome is unknown and requires fresh computer_use_ax_tree inspection"
+            )
+        }
+        return result
+    }
+
+    package static func performAXSetValueCheckingOperatorInput(
+        value: String,
+        observedEpoch: OperatorInputEpoch,
+        epochProvider: any OperatorInputEpochProviding,
+        setValue: (CFTypeRef) -> AXError
+    ) throws -> AXError {
+        let result = setValue(value as CFString)
+        guard !operatorInputChanged(
+            from: observedEpoch,
+            to: epochProvider.currentEpoch()
+        ) else {
+            throw ComputerUseError.axOutcomeUnknown(
+                reason: "Operator or system input changed during AX set_value dispatch"
+            )
+        }
+        return result
+    }
+
+    package static func performRevalidatedAXSetValue(
+        value: String,
+        retainedSupportedActions: [String],
+        observedEpoch: OperatorInputEpoch,
+        epochProvider: any OperatorInputEpochProviding,
+        readLiveCapability: () throws -> AXActionCapability,
+        validateAuthority: () throws -> Void,
+        setValue: (CFTypeRef) -> AXError
+    ) throws -> AXError {
+        guard retainedSupportedActions.contains("set_value") else {
+            throw ComputerUseError.noninterferingActionUnsupported(
+                action: "set_value"
+            )
+        }
+        let liveCapability = try readLiveCapability()
+        try validateSetValueCapability(liveCapability)
+        try validateAuthority()
+        let result = try performAXSetValueCheckingOperatorInput(
+            value: value,
+            observedEpoch: observedEpoch,
+            epochProvider: epochProvider,
+            setValue: setValue
+        )
+        guard result == .success else {
+            throw ComputerUseError.axOutcomeUnknown(
+                reason: "AX set_value returned a non-success result after dispatch; obtain a fresh computer_use_ax_tree inspection"
+            )
+        }
+        return result
+    }
+
+    package static func semanticFingerprint(components: [String]) -> String {
+        let canonical = components.map { component in
+            "\(component.utf8.count):\(component)"
+        }.joined()
+        return SHA256.hash(data: Data(canonical.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+
+    package static func isActionLeaseUnexpired(
+        now: ContinuousClock.Instant,
+        deadline: ContinuousClock.Instant
+    ) -> Bool {
+        now < deadline
+    }
+
+    package static func matchesProcessBirth(
+        expectedLaunchTime: TimeInterval,
+        currentLaunchTime: TimeInterval?
+    ) -> Bool {
+        guard expectedLaunchTime.isFinite,
+              let currentLaunchTime,
+              currentLaunchTime.isFinite else {
+            return false
+        }
+        return abs(expectedLaunchTime - currentLaunchTime) <= 0.001
+    }
+
+    package static func validateSetValueInput(_ value: String?) throws -> String {
+        guard let value else {
+            throw ComputerUseError.ipcError(
+                reason: "value parameter is required when action is set_value"
+            )
+        }
+        if let validationError = setValueInputValidationError(value) {
+            throw validationError
+        }
+        return value
+    }
+
+    package static func setValueInputValidationError(
+        _ value: String?
+    ) -> ComputerUseError? {
+        guard let value else {
+            return .ipcError(
+                reason: "value parameter is required when action is set_value"
+            )
+        }
+        guard value.utf8.count <= maxSetValueUTF8Bytes else {
+            return .ipcError(
+                reason: "value UTF-8 payload exceeds the 4096-byte operator-safe limit"
+            )
+        }
+        return nil
+    }
+
+    package static func supportedActions(
+        for capability: AXActionCapability
+    ) -> [String] {
+        guard capability.enabled else {
+            return []
+        }
+
+        var actions: [String] = []
+        if capability.pressSupported {
+            actions.append("press")
+        }
+        if isTextCapableRole(capability.role),
+           !isSecureTextSubrole(capability.subrole),
+           capability.valueAttributeSettable {
+            actions.append("set_value")
+        }
+        return actions
+    }
+
+    package static func validateSetValueCapability(
+        _ capability: AXActionCapability
+    ) throws {
+        guard !isSecureTextSubrole(capability.subrole) else {
+            throw ComputerUseError.secureAXValueUnsupported
+        }
+        guard capability.enabled else {
+            throw ComputerUseError.axElementDisabled(action: "set_value")
+        }
+        guard isTextCapableRole(capability.role) else {
+            throw ComputerUseError.noninterferingActionUnsupported(
+                action: "set_value"
+            )
+        }
+        guard capability.valueAttributeSettable else {
+            throw ComputerUseError.axValueNotSettable
+        }
+    }
+
+    private static func isTextCapableRole(_ role: String) -> Bool {
+        role == (kAXTextFieldRole as String) ||
+            role == (kAXTextAreaRole as String)
+    }
+
+    private static func isSecureTextSubrole(_ subrole: String?) -> Bool {
+        subrole == "AXSecureTextField" ||
+            subrole == (kAXSecureTextFieldSubrole as String)
+    }
+
+    private static func pressIsSupported(for element: AXUIElement) -> Bool {
+        var actionNames: CFArray?
+        guard AXUIElementCopyActionNames(element, &actionNames) == .success,
+              let names = actionNames as? [String],
+              names.contains(kAXPressAction as String) else {
+            return false
+        }
+        return true
+    }
+
+    private static func safeActions(
+        for element: AXUIElement,
+        role: String,
+        subrole: String?,
+        enabled: Bool
+    ) -> [String] {
+        var valueAttributeSettable = false
+        if enabled,
+           isTextCapableRole(role),
+           !isSecureTextSubrole(subrole) {
+            var isSettable = DarwinBoolean(false)
+            if AXUIElementIsAttributeSettable(
+                element,
+                kAXValueAttribute as CFString,
+                &isSettable
+            ) == .success {
+                valueAttributeSettable = isSettable.boolValue
+            }
+        }
+
+        return supportedActions(for: AXActionCapability(
+            role: role,
+            subrole: subrole,
+            enabled: enabled,
+            pressSupported: pressIsSupported(for: element),
+            valueAttributeSettable: valueAttributeSettable
+        ))
+    }
+
+    private static func currentSetValueCapability(
+        for element: AXUIElement
+    ) throws -> AXActionCapability {
+        try currentSetValueCapability(
+            copyAttributeValue: { attribute in
+                var value: CFTypeRef?
+                let result = AXUIElementCopyAttributeValue(
+                    element,
+                    attribute,
+                    &value
+                )
+                return (result, value)
+            },
+            isAttributeSettable: { attribute in
+                var isSettable = DarwinBoolean(false)
+                let result = AXUIElementIsAttributeSettable(
+                    element,
+                    attribute,
+                    &isSettable
+                )
+                return (result, isSettable.boolValue)
+            }
+        )
+    }
+
+    package static func currentSetValueCapability(
+        copyAttributeValue: (CFString) -> (AXError, CFTypeRef?),
+        isAttributeSettable: (CFString) -> (AXError, Bool)
+    ) throws -> AXActionCapability {
+        let (enabledResult, enabledValue) = copyAttributeValue(
+            kAXEnabledAttribute as CFString
+        )
+        guard enabledResult == .success,
+              let enabled = enabledValue as? Bool else {
+            throw ComputerUseError.staleOperation(
+                reason: "Retained AX element enabled state is unavailable"
+            )
+        }
+
+        let (roleResult, roleValue) = copyAttributeValue(
+            kAXRoleAttribute as CFString
+        )
+        guard roleResult == .success,
+              let role = roleValue as? String else {
+            throw ComputerUseError.staleOperation(
+                reason: "Retained AX element role is unavailable"
+            )
+        }
+
+        let (subroleResult, subroleValue) = copyAttributeValue(
+            kAXSubroleAttribute as CFString
+        )
+        let subrole: String?
+        switch subroleResult {
+        case .success:
+            guard let rawSubrole = subroleValue as? String else {
+                throw ComputerUseError.staleOperation(
+                    reason: "Retained AX element subrole is invalid"
+                )
+            }
+            subrole = rawSubrole
+        case .noValue, .attributeUnsupported, .notImplemented:
+            subrole = nil
+        default:
+            throw ComputerUseError.staleOperation(
+                reason: "Retained AX element subrole is unavailable"
+            )
+        }
+
+        if isSecureTextSubrole(subrole) {
+            return AXActionCapability(
+                role: role,
+                subrole: subrole,
+                enabled: enabled,
+                pressSupported: false,
+                valueAttributeSettable: false
+            )
+        }
+
+        let (settableResult, isSettable) = isAttributeSettable(
+            kAXValueAttribute as CFString
+        )
+        let valueAttributeSettable: Bool
+        switch settableResult {
+        case .success:
+            valueAttributeSettable = isSettable
+        case .attributeUnsupported, .notImplemented, .noValue:
+            valueAttributeSettable = false
+        default:
+            throw ComputerUseError.staleOperation(
+                reason: "Retained AX element value-settable state is unavailable"
+            )
+        }
+
+        return AXActionCapability(
+            role: role,
+            subrole: subrole,
+            enabled: enabled,
+            pressSupported: false,
+            valueAttributeSettable: valueAttributeSettable
+        )
+    }
+
+    private static func semanticFingerprint(for element: AXUIElement) -> String? {
+        let attributes: [(String, CFString)] = [
+            ("role", kAXRoleAttribute as CFString),
+            ("subrole", kAXSubroleAttribute as CFString),
+            ("identifier", kAXIdentifierAttribute as CFString),
+            ("title", kAXTitleAttribute as CFString),
+            ("description", kAXDescriptionAttribute as CFString),
+            ("value", kAXValueAttribute as CFString),
+            ("enabled", kAXEnabledAttribute as CFString),
+            ("focused", kAXFocusedAttribute as CFString),
+            ("position", kAXPositionAttribute as CFString),
+            ("size", kAXSizeAttribute as CFString)
+        ]
+
+        var components: [String] = []
+        components.reserveCapacity(attributes.count + 1)
+        for (name, attribute) in attributes {
+            guard let value = stableAttributeComponent(
+                for: element,
+                attribute: attribute
+            ) else {
+                return nil
+            }
+            components.append("\(name)=\(value)")
+        }
+
+        var actionNames: CFArray?
+        guard AXUIElementCopyActionNames(element, &actionNames) == .success,
+              let names = actionNames as? [String],
+              names.count <= 64 else {
+            return nil
+        }
+        let sortedNames = names.sorted()
+        guard sortedNames.allSatisfy({ $0.utf8.count <= 256 }) else {
+            return nil
+        }
+        components.append("actions=\(semanticFingerprint(components: sortedNames))")
+        return semanticFingerprint(components: components)
+    }
+
+    private static func stableAttributeComponent(
+        for element: AXUIElement,
+        attribute: CFString
+    ) -> String? {
+        var rawValue: CFTypeRef?
+        let result = AXUIElementCopyAttributeValue(element, attribute, &rawValue)
+        if result == .noValue || result == .attributeUnsupported || result == .notImplemented {
+            return "missing"
+        }
+        guard result == .success, let rawValue else {
+            return nil
+        }
+
+        let typeId = CFGetTypeID(rawValue)
+        if typeId == CFStringGetTypeID(), let value = rawValue as? String {
+            guard value.utf8.count <= 4_096 else {
+                return nil
+            }
+            return "string:\(semanticFingerprint(components: [value]))"
+        }
+        if typeId == CFBooleanGetTypeID() {
+            return (rawValue as! CFBoolean) == kCFBooleanTrue ? "bool:true" : "bool:false"
+        }
+        if typeId == CFNumberGetTypeID(), let value = rawValue as? NSNumber {
+            return "number:\(value.stringValue)"
+        }
+        if typeId == AXValueGetTypeID() {
+            let axValue = (rawValue as CFTypeRef) as! AXValue
+            switch AXValueGetType(axValue) {
+            case .cgPoint:
+                var point = CGPoint.zero
+                guard AXValueGetValue(axValue, .cgPoint, &point) else {
+                    return nil
+                }
+                return "point:\(Double(point.x).bitPattern):\(Double(point.y).bitPattern)"
+            case .cgSize:
+                var size = CGSize.zero
+                guard AXValueGetValue(axValue, .cgSize, &size) else {
+                    return nil
+                }
+                return "size:\(Double(size.width).bitPattern):\(Double(size.height).bitPattern)"
+            default:
+                return nil
+            }
+        }
+        return nil
+    }
+
+    private static func windowElement(for element: AXUIElement) -> AXUIElement? {
+        var windowValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            element,
+            kAXWindowAttribute as CFString,
+            &windowValue
+        ) == .success,
+              let windowValue,
+              CFGetTypeID(windowValue) == AXUIElementGetTypeID() else {
+            return nil
+        }
+        return (windowValue as! AXUIElement)
+    }
+
+    private static func ancestryPath(
+        from element: AXUIElement,
+        to window: AXUIElement
+    ) -> [AXUIElement]? {
+        var path: [AXUIElement] = []
+        var current = element
+        var visited = Set<AXUIElement>()
+        visited.insert(element)
+
+        for _ in 0..<64 {
+            if CFEqual(current, window) {
+                return path
+            }
+
+            var parentValue: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(
+                current,
+                kAXParentAttribute as CFString,
+                &parentValue
+            ) == .success,
+                  let parentValue,
+                  CFGetTypeID(parentValue) == AXUIElementGetTypeID() else {
+                return nil
+            }
+            let parent = (parentValue as! AXUIElement)
+            guard !visited.contains(parent) else {
+                return nil
+            }
+            visited.insert(parent)
+            path.append(parent)
+            current = parent
+        }
+        return nil
+    }
+
+    private static func ancestryMatches(
+        _ current: [AXUIElement],
+        _ retained: [AXUIElement]
+    ) -> Bool {
+        guard current.count == retained.count else {
+            return false
+        }
+        return zip(current, retained).allSatisfy { CFEqual($0.0, $0.1) }
     }
 
     private static func buildNode(
@@ -215,7 +1279,8 @@ public struct DefaultAXInspector: AXInspectionEngine {
         isTruncated: inout Bool,
         visited: inout Set<AXUIElement>,
         deadline: ContinuousClock.Instant,
-        didTimeout: inout Bool
+        didTimeout: inout Bool,
+        retainedElements: inout [String: RetainedAXElement]
     ) -> AXNodeDTO? {
         if ContinuousClock().now >= deadline {
             didTimeout = true
@@ -238,6 +1303,8 @@ public struct DefaultAXInspector: AXInspectionEngine {
 
         var roleStr = "AXUnknown"
         var subroleStr: String? = nil
+        var identifierStr: String? = nil
+        var descriptionStr: String? = nil
         var titleStr: String? = nil
         var valueStr: String? = nil
         var enabledVal: Bool? = nil
@@ -264,6 +1331,36 @@ public struct DefaultAXInspector: AXInspectionEngine {
         }
         if subroleRes == .success, let sr = subroleValue as? String {
             subroleStr = sr
+        }
+
+        // Identifier
+        var identifierValue: CFTypeRef?
+        let identifierRes = AXUIElementCopyAttributeValue(
+            axElement,
+            kAXIdentifierAttribute as CFString,
+            &identifierValue
+        )
+        if identifierRes == .cannotComplete {
+            didTimeout = true
+            return nil
+        }
+        if identifierRes == .success, let identifier = identifierValue as? String {
+            identifierStr = identifier
+        }
+
+        // Description
+        var descriptionValue: CFTypeRef?
+        let descriptionRes = AXUIElementCopyAttributeValue(
+            axElement,
+            kAXDescriptionAttribute as CFString,
+            &descriptionValue
+        )
+        if descriptionRes == .cannotComplete {
+            didTimeout = true
+            return nil
+        }
+        if descriptionRes == .success, let description = descriptionValue as? String {
+            descriptionStr = description
         }
 
         // Title
@@ -341,9 +1438,11 @@ public struct DefaultAXInspector: AXInspectionEngine {
         boundsRect = Self.boundsRect(position: pt, size: sz)
 
         // Redaction & Truncation of Strings (capped strictly at <= 256 chars including ellipsis)
-        let isSecure = (subroleStr == "AXSecureTextField" || subroleStr == (kAXSecureTextFieldSubrole as String))
+        let isSecure = Self.isSecureTextSubrole(subroleStr)
         if isSecure {
             valueStr = BoundedAXTraverser.redactedPlaceholder
+            identifierStr = identifierStr.map { _ in BoundedAXTraverser.redactedPlaceholder }
+            descriptionStr = descriptionStr.map { _ in BoundedAXTraverser.redactedPlaceholder }
         } else if let v = valueStr {
             if v.count > BoundedAXTraverser.maxStringLength {
                 valueStr = String(v.prefix(BoundedAXTraverser.maxStringLength - 3)) + "..."
@@ -353,6 +1452,20 @@ public struct DefaultAXInspector: AXInspectionEngine {
 
         if let t = titleStr, t.count > BoundedAXTraverser.maxStringLength {
             titleStr = String(t.prefix(BoundedAXTraverser.maxStringLength - 3)) + "..."
+            isTruncated = true
+        }
+        if let identifier = identifierStr,
+           identifier.count > BoundedAXTraverser.maxStringLength {
+            identifierStr = String(
+                identifier.prefix(BoundedAXTraverser.maxStringLength - 3)
+            ) + "..."
+            isTruncated = true
+        }
+        if let description = descriptionStr,
+           description.count > BoundedAXTraverser.maxStringLength {
+            descriptionStr = String(
+                description.prefix(BoundedAXTraverser.maxStringLength - 3)
+            ) + "..."
             isTruncated = true
         }
 
@@ -385,7 +1498,8 @@ public struct DefaultAXInspector: AXInspectionEngine {
                         isTruncated: &isTruncated,
                         visited: &visited,
                         deadline: deadline,
-                        didTimeout: &didTimeout
+                        didTimeout: &didTimeout,
+                        retainedElements: &retainedElements
                     ) {
                         childrenNodes.append(childDTO)
                     } else if didTimeout {
@@ -402,11 +1516,44 @@ public struct DefaultAXInspector: AXInspectionEngine {
         }
 
         let elementId = "ax-\(roleStr)-\(currentNodeIndex)"
+        var elementRef: String?
+        var supportedActions: [String]?
+
+        if !isSecure,
+           enabledVal == true,
+           let window = Self.windowElement(for: axElement),
+           let elementFingerprint = Self.semanticFingerprint(for: axElement),
+           let windowFingerprint = Self.semanticFingerprint(for: window),
+           let ancestry = Self.ancestryPath(from: axElement, to: window) {
+            let actions = Self.safeActions(
+                for: axElement,
+                role: roleStr,
+                subrole: subroleStr,
+                enabled: enabledVal == true
+            )
+            if !actions.isEmpty {
+                let ref = "ax-el-\(UUID().uuidString.lowercased())"
+                retainedElements[ref] = RetainedAXElement(
+                    element: axElement,
+                    window: window,
+                    elementFingerprint: elementFingerprint,
+                    windowFingerprint: windowFingerprint,
+                    ancestry: ancestry,
+                    supportedActions: actions
+                )
+                elementRef = ref
+                supportedActions = actions
+            }
+        }
 
         return AXNodeDTO(
             id: elementId,
+            elementRef: elementRef,
+            supportedActions: supportedActions,
             role: roleStr,
             subrole: subroleStr,
+            identifier: identifierStr,
+            description: descriptionStr,
             title: titleStr,
             value: valueStr,
             enabled: enabledVal,
@@ -443,6 +1590,8 @@ public enum BoundedAXTraverser {
 
         let isSecureRole = (node.subrole == "AXSecureTextField" || node.subrole == (kAXSecureTextFieldSubrole as String))
         let cleanValue = sanitizeText(node.value, isSecure: isSecureRole)
+        let cleanIdentifier = sanitizeText(node.identifier, isSecure: isSecureRole)
+        let cleanDescription = sanitizeText(node.description, isSecure: isSecureRole)
         let cleanTitle = sanitizeText(node.title, isSecure: false)
 
         var sanitizedChildren: [AXNodeDTO] = []
@@ -456,8 +1605,12 @@ public enum BoundedAXTraverser {
 
         return AXNodeDTO(
             id: node.id,
+            elementRef: node.elementRef,
+            supportedActions: node.supportedActions,
             role: node.role,
             subrole: node.subrole,
+            identifier: cleanIdentifier,
+            description: cleanDescription,
             title: cleanTitle,
             value: cleanValue,
             enabled: node.enabled,

@@ -14,6 +14,8 @@ import {
   ObserveInputSchema,
   AXTreeInputSchema,
   AXTreeDataSchema,
+  AXActionInputSchema,
+  AXActionResultDataSchema,
   ClickInputSchema,
   MoveInputSchema,
   ScrollInputSchema,
@@ -261,6 +263,19 @@ function formatToolResponse(ipcResp: any, toolName: string) {
     if (rawData.ax_tree_inspection_available === undefined && typeof rawData.accessibility_available === "boolean") {
       rawData.ax_tree_inspection_available = rawData.accessibility_available;
     }
+    if (rawData.operator_safe_ax_available === undefined) {
+      rawData.operator_safe_ax_available = false;
+    }
+    if (rawData.operator_safe_ax_actions === undefined) {
+      rawData.operator_safe_ax_actions = [];
+    }
+    if (rawData.supported_action_strategies === undefined) {
+      rawData.supported_action_strategies =
+        rawData.input_mutation_state === "enabled" ? ["exclusive_global_hid"] : [];
+    }
+    if (rawData.global_hid_may_affect_pointer_or_focus === undefined) {
+      rawData.global_hid_may_affect_pointer_or_focus = true;
+    }
     const parsedData = StatusDataSchema.safeParse(rawData);
     if (!parsedData.success) {
       return {
@@ -377,6 +392,34 @@ function formatToolResponse(ipcResp: any, toolName: string) {
     };
   }
 
+  if (toolName === "computer_use_ax_action") {
+    const parsedData = AXActionResultDataSchema.safeParse(ipcResp.data);
+    if (!parsedData.success) {
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              error: {
+                code: "INVALID_RESPONSE_DATA",
+                message: `AX action response data failed Zod schema validation: ${parsedData.error.message}`
+              }
+            }, null, 2)
+          }
+        ]
+      };
+    }
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(parsedData.data, null, 2)
+        }
+      ]
+    };
+  }
+
   if (
     toolName === "computer_use_click" ||
     toolName === "computer_use_move" ||
@@ -463,14 +506,14 @@ export function createComputerUseServer(hostClient: HostClient): Server {
 
   const AX_TREE_TOOL: Tool = {
     name: "computer_use_ax_tree",
-    description: "Inspects accessibility UI element hierarchy (AXUIElement tree) of a specified running application or the frontmost active application. Enforces depth, node, string length caps, and secure text redaction.",
+    description: "Inspects the accessibility hierarchy of one explicit running application. Returns a short-lived opaque AX action lease and opaque element references only for exact retained controls that advertise operator-safe press and/or set_value.",
     inputSchema: {
       type: "object",
       properties: {
         app_id: {
           type: "string",
           minLength: 1,
-          description: "Optional running application bundle identifier, localized process name, or PID. Defaults to frontmost application."
+          description: "Required running application bundle identifier, localized process name, or PID. Implicit frontmost-app targeting is not accepted by the operator-safe MCP surface."
         },
         max_depth: {
           type: "integer",
@@ -479,6 +522,33 @@ export function createComputerUseServer(hostClient: HostClient): Server {
           description: "Optional maximum inspection tree depth limit (1-10). Defaults to 10."
         }
       },
+      required: ["app_id"],
+      additionalProperties: false
+    }
+  };
+
+  const AX_ACTION_TOOL: Tool = {
+    name: "computer_use_ax_action",
+    description: "Dispatches one operator-safe semantic AX press or AXValue set against an exact retained element. set_value is limited to an enabled, non-secure, text-capable element whose AXValue is still settable. The opaque snapshot/app/element lease is consumed once; there is no global-HID fallback or automatic retry, and fresh AX inspection is required after dispatch or uncertainty.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ax_snapshot_id: { type: "string", minLength: 1, description: "Short-lived opaque snapshot lease from computer_use_ax_tree." },
+        app_instance_ref: { type: "string", minLength: 1, description: "Opaque exact process-instance reference from the same AX inspection." },
+        element_ref: { type: "string", minLength: 1, description: "Opaque actionable element reference from the same AX inspection." },
+        topology_version: { type: "string", description: "Exact topology version returned with the AX inspection." },
+        action: { type: "string", enum: ["press", "set_value"], description: "Exact action advertised for this retained element." },
+        value: { type: "string", maxLength: 4096, description: "Required only for set_value (empty allowed); must be well-formed UTF-8 no larger than 4096 bytes. Never returned in a receipt." },
+        intent: { type: "string", minLength: 1, description: "Clear explanation of the action's intent." }
+      },
+      required: ["ax_snapshot_id", "app_instance_ref", "element_ref", "topology_version", "action", "intent"],
+      allOf: [
+        {
+          if: { properties: { action: { const: "set_value" } }, required: ["action"] },
+          then: { required: ["value"] },
+          else: { not: { required: ["value"] } }
+        }
+      ],
       additionalProperties: false
     }
   };
@@ -603,6 +673,7 @@ export function createComputerUseServer(hostClient: HostClient): Server {
         STATUS_TOOL,
         OBSERVE_TOOL,
         AX_TREE_TOOL,
+        AX_ACTION_TOOL,
         CLICK_TOOL,
         MOVE_TOOL,
         TYPE_TOOL,
@@ -682,6 +753,28 @@ export function createComputerUseServer(hostClient: HostClient): Server {
         };
       }
       const ipcResp = await hostClient.request("ax_tree", parseRes.data, extra?.signal);
+      return formatToolResponse(ipcResp, name);
+    }
+
+    if (name === "computer_use_ax_action") {
+      const parseRes = AXActionInputSchema.safeParse(args);
+      if (!parseRes.success) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                error: {
+                  code: "INVALID_ARGUMENT",
+                  message: `Invalid arguments for computer_use_ax_action: ${parseRes.error.message}`
+                }
+              }, null, 2)
+            }
+          ]
+        };
+      }
+      const ipcResp = await hostClient.request("ax_action", parseRes.data, extra?.signal);
       return formatToolResponse(ipcResp, name);
     }
 

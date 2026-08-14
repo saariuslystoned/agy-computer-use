@@ -181,6 +181,7 @@ jobs:
           echo "$STABLE_OUT" | grep -F '"error": "Staged app is ad_hoc_ephemeral; --require-stable specified"'
 
           node --test bin/host-app.test.mjs
+          node --test bin/host-accessibility-enrollment.test.mjs
 
       - name: Build Release Executable & Guard Binary Symbols
         run: |
