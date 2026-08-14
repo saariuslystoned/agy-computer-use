@@ -114,12 +114,12 @@ async function verifyProductionMcpConfiguredStdio(envOverride) {
     );
     const toolsResult = await Promise.race([listPromise, listTimeoutPromise]);
 
-    if (!toolsResult || !toolsResult.tools || toolsResult.tools.length !== 9) {
-      throw new Error(`Public production MCP tool inventory count must be EXACTLY 9, got ${toolsResult?.tools?.length ?? 0}`);
+    if (!toolsResult || !toolsResult.tools || toolsResult.tools.length !== 10) {
+      throw new Error(`Public production MCP tool inventory count must be EXACTLY 10, got ${toolsResult?.tools?.length ?? 0}`);
     }
 
     const toolNames = toolsResult.tools.map(t => t.name).sort();
-    const expectedToolNames = ["computer_use_ax_tree", "computer_use_click", "computer_use_drag", "computer_use_move", "computer_use_observe", "computer_use_scroll", "computer_use_shortcut", "computer_use_status", "computer_use_type"];
+    const expectedToolNames = ["computer_use_ax_action", "computer_use_ax_tree", "computer_use_click", "computer_use_drag", "computer_use_move", "computer_use_observe", "computer_use_scroll", "computer_use_shortcut", "computer_use_status", "computer_use_type"];
     if (JSON.stringify(toolNames) !== JSON.stringify(expectedToolNames)) {
       throw new Error(`Production tool names must be ${JSON.stringify(expectedToolNames)}, got ${JSON.stringify(toolNames)}`);
     }
@@ -128,6 +128,22 @@ async function verifyProductionMcpConfiguredStdio(envOverride) {
   } finally {
     await cleanup();
   }
+}
+
+function commandScopedToolchainEnvOverride() {
+  if (process.env.TEST_FORCE_MISSING_MISE !== "1") {
+    return undefined;
+  }
+
+  const env = {
+    TEST_FORCE_MISSING_MISE: "1"
+  };
+  for (const key of ["PATH", "HOME", "USER", "SHELL", "TMPDIR"]) {
+    if (process.env[key]) {
+      env[key] = process.env[key];
+    }
+  }
+  return env;
 }
 
 async function verifyMinimalPathConfiguredLaunch() {
@@ -343,7 +359,7 @@ async function main() {
     }
 
     try {
-      const toolNames = await verifyProductionMcpConfiguredStdio();
+      const toolNames = await verifyProductionMcpConfiguredStdio(commandScopedToolchainEnvOverride());
       log(`Verified production configured stdio MCP tool inventory: Exactly ${toolNames.length} tools (${toolNames.join(", ")})`);
     } catch (err) {
       fail(`Configured stdio MCP tool inventory check failed: ${err.message}`);

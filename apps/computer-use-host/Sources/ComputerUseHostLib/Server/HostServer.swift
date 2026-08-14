@@ -189,11 +189,20 @@ public struct DefaultHostClock: HostClock {
 }
 
 public actor HostServer {
+    package static func isCanonicalOperatorSafeAXActionSubset(
+        _ actions: [String]
+    ) -> Bool {
+        actions.isEmpty ||
+            actions == ["press"] ||
+            actions == ["press", "set_value"]
+    }
+
     private var isConnected: Bool = false
     private let authorizer: ScreenRecordingAuthorizing
     private let topologyProvider: DisplayTopologyProviding
     private let captureEngine: DisplayCaptureEngine
     private let axEngine: AXInspectionEngine
+    private let axActionEngine: AXSemanticActionEngine
     private let inputEngine: InputSynthesisEngine
     private let observationTimeoutSec: Double
     private let budget: CaptureBudget
@@ -218,6 +227,7 @@ public actor HostServer {
         topologyProvider: DisplayTopologyProviding = SystemDisplayTopologyProvider(),
         captureEngine: DisplayCaptureEngine? = nil,
         axEngine: AXInspectionEngine = DisabledAXInspector(),
+        axActionEngine: AXSemanticActionEngine = DisabledAXSemanticActionEngine(),
         inputEngine: InputSynthesisEngine = CGEventInputSynthesisEngine(),
         observationTimeoutSec: Double = 5.0,
         budget: CaptureBudget = CaptureBudget(maxConcurrent: 2),
@@ -229,6 +239,7 @@ public actor HostServer {
         self.topologyProvider = topologyProvider
         self.captureEngine = captureEngine ?? SCScreenshotCaptureEngine(authorizer: authorizer)
         self.axEngine = axEngine
+        self.axActionEngine = axActionEngine
         self.inputEngine = inputEngine
         self.observationTimeoutSec = observationTimeoutSec
         self.budget = budget
@@ -246,6 +257,21 @@ public actor HostServer {
                 self.activeTopology = currentTopology
                 let isGranted = authorizer.isScreenCaptureAccessGranted
                 let osAxTrusted = inputEngine.isMutationEnabled
+                let engineOperatorSafeAXActions =
+                    axActionEngine.supportedOperatorSafeActions
+                let operatorSafeAXAvailable =
+                    axEngine.isAvailable &&
+                    axActionEngine.isOperatorSafeActionAvailable &&
+                    Self.isCanonicalOperatorSafeAXActionSubset(
+                        engineOperatorSafeAXActions
+                    ) &&
+                    !engineOperatorSafeAXActions.isEmpty
+                let advertisedOperatorSafeAXActions = operatorSafeAXAvailable
+                    ? engineOperatorSafeAXActions
+                    : []
+                let supportedActionStrategies: [AnyCodable] =
+                    (operatorSafeAXAvailable ? [.string("ax_semantic")] : []) +
+                    (osAxTrusted ? [.string("exclusive_global_hid")] : [])
 
                 let topologyDict: [String: AnyCodable] = [
                     "version": .string(currentTopology.version),
@@ -275,7 +301,13 @@ public actor HostServer {
                         "accessibility_available": .bool(axEngine.isAvailable),
                         "accessibility_trusted": .bool(osAxTrusted),
                         "ax_tree_inspection_available": .bool(axEngine.isAvailable),
-                        "input_mutation_state": .string(inputEngine.isMutationEnabled ? "enabled" : "disabled"),
+                        "operator_safe_ax_available": .bool(operatorSafeAXAvailable),
+                        "operator_safe_ax_actions": .array(
+                            advertisedOperatorSafeAXActions.map(AnyCodable.string)
+                        ),
+                        "supported_action_strategies": .array(supportedActionStrategies),
+                        "global_hid_may_affect_pointer_or_focus": .bool(true),
+                        "input_mutation_state": .string(osAxTrusted ? "enabled" : "disabled"),
                         "topology_version": .string(currentTopology.version),
                         "primary_display_id": .int(currentTopology.primaryDisplayId),
                         "display_count": .int(currentTopology.displays.count),
@@ -386,11 +418,12 @@ public actor HostServer {
                     }
                 }
                 let maxDepth = request.params?["max_depth"]?.rawValue as? Int ?? 10
-                let appId = request.params?["app_id"]?.rawValue as? String
-                if let rawAppId = appId {
-                    guard !rawAppId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                        throw ComputerUseError.ipcError(reason: "app_id parameter cannot be blank")
-                    }
+                guard let rawAppId = request.params?["app_id"]?.rawValue as? String else {
+                    throw ComputerUseError.ipcError(reason: "app_id parameter is required and must be nonblank")
+                }
+                let appId = rawAppId.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !appId.isEmpty else {
+                    throw ComputerUseError.ipcError(reason: "app_id parameter is required and must be nonblank")
                 }
                 let currentTop = try topologyProvider.getTopology()
                 let treeResult = try axEngine.inspectTree(maxDepth: maxDepth, appId: appId, topologyVersion: currentTop.version)
@@ -398,6 +431,100 @@ public actor HostServer {
                 let treeData = try encoder.encode(treeResult)
                 let treeDict = try JSONDecoder().decode([String: AnyCodable].self, from: treeData)
                 return IPCResponse(id: request.id, success: true, data: treeDict)
+
+            case "ax_action":
+                guard let intent = request.params?["intent"]?.rawValue as? String,
+                      !intent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw ComputerUseError.ipcError(reason: "intent parameter is required and must be nonblank")
+                }
+                guard let action = request.params?["action"]?.rawValue as? String,
+                      !action.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw ComputerUseError.ipcError(reason: "action parameter is required and must be nonblank")
+                }
+                guard action == "press" || action == "set_value" else {
+                    throw ComputerUseError.noninterferingActionUnsupported(action: action)
+                }
+                let value: String?
+                if action == "set_value" {
+                    guard let rawValue = request.params?["value"]?.rawValue as? String else {
+                        throw ComputerUseError.ipcError(
+                            reason: "value parameter is required when action is set_value"
+                        )
+                    }
+                    value = try DefaultAXInspector.validateSetValueInput(rawValue)
+                } else {
+                    guard request.params?["value"] == nil else {
+                        throw ComputerUseError.ipcError(
+                            reason: "value parameter is valid only when action is set_value"
+                        )
+                    }
+                    value = nil
+                }
+                guard let snapshotId = request.params?["ax_snapshot_id"]?.rawValue as? String,
+                      !snapshotId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw ComputerUseError.ipcError(reason: "ax_snapshot_id parameter is required and must be nonblank")
+                }
+                guard let appInstanceRef = request.params?["app_instance_ref"]?.rawValue as? String,
+                      !appInstanceRef.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw ComputerUseError.ipcError(reason: "app_instance_ref parameter is required and must be nonblank")
+                }
+                guard let elementRef = request.params?["element_ref"]?.rawValue as? String,
+                      !elementRef.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw ComputerUseError.ipcError(reason: "element_ref parameter is required and must be nonblank")
+                }
+                guard let requestedTopologyVersion = request.params?["topology_version"]?.rawValue as? String,
+                      !requestedTopologyVersion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw ComputerUseError.ipcError(reason: "topology_version parameter is required and must be nonblank")
+                }
+
+                let currentTopology = try topologyProvider.getTopology()
+                guard requestedTopologyVersion == currentTopology.version else {
+                    throw ComputerUseError.staleTopology(
+                        current: currentTopology.version,
+                        received: requestedTopologyVersion
+                    )
+                }
+                guard axActionEngine.isOperatorSafeActionAvailable else {
+                    throw ComputerUseError.noninterferingActionUnsupported(action: action)
+                }
+                let supportedOperatorSafeActions =
+                    axActionEngine.supportedOperatorSafeActions
+                guard Self.isCanonicalOperatorSafeAXActionSubset(
+                    supportedOperatorSafeActions
+                ),
+                      !supportedOperatorSafeActions.isEmpty,
+                      supportedOperatorSafeActions.contains(action) else {
+                    throw ComputerUseError.noninterferingActionUnsupported(action: action)
+                }
+
+                let result = try axActionEngine.performSemanticAction(
+                    snapshotId: snapshotId,
+                    appInstanceRef: appInstanceRef,
+                    elementRef: elementRef,
+                    action: action,
+                    value: value,
+                    topologyVersion: requestedTopologyVersion
+                )
+                guard !result.actionId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      result.status == "dispatched",
+                      result.strategy == "ax_semantic",
+                      result.action == action,
+                      result.axSnapshotId == snapshotId,
+                      result.appInstanceRef == appInstanceRef,
+                      result.elementRef == elementRef,
+                      result.topologyVersion == requestedTopologyVersion,
+                      result.requiresReinspection,
+                      result.globalHIDPosts == 0,
+                      result.durationMs.isFinite,
+                      result.durationMs >= 0 else {
+                    throw ComputerUseError.axOutcomeUnknown(
+                        reason: "AX semantic action engine returned an invalid or unsafe dispatch receipt"
+                    )
+                }
+                let encoder = JSONEncoder()
+                let resultData = try encoder.encode(result)
+                let resultDict = try JSONDecoder().decode([String: AnyCodable].self, from: resultData)
+                return IPCResponse(id: request.id, success: true, data: resultDict)
 
             case "click":
                 guard inputEngine.isMutationEnabled else {

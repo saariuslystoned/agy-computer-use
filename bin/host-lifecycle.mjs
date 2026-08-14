@@ -23,13 +23,42 @@ export function fail(msg, status = 'error', code = 'ERROR', exitCode = 1) {
   process.exit(exitCode);
 }
 
-function validateCLIArgs(argv) {
-  if (argv.length > 3) {
-    fail(`Lifecycle commands accept zero extra arguments or flags. Received ${argv.length - 3} extra argument(s).`, 'error', 'INVALID_ARGS', 1);
+export function parseLifecycleOptions(command, extraArgs) {
+  if (command === 'host-start' || command === 'daemon') {
+    if (extraArgs.length === 0) {
+      return { requestAccessibility: false };
+    }
+    if (
+      extraArgs.length === 1
+      && extraArgs[0] === '--request-accessibility'
+    ) {
+      return { requestAccessibility: true };
+    }
+  } else if (extraArgs.length === 0) {
+    return { requestAccessibility: false };
+  }
+
+  throw new Error(
+    command === 'host-start'
+      ? "host-start accepts only the optional exact flag '--request-accessibility'"
+      : `Lifecycle command '${command}' accepts no extra arguments or flags`
+  );
+}
+
+export function assertAccessibilityEnrollmentOwnership(
+  options,
+  isWinningOwner
+) {
+  if (options?.requestAccessibility === true && !isWinningOwner) {
+    const err = new Error(
+      'Accessibility enrollment did not win the exact host launch; stop the owned host and retry the explicit enrollment command'
+    );
+    err.code = 'ACCESSIBILITY_PROMPT_REQUIRES_RESTART';
+    throw err;
   }
 }
 
-export async function executeHostStart(customSupervisor) {
+export async function executeHostStart(customSupervisor, options = {}) {
   const supervisor = customSupervisor || new ProductionHostSupervisor();
   const runtimeDir = supervisor.runtimeDir;
   const paths = getCanonicalSocketPaths(runtimeDir, false);
@@ -39,6 +68,18 @@ export async function executeHostStart(customSupervisor) {
   if (ctrlProbe.alive) {
     const ownerStatus = ctrlProbe.data.status;
     const initialGen = ctrlProbe.data.generation;
+
+    if (
+      options.requestAccessibility === true
+      && (ownerStatus === 'running' || ownerStatus === 'starting' || ownerStatus === 'stopping')
+    ) {
+      fail(
+        'Accessibility enrollment requires a new exact host launch. Stop the owned host first, then run host-start --request-accessibility.',
+        'error',
+        'ACCESSIBILITY_PROMPT_REQUIRES_RESTART',
+        1
+      );
+    }
 
     if (ownerStatus === 'running') {
       const native = ctrlProbe.data.native;
@@ -128,7 +169,9 @@ export async function executeHostStart(customSupervisor) {
   // 4. In-process supervisor test path vs production CLI daemon spawn
   if (customSupervisor) {
     try {
-      const res = await supervisor.start();
+      const res = await supervisor.start({
+        requestAccessibility: options.requestAccessibility === true
+      });
       console.log(JSON.stringify({ success: true, ...res }, null, 2));
       process.exit(0);
     } catch (err) {
@@ -138,7 +181,11 @@ export async function executeHostStart(customSupervisor) {
   }
 
   const daemonScript = fileURLToPath(import.meta.url);
-  const daemon = spawn(process.execPath, [daemonScript, 'daemon'], {
+  const daemonArgs = [daemonScript, 'daemon'];
+  if (options.requestAccessibility === true) {
+    daemonArgs.push('--request-accessibility');
+  }
+  const daemon = spawn(process.execPath, daemonArgs, {
     cwd: REPO_ROOT,
     detached: true,
     stdio: 'ignore'
@@ -186,6 +233,16 @@ export async function executeHostStart(customSupervisor) {
   daemon.unref();
 
   const isWinningOwner = Boolean(spawnedDaemonPid && finalCtrlData?.daemonPid === spawnedDaemonPid);
+  try {
+    assertAccessibilityEnrollmentOwnership(options, isWinningOwner);
+  } catch (err) {
+    fail(
+      err.message,
+      'error',
+      err.code || 'ACCESSIBILITY_PROMPT_REQUIRES_RESTART',
+      1
+    );
+  }
 
   console.log(JSON.stringify({
     success: true,
@@ -196,7 +253,8 @@ export async function executeHostStart(customSupervisor) {
     nativePid: finalCtrlData?.nativePid || finalCtrlData?.pid || null,
     pid: finalCtrlData?.nativePid || finalCtrlData?.pid || null,
     socketPath: paths.hostSocketPath,
-    tcc_permission_state: nativeData?.tcc_permission_state || 'unknown'
+    tcc_permission_state: nativeData?.tcc_permission_state || 'unknown',
+    accessibility_prompt_requested: options.requestAccessibility === true && isWinningOwner
   }, null, 2));
   process.exit(0);
 }
@@ -412,10 +470,12 @@ export async function executeHostStop(customSupervisor) {
   fail('Socket files exist but supervisor control server is not active', 'STALE_OR_AMBIGUOUS', 'NO_OWNER', 1);
 }
 
-async function runDaemon() {
+async function runDaemon(options = {}) {
   const supervisor = new ProductionHostSupervisor({ isDaemonProcess: true });
   try {
-    await supervisor.start();
+    await supervisor.start({
+      requestAccessibility: options.requestAccessibility === true
+    });
   } catch (err) {
     console.error(`[DAEMON-ERROR] Supervisor start failed: ${err.message}`);
     process.exit(1);
@@ -427,14 +487,25 @@ async function main() {
   const command = args[0];
 
   if (command === 'daemon') {
-    await runDaemon();
+    let daemonOptions;
+    try {
+      daemonOptions = parseLifecycleOptions(command, args.slice(1));
+    } catch (err) {
+      fail(err.message, 'error', 'INVALID_ARGS', 1);
+    }
+    await runDaemon(daemonOptions);
     return;
   }
 
-  validateCLIArgs(process.argv);
+  let options;
+  try {
+    options = parseLifecycleOptions(command, args.slice(1));
+  } catch (err) {
+    fail(err.message, 'error', 'INVALID_ARGS', 1);
+  }
 
   if (command === 'host-start') {
-    await executeHostStart();
+    await executeHostStart(undefined, options);
   } else if (command === 'host-status') {
     await executeHostStatus();
   } else if (command === 'host-stop') {

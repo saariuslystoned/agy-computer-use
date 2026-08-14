@@ -7,9 +7,12 @@
       "bundle_id": "com.apple.calculator",
       "name": "Calculator"
     },
+    "ax_snapshot_id": "ax-snap-fixture-001",
+    "app_instance_ref": "app-inst-fixture-001",
+    "expires_at_ms": 1785082740000,
     "topology_version": "top-sha256-fb6c55499cfac6b4ad6aa412b55237d1560d7c36c41f7f148810a2d2479ab22d",
-    "node_count": 1,
-    "max_depth_reached": 1,
+    "node_count": 3,
+    "max_depth_reached": 2,
     "truncated": false,
     "tree": {
       "id": "ax-AXApplication-101",
@@ -23,7 +26,41 @@
         "y": 0.0,
         "width": 300.0,
         "height": 400.0
-      }
+      },
+      "children": [
+        {
+          "id": "ax-AXButton-102",
+          "element_ref": "ax-el-fixture-001",
+          "supported_actions": ["press"],
+          "role": "AXButton",
+          "identifier": "Seven",
+          "description": "7",
+          "title": "7",
+          "enabled": true,
+          "bounds": {
+            "x": 30.0,
+            "y": 220.0,
+            "width": 60.0,
+            "height": 44.0
+          }
+        },
+        {
+          "id": "ax-AXTextField-103",
+          "element_ref": "ax-el-fixture-002",
+          "supported_actions": ["set_value"],
+          "role": "AXTextField",
+          "identifier": "display",
+          "description": "Calculator display",
+          "value": "7",
+          "enabled": true,
+          "bounds": {
+            "x": 30.0,
+            "y": 40.0,
+            "width": 240.0,
+            "height": 44.0
+          }
+        }
+      ]
     }
   }
 }

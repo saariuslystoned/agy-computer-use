@@ -6,7 +6,7 @@ import * as net from "net";
 import * as crypto from "crypto";
 import AjvModule from "ajv";
 import { execSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -14,7 +14,15 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 import { createComputerUseServer, validateAndDecodeBase64JPEG, parseJPEGDimensions } from "../src/index.js";
-import { validatePixelDimensions, AXTreeDataSchema, DragInputSchema } from "../src/schemas.js";
+import {
+  validatePixelDimensions,
+  AXActionInputSchema,
+  AXActionResultDataSchema,
+  AXTreeDataSchema,
+  DragInputSchema,
+  StatusDataSchema,
+  isBoundedWellFormedUTF8
+} from "../src/schemas.js";
 import { MockHostClient, UnixSocketHostClient, IPCResponseSchema } from "../src/host-client.js";
 
 const Ajv = (AjvModule as any).default || AjvModule;
@@ -56,10 +64,11 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
 
     const toolsResult = await client.listTools();
     assert.ok(toolsResult.tools);
-    assert.equal(toolsResult.tools.length, 9);
+    assert.equal(toolsResult.tools.length, 10);
 
     const toolNames = toolsResult.tools.map(t => t.name).sort();
     assert.deepEqual(toolNames, [
+      "computer_use_ax_action",
       "computer_use_ax_tree",
       "computer_use_click",
       "computer_use_drag",
@@ -70,6 +79,15 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
       "computer_use_status",
       "computer_use_type"
     ]);
+    const axActionTool = toolsResult.tools.find(
+      (tool) => tool.name === "computer_use_ax_action"
+    ) as any;
+    assert.deepEqual(
+      axActionTool.inputSchema.properties.action.enum,
+      ["press", "set_value"]
+    );
+    assert.equal(axActionTool.inputSchema.properties.value.maxLength, 4096);
+    assert.ok(axActionTool.inputSchema.allOf, "Tool metadata must conditionally require value only for set_value");
 
     const statusCall = await client.callTool({ name: "computer_use_status", arguments: {} });
     assert.ok(statusCall.content);
@@ -461,10 +479,15 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
       "observe_request.json": { expectedValid: true, schemaTarget: "ObserveRequest" },
       "ax_tree_request.json": { expectedValid: true, schemaTarget: "AxTreeRequest" },
       "ax_tree_response.json": { expectedValid: true, schemaTarget: "AxTreeResponse" },
+      "ax_action_request.json": { expectedValid: true, schemaTarget: "AxActionRequest" },
+      "ax_action_response.json": { expectedValid: true, schemaTarget: "AxActionResponse" },
+      "ax_set_value_request.json": { expectedValid: true, schemaTarget: "AxActionRequest" },
+      "ax_set_value_response.json": { expectedValid: true, schemaTarget: "AxActionResponse" },
       "move_request.json": { expectedValid: true, schemaTarget: "MoveRequest" },
       "scroll_request.json": { expectedValid: true, schemaTarget: "ScrollRequest" },
       "drag_request.json": { expectedValid: true, schemaTarget: "DragRequest" },
       "status_response.json": { expectedValid: true, schemaTarget: "StatusResponse" },
+      "status_press_only_response.json": { expectedValid: true, schemaTarget: "StatusResponse" },
       "observe_response.json": { expectedValid: true, schemaTarget: "ObserveResponse" },
       "permission_denied_response.json": { expectedValid: true, schemaTarget: "ErrorResponse" },
       "stale_topology_response.json": { expectedValid: true, schemaTarget: "ErrorResponse" },
@@ -473,6 +496,9 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
       "click_request_disabled.json": { expectedValid: true, schemaTarget: "ClickRequest" },
       "invalid_click_request_negative.json": { expectedValid: false },
       "invalid_method_request_negative.json": { expectedValid: false },
+      "invalid_ax_set_value_missing_value.json": { expectedValid: false },
+      "invalid_ax_press_with_value.json": { expectedValid: false },
+      "invalid_status_set_only_response.json": { expectedValid: false, schemaTarget: "StatusResponse" },
       "canonical_jpeg_mutations.json": { expectedValid: false }
     };
 
@@ -496,14 +522,54 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
 
       assert.equal(isValid, mapping.expectedValid, `Fixture '${file}' Ajv validation state (${isValid}) must match expected state (${mapping.expectedValid}): ${JSON.stringify(validateProtocol.errors)}`);
 
-      if (parsed.success === true) {
+      if (parsed.success === true && mapping.expectedValid) {
         const zodParse = IPCResponseSchema.safeParse(parsed);
         assert.ok(zodParse.success, `Response fixture '${file}' must validate against IPCResponseSchema: ${zodParse.error?.message}`);
+
+        if (file === "ax_action_response.json" || file === "ax_set_value_response.json") {
+          const axActionParse = AXActionResultDataSchema.safeParse(parsed.data);
+          assert.ok(axActionParse.success, `AX receipt fixture '${file}' must pass its strict action schema`);
+          assert.equal(parsed.data.value, undefined, `AX receipt fixture '${file}' must not contain a submitted value`);
+          assert.equal(parsed.data.global_hid_posts, 0);
+        }
 
         if (parsed.data?.image_data_base64) {
           const buf = validateAndDecodeBase64JPEG(parsed.data.image_data_base64, parsed.data.pixel_width, parsed.data.pixel_height);
           assert.ok(buf.length > 0, `Observe fixture '${file}' image buffer must be non-empty`);
         }
+      }
+      if (file === "ax_set_value_request.json") {
+        assert.equal(
+          AXActionInputSchema.safeParse(parsed.params).success,
+          true,
+          "set_value protocol fixture must pass the exact MCP action schema"
+        );
+      }
+      if (file === "ax_action_request.json") {
+        const pressActionParse = AXActionInputSchema.safeParse(parsed.params);
+        assert.equal(
+          pressActionParse.success,
+          true,
+          "press protocol fixture must pass the exact MCP action schema"
+        );
+        assert.equal(parsed.params.action, "press");
+      }
+      if (file === "status_press_only_response.json") {
+        const pressOnlyStatusParse = StatusDataSchema.safeParse(parsed.data);
+        assert.equal(
+          pressOnlyStatusParse.success,
+          true,
+          "press-only status fixture must pass the exact MCP status schema"
+        );
+        assert.equal(parsed.data.operator_safe_ax_available, true);
+        assert.deepEqual(parsed.data.operator_safe_ax_actions, ["press"]);
+      }
+      if (file === "invalid_status_set_only_response.json") {
+        assert.equal(
+          StatusDataSchema.safeParse(parsed.data).success,
+          false,
+          "set_value-only status fixture must fail the exact MCP status schema"
+        );
       }
     }
   });
@@ -613,6 +679,90 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
     assert.equal(resp.success, false);
     assert.equal(resp.error?.code, "ACTION_OUTCOME_UNKNOWN");
       server.close();
+    if (fs.existsSync(sockPath)) fs.unlinkSync(sockPath);
+  });
+
+  test("UnixSocketHostClient: ax_action timeout maps to OUTCOME_UNKNOWN and requests fresh ax_tree", async () => {
+    const sockPath = `/tmp/test-timeout-ax-action-${Date.now()}.sock`;
+    const server = net.createServer((_socket) => {
+    });
+
+    await new Promise<void>((res) => server.listen(sockPath, res));
+
+    const client = new UnixSocketHostClient(sockPath, 100);
+    const resp = await client.request("ax_action", {
+      ax_snapshot_id: "ax-snap-001",
+      app_instance_ref: "app-001",
+      element_ref: "el-001",
+      topology_version: VALID_SHA256_TOPOLOGY_TOKEN,
+      action: "press",
+      intent: "Press control"
+    });
+
+    assert.equal(resp.success, false);
+    assert.equal(resp.error?.code, "OUTCOME_UNKNOWN");
+    assert.equal(resp.error?.message.includes("computer_use_ax_tree"), true);
+
+    server.close();
+    if (fs.existsSync(sockPath)) fs.unlinkSync(sockPath);
+  });
+
+  test("UnixSocketHostClient: ax_action cancellation maps to OUTCOME_UNKNOWN and requests fresh ax_tree", async () => {
+    const sockPath = `/tmp/test-cancel-ax-action-${Date.now()}.sock`;
+    const server = net.createServer((_socket) => {
+    });
+
+    await new Promise<void>((res) => server.listen(sockPath, res));
+
+    const client = new UnixSocketHostClient(sockPath, 5000);
+    const controller = new AbortController();
+    const reqPromise = client.request("ax_action", {
+      ax_snapshot_id: "ax-snap-001",
+      app_instance_ref: "app-001",
+      element_ref: "el-001",
+      topology_version: VALID_SHA256_TOPOLOGY_TOKEN,
+      action: "press",
+      intent: "Press control"
+    }, controller.signal);
+
+    setTimeout(() => {
+      controller.abort();
+    }, 50);
+
+    const resp = await reqPromise;
+    assert.equal(resp.success, false);
+    assert.equal(resp.error?.code, "OUTCOME_UNKNOWN");
+    assert.equal(resp.error?.message.includes("computer_use_ax_tree"), true);
+
+    server.close();
+    if (fs.existsSync(sockPath)) fs.unlinkSync(sockPath);
+  });
+
+  test("UnixSocketHostClient: ax_action received request then close maps post-dispatch mutation to OUTCOME_UNKNOWN", async () => {
+    const sockPath = `/tmp/test-dispatch-close-ax-action-${Date.now()}.sock`;
+    const server = net.createServer((socket) => {
+      socket.on("data", () => {
+        socket.destroy();
+      });
+    });
+
+    await new Promise<void>((res) => server.listen(sockPath, res));
+
+    const client = new UnixSocketHostClient(sockPath, 5000);
+    const resp = await client.request("ax_action", {
+      ax_snapshot_id: "ax-snap-001",
+      app_instance_ref: "app-001",
+      element_ref: "el-001",
+      topology_version: VALID_SHA256_TOPOLOGY_TOKEN,
+      action: "press",
+      intent: "Press control"
+    });
+
+    assert.equal(resp.success, false);
+    assert.equal(resp.error?.code, "OUTCOME_UNKNOWN");
+    assert.equal(resp.error?.message.includes("computer_use_ax_tree"), true);
+
+    server.close();
     if (fs.existsSync(sockPath)) fs.unlinkSync(sockPath);
   });
 
@@ -792,9 +942,10 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
 
     const toolsResult = await client.listTools();
     assert.ok(toolsResult.tools);
-    assert.equal(toolsResult.tools.length, 9);
+    assert.equal(toolsResult.tools.length, 10);
     const toolNames = toolsResult.tools.map(t => t.name).sort();
     assert.deepEqual(toolNames, [
+      "computer_use_ax_action",
       "computer_use_ax_tree",
       "computer_use_click",
       "computer_use_drag",
@@ -939,6 +1090,7 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
   test("M10-TOOL-SURFACE: Tests computer_use_ax_tree, computer_use_move, computer_use_scroll, computer_use_drag validation and forwarding", async () => {
     const mockHost = new MockHostClient();
     mockHost.tccState = "granted";
+    mockHost.axAvailable = true;
     mockHost.axTrusted = true;
     mockHost.inputMutationState = "enabled";
     const server = createComputerUseServer(mockHost);
@@ -954,6 +1106,20 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
       client.connect(clientTransport)
     ]);
 
+    const semanticStatusCall = await client.callTool({
+      name: "computer_use_status",
+      arguments: {}
+    });
+    assert.equal((semanticStatusCall as any).isError, undefined);
+    const semanticStatusData = JSON.parse(
+      ((semanticStatusCall.content as any[])[0] as any).text
+    );
+    assert.equal(semanticStatusData.operator_safe_ax_available, true);
+    assert.deepEqual(
+      semanticStatusData.operator_safe_ax_actions,
+      ["press", "set_value"]
+    );
+
     // 1. computer_use_ax_tree
     const axCall = await client.callTool({
       name: "computer_use_ax_tree",
@@ -963,6 +1129,67 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
     const axData = JSON.parse(((axCall.content as any[])[0] as any).text);
     assert.equal(axData.target_app.bundle_id, "com.apple.calculator");
     assert.ok(axData.tree);
+    assert.ok(axData.ax_snapshot_id);
+    assert.ok(axData.app_instance_ref);
+    assert.deepEqual(axData.tree.supported_actions, ["press", "set_value"]);
+    assert.equal(axData.tree.identifier, "calculator-root");
+    assert.equal(axData.tree.description, "Calculator");
+
+    const axActionCall = await client.callTool({
+      name: "computer_use_ax_action",
+      arguments: {
+        ax_snapshot_id: axData.ax_snapshot_id,
+        app_instance_ref: axData.app_instance_ref,
+        element_ref: axData.tree.element_ref,
+        topology_version: axData.topology_version,
+        action: "press",
+        intent: "Press the exact retained Calculator control"
+      }
+    });
+    assert.equal((axActionCall as any).isError, undefined);
+    const axActionData = JSON.parse(((axActionCall.content as any[])[0] as any).text);
+    assert.equal(axActionData.strategy, "ax_semantic");
+    assert.equal(axActionData.status, "dispatched");
+    assert.equal(axActionData.requires_reinspection, true);
+    assert.equal(axActionData.global_hid_posts, 0);
+
+    const missingSetValuePayload = await client.callTool({
+      name: "computer_use_ax_action",
+      arguments: {
+        ax_snapshot_id: axData.ax_snapshot_id,
+        app_instance_ref: axData.app_instance_ref,
+        element_ref: axData.tree.element_ref,
+        topology_version: axData.topology_version,
+        action: "set_value",
+        intent: "Attempt set_value without its required value"
+      } as any
+    });
+    assert.equal((missingSetValuePayload as any).isError, true);
+
+    const submittedValue = "operator-safe destination";
+    const setValueCall = await client.callTool({
+      name: "computer_use_ax_action",
+      arguments: {
+        ax_snapshot_id: axData.ax_snapshot_id,
+        app_instance_ref: axData.app_instance_ref,
+        element_ref: axData.tree.element_ref,
+        topology_version: axData.topology_version,
+        action: "set_value",
+        value: submittedValue,
+        intent: "Set the exact retained Calculator text field"
+      }
+    });
+    assert.equal((setValueCall as any).isError, undefined);
+    const setValueData = JSON.parse(((setValueCall.content as any[])[0] as any).text);
+    assert.equal(setValueData.action, "set_value");
+    assert.equal(setValueData.strategy, "ax_semantic");
+    assert.equal(setValueData.global_hid_posts, 0);
+    assert.equal(setValueData.value, undefined);
+    assert.equal(
+      JSON.stringify(setValueCall).includes(submittedValue),
+      false,
+      "MCP set_value receipts must never echo the submitted value"
+    );
 
     // Observe to get valid capture_id
     const obsCall = await client.callTool({ name: "computer_use_observe", arguments: {} });
@@ -1038,12 +1265,1077 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
     await client.close();
     await server.close();
   });
+
+  test("Press-only host status and semantic press remain compatible while set_value fails closed", async () => {
+    const mockHost = new MockHostClient();
+    mockHost.axAvailable = true;
+    mockHost.axTrusted = true;
+    mockHost.operatorSafeAXActions = ["press"];
+
+    const rawPressOnlyStatus = await mockHost.request("status");
+    assert.equal(StatusDataSchema.safeParse(rawPressOnlyStatus.data).success, true);
+    for (const invalidActions of [
+      ["set_value"],
+      ["set_value", "press"],
+      ["press", "press"],
+      ["press", "unknown"]
+    ]) {
+      assert.equal(StatusDataSchema.safeParse({
+        ...rawPressOnlyStatus.data,
+        operator_safe_ax_actions: invalidActions
+      }).success, false, `Invalid global AX actions must fail: ${invalidActions.join(",")}`);
+    }
+
+    const server = createComputerUseServer(mockHost);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client(
+      { name: "press-only-test-client", version: "1.0.0" },
+      { capabilities: {} }
+    );
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+    const statusCall = await client.callTool({
+      name: "computer_use_status",
+      arguments: {}
+    });
+    assert.equal((statusCall as any).isError, undefined);
+    const status = JSON.parse(((statusCall.content as any[])[0] as any).text);
+    assert.equal(status.operator_safe_ax_available, true);
+    assert.deepEqual(status.operator_safe_ax_actions, ["press"]);
+
+    const treeCall = await client.callTool({
+      name: "computer_use_ax_tree",
+      arguments: { app_id: "com.apple.calculator" }
+    });
+    assert.equal((treeCall as any).isError, undefined);
+    const tree = JSON.parse(((treeCall.content as any[])[0] as any).text);
+    assert.deepEqual(tree.tree.supported_actions, ["press"]);
+
+    const authority = {
+      ax_snapshot_id: tree.ax_snapshot_id,
+      app_instance_ref: tree.app_instance_ref,
+      element_ref: tree.tree.element_ref,
+      topology_version: tree.topology_version
+    };
+    const press = await client.callTool({
+      name: "computer_use_ax_action",
+      arguments: {
+        ...authority,
+        action: "press",
+        intent: "Exercise the advertised press-only action"
+      }
+    });
+    assert.equal((press as any).isError, undefined);
+    const pressReceipt = JSON.parse(((press.content as any[])[0] as any).text);
+    assert.equal(pressReceipt.action, "press");
+    assert.equal(pressReceipt.global_hid_posts, 0);
+
+    const unavailableSetValue = await client.callTool({
+      name: "computer_use_ax_action",
+      arguments: {
+        ...authority,
+        action: "set_value",
+        value: "",
+        intent: "Exercise capability-aware rejection"
+      }
+    });
+    assert.equal((unavailableSetValue as any).isError, true);
+    const unavailableError = JSON.parse(
+      ((unavailableSetValue.content as any[])[0] as any).text
+    );
+    assert.equal(unavailableError.error.code, "NONINTERFERING_ACTION_UNSUPPORTED");
+
+    mockHost.operatorSafeAXActions = [];
+    const unavailableStatusCall = await client.callTool({
+      name: "computer_use_status",
+      arguments: {}
+    });
+    assert.equal((unavailableStatusCall as any).isError, undefined);
+    const unavailableStatus = JSON.parse(
+      ((unavailableStatusCall.content as any[])[0] as any).text
+    );
+    assert.equal(unavailableStatus.operator_safe_ax_available, false);
+    assert.deepEqual(unavailableStatus.operator_safe_ax_actions, []);
+
+    await client.close();
+    await server.close();
+  });
+
+  test("Operator-safe set_value enforces UTF-8 bounds, typed single-dispatch failures, redacted receipts, and zero HID", async () => {
+    const authority = {
+      ax_snapshot_id: "ax-snap-set-value-test",
+      app_instance_ref: "app-inst-set-value-test",
+      element_ref: "ax-el-set-value-test",
+      topology_version: VALID_SHA256_TOPOLOGY_TOKEN,
+      action: "set_value" as const,
+      intent: "Update one retained non-secure text field"
+    };
+
+    assert.equal(isBoundedWellFormedUTF8(""), true, "Empty set_value clears a field");
+    assert.equal(isBoundedWellFormedUTF8("a".repeat(4_096)), true);
+    assert.equal(isBoundedWellFormedUTF8("é".repeat(2_048)), true);
+    assert.equal(isBoundedWellFormedUTF8("é".repeat(2_049)), false);
+    assert.equal(isBoundedWellFormedUTF8("😀".repeat(1_024)), true);
+    assert.equal(isBoundedWellFormedUTF8("😀".repeat(1_025)), false);
+    assert.equal(isBoundedWellFormedUTF8("\ud800"), false, "Lone surrogates are not well-formed UTF-8 input");
+
+    assert.equal(AXActionInputSchema.safeParse({ ...authority, value: "" }).success, true);
+    assert.equal(AXActionInputSchema.safeParse(authority).success, false);
+    assert.equal(AXActionInputSchema.safeParse({
+      ...authority,
+      value: "é".repeat(2_049)
+    }).success, false);
+    assert.equal(AXActionInputSchema.safeParse({
+      ...authority,
+      action: "press",
+      value: "must be rejected"
+    }).success, false, "press must reject a value payload and preserve press semantics");
+
+    const baseReceipt = {
+      action_id: "ax-act-set-value-test",
+      status: "dispatched" as const,
+      strategy: "ax_semantic" as const,
+      action: "set_value" as const,
+      ax_snapshot_id: authority.ax_snapshot_id,
+      app_instance_ref: authority.app_instance_ref,
+      element_ref: authority.element_ref,
+      topology_version: authority.topology_version,
+      requires_reinspection: true as const,
+      global_hid_posts: 0 as const,
+      duration_ms: 1
+    };
+    assert.equal(AXActionResultDataSchema.safeParse(baseReceipt).success, true);
+    assert.equal(AXActionResultDataSchema.safeParse({
+      ...baseReceipt,
+      global_hid_posts: 1
+    }).success, false, "Any nonzero HID receipt must fail closed");
+    assert.equal(AXActionResultDataSchema.safeParse({
+      ...baseReceipt,
+      value: "forbidden receipt echo"
+    }).success, false, "A set_value receipt must reject any echoed value field");
+
+    const typedErrors = [
+      "STALE_AX_SNAPSHOT",
+      "STALE_OPERATION",
+      "NONINTERFERING_ACTION_UNSUPPORTED",
+      "SECURE_AX_VALUE_UNSUPPORTED",
+      "AX_VALUE_NOT_SETTABLE",
+      "AX_ACTION_REPLAYED",
+      "AX_ELEMENT_DISABLED",
+      "USER_INTERVENED",
+      "OUTCOME_UNKNOWN"
+    ];
+    const queuedResponses: Array<Record<string, any>> = [
+      { id: "set-value-success", success: true, data: baseReceipt },
+      ...typedErrors.map((code) => ({
+        id: `set-value-${code.toLowerCase()}`,
+        success: false,
+        error: {
+          code,
+          message: code === "OUTCOME_UNKNOWN"
+            ? "AX dispatch outcome is unknown; obtain a fresh computer_use_ax_tree inspection"
+            : "Retained AX set_value request was rejected without returning its payload"
+        }
+      }))
+    ];
+    let hostRequestCount = 0;
+    const seenUTF8ByteCounts: number[] = [];
+    const host = {
+      request: async (method: string, params?: Record<string, unknown>) => {
+        assert.equal(method, "ax_action");
+        hostRequestCount += 1;
+        seenUTF8ByteCounts.push(Buffer.byteLength(params?.value as string, "utf8"));
+        const response = queuedResponses.shift();
+        assert.ok(response, "Each set_value invocation needs one queued host response");
+        return response;
+      }
+    };
+
+    const server = createComputerUseServer(host as any);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client(
+      { name: "set-value-test-client", version: "1.0.0" },
+      { capabilities: {} }
+    );
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+    const submittedValue = "private transient payload";
+    const success = await client.callTool({
+      name: "computer_use_ax_action",
+      arguments: { ...authority, value: submittedValue }
+    });
+    assert.equal((success as any).isError, undefined);
+    const successData = JSON.parse(((success.content as any[])[0] as any).text);
+    assert.equal(successData.action, "set_value");
+    assert.equal(successData.strategy, "ax_semantic");
+    assert.equal(successData.global_hid_posts, 0);
+    assert.equal(successData.value, undefined);
+    assert.equal(JSON.stringify(success).includes(submittedValue), false);
+
+    for (const code of typedErrors) {
+      const callsBefore = hostRequestCount;
+      const result = await client.callTool({
+        name: "computer_use_ax_action",
+        arguments: { ...authority, value: submittedValue }
+      });
+      assert.equal((result as any).isError, true);
+      const errorBody = JSON.parse(((result.content as any[])[0] as any).text);
+      assert.equal(errorBody.error.code, code);
+      assert.equal(JSON.stringify(result).includes(submittedValue), false);
+      assert.equal(
+        hostRequestCount,
+        callsBefore + 1,
+        `${code} must not trigger an automatic set_value retry`
+      );
+    }
+
+    assert.equal(hostRequestCount, 1 + typedErrors.length);
+    assert.deepEqual(
+      seenUTF8ByteCounts,
+      Array(1 + typedErrors.length).fill(Buffer.byteLength(submittedValue, "utf8"))
+    );
+    assert.equal(queuedResponses.length, 0);
+
+    await client.close();
+    await server.close();
+  });
+
+  test("Live proof controller retries read-only inspection but never retries an outcome-unknown AX action", async () => {
+    let cursor = __dirname;
+    let repoRoot = "";
+    while (cursor !== path.dirname(cursor)) {
+      const candidate = path.join(cursor, "bin/operator-safe-ax-live-proof.mjs");
+      if (fs.existsSync(candidate)) {
+        repoRoot = cursor;
+        break;
+      }
+      cursor = path.dirname(cursor);
+    }
+    assert.ok(repoRoot, "Must locate repository root for live proof controller");
+
+    const proofModuleUrl = pathToFileURL(
+      path.join(repoRoot, "bin/operator-safe-ax-live-proof.mjs")
+    ).href;
+    const {
+      ensureStatusGate,
+      executeSuccessfulPressLifecycle,
+      initializeController,
+      performPressFlow,
+      runReinspection
+    } = await import(proofModuleUrl);
+    const canonicalSemanticStatus = {
+      connected: true,
+      accessibility_trusted: true,
+      ax_tree_inspection_available: true,
+      operator_safe_ax_available: true,
+      operator_safe_ax_actions: ["press", "set_value"],
+      supported_action_strategies: ["ax_semantic"]
+    };
+    assert.deepEqual(
+      ensureStatusGate(canonicalSemanticStatus).operator_safe_ax_actions,
+      ["press", "set_value"]
+    );
+    assert.deepEqual(
+      ensureStatusGate({
+        ...canonicalSemanticStatus,
+        operator_safe_ax_actions: ["press"]
+      }).operator_safe_ax_actions,
+      ["press"],
+      "The press proof controller must remain compatible with a press-only host"
+    );
+    for (const invalidActions of [
+      ["set_value"],
+      ["set_value", "press"],
+      ["press", "press"],
+      ["press", "unknown"]
+    ]) {
+      assert.throws(
+        () => ensureStatusGate({
+          ...canonicalSemanticStatus,
+          operator_safe_ax_actions: invalidActions
+        }),
+        /AX status gate failed/
+      );
+    }
+    const topologyVersion = VALID_SHA256_TOPOLOGY_TOKEN;
+    const treePayload = {
+      target_app: {
+        pid: 1234,
+        bundle_id: "com.apple.calculator",
+        name: "Calculator"
+      },
+      ax_snapshot_id: "ax-snap-live-proof",
+      app_instance_ref: "app-inst-live-proof",
+      expires_at_ms: Date.now() + 30_000,
+      topology_version: topologyVersion,
+      node_count: 1,
+      max_depth_reached: 1,
+      truncated: false,
+      tree: {
+        id: "ax-AXButton-1",
+        element_ref: "ax-el-live-proof",
+        supported_actions: ["press"],
+        role: "AXButton",
+        identifier: "One",
+        description: "1",
+        enabled: true,
+        bounds: { x: 10, y: 10, width: 50, height: 50 }
+      }
+    };
+    const successActionPayload = {
+      action_id: "ax-act-live-proof",
+      status: "dispatched",
+      strategy: "ax_semantic",
+      action: "press",
+      ax_snapshot_id: treePayload.ax_snapshot_id,
+      app_instance_ref: treePayload.app_instance_ref,
+      element_ref: treePayload.tree.element_ref,
+      topology_version: topologyVersion,
+      requires_reinspection: true,
+      global_hid_posts: 0,
+      duration_ms: 1
+    };
+    const toolSuccess = (data: unknown) => ({
+      content: [{ type: "text", text: JSON.stringify(data) }]
+    });
+    const toolError = (code: string, message: string) => ({
+      isError: true,
+      content: [{
+        type: "text",
+        text: JSON.stringify({ error: { code, message } })
+      }]
+    });
+    const opts = {
+      appId: "com.apple.calculator",
+      retryLimit: 2,
+      toolTimeoutMs: 1_000,
+      maxDepth: 10,
+      intent: "Test one exact semantic press"
+    };
+    const selector = { identifier: "One", description: "1" };
+
+    const fakeTransport = { kind: "fake-transport" };
+    let connectedTransport: unknown = null;
+    const fakeProductionController = {
+      client: {
+        connect: async (transport: unknown) => {
+          connectedTransport = transport;
+        }
+      },
+      transport: fakeTransport,
+      reconnectForRecovery: async () => {}
+    };
+    const initializedController = await initializeController(
+      "/tmp/unused-proof-socket",
+      async () => fakeProductionController
+    );
+    assert.equal(
+      initializedController,
+      fakeProductionController,
+      "Production initialization must retain the recovery-capable controller object"
+    );
+    assert.equal(connectedTransport, fakeTransport);
+    assert.equal(
+      typeof initializedController.reconnectForRecovery,
+      "function"
+    );
+
+    let inspectionCalls = 0;
+    let actionCalls = 0;
+    const inspectionRetryController = {
+      client: {
+        callTool: async ({ name }: { name: string }) => {
+          if (name === "computer_use_ax_tree") {
+            inspectionCalls += 1;
+            return inspectionCalls === 1
+              ? toolError("USER_INTERVENED", "Input changed during inspection; no lease issued")
+              : toolSuccess(treePayload);
+          }
+          if (name === "computer_use_ax_action") {
+            actionCalls += 1;
+            return toolSuccess(successActionPayload);
+          }
+          throw new Error(`Unexpected tool ${name}`);
+        }
+      },
+      reconnectForRecovery: async () => {}
+    };
+    const successfulFlow = await performPressFlow(
+      inspectionRetryController,
+      opts,
+      selector
+    );
+    assert.equal(successfulFlow.inspectionAttempt, 2);
+    assert.equal(inspectionCalls, 2);
+    assert.equal(actionCalls, 1);
+
+    inspectionCalls = 0;
+    actionCalls = 0;
+    const exhaustedInspectionController = {
+      client: {
+        callTool: async ({ name }: { name: string }) => {
+          if (name === "computer_use_ax_tree") {
+            inspectionCalls += 1;
+            return toolError(
+              "USER_INTERVENED",
+              "Input changed during inspection; no lease issued"
+            );
+          }
+          if (name === "computer_use_ax_action") {
+            actionCalls += 1;
+            return toolSuccess(successActionPayload);
+          }
+          throw new Error(`Unexpected tool ${name}`);
+        }
+      }
+    };
+    await assert.rejects(
+      performPressFlow(exhaustedInspectionController, opts, selector),
+      (error: any) => {
+        assert.equal(
+          error.details?.code,
+          "USER_INTERVENED_RETRY_EXHAUSTED"
+        );
+        assert.equal(error.details?.attempts?.length, 3);
+        assert.equal(error.exitCode, 5);
+        return true;
+      }
+    );
+    assert.equal(inspectionCalls, 3);
+    assert.equal(
+      actionCalls,
+      0,
+      "Exhausted read-only inspection retries must never dispatch an action"
+    );
+
+    inspectionCalls = 0;
+    actionCalls = 0;
+    const duplicateSelectorTree = {
+      ...treePayload,
+      node_count: 3,
+      max_depth_reached: 2,
+      tree: {
+        id: "ax-AXGroup-1",
+        role: "AXGroup",
+        bounds: { x: 0, y: 0, width: 200, height: 100 },
+        children: [
+          treePayload.tree,
+          {
+            id: "ax-AXStaticText-2",
+            role: "AXStaticText",
+            identifier: "One",
+            description: "1",
+            value: "sibling",
+            bounds: { x: 100, y: 10, width: 50, height: 50 }
+          }
+        ]
+      }
+    };
+    const duplicateSelectorController = {
+      client: {
+        callTool: async ({ name }: { name: string }) => {
+          if (name === "computer_use_ax_tree") {
+            inspectionCalls += 1;
+            return toolSuccess(duplicateSelectorTree);
+          }
+          if (name === "computer_use_ax_action") {
+            actionCalls += 1;
+            return toolSuccess(successActionPayload);
+          }
+          throw new Error(`Unexpected tool ${name}`);
+        }
+      }
+    };
+    await assert.rejects(
+      performPressFlow(duplicateSelectorController, opts, selector),
+      (error: any) => {
+        assert.equal(error.details?.code, "TARGET_AMBIGUOUS");
+        return true;
+      }
+    );
+    assert.equal(inspectionCalls, 1);
+    assert.equal(
+      actionCalls,
+      0,
+      "Selector uniqueness must cover non-action siblings before dispatch"
+    );
+
+    inspectionCalls = 0;
+    actionCalls = 0;
+    let recoveryReconnects = 0;
+    const recoveryOrder: string[] = [];
+    let observedActionRequestOptions: any = null;
+    const outcomeUnknownController = {
+      client: {
+        callTool: async (
+          { name }: { name: string },
+          _schema?: unknown,
+          requestOptions?: unknown
+        ) => {
+          if (name === "computer_use_ax_tree") {
+            inspectionCalls += 1;
+            recoveryOrder.push("tree");
+            return toolSuccess(treePayload);
+          }
+          if (name === "computer_use_ax_action") {
+            actionCalls += 1;
+            recoveryOrder.push("action");
+            observedActionRequestOptions = requestOptions;
+            return toolError(
+              "USER_INTERVENED",
+              "Input changed during AX dispatch; action outcome is unknown"
+            );
+          }
+          throw new Error(`Unexpected tool ${name}`);
+        }
+      },
+      reconnectForRecovery: async () => {
+        recoveryReconnects += 1;
+        recoveryOrder.push("reconnect");
+      }
+    };
+    await assert.rejects(
+      performPressFlow(outcomeUnknownController, opts, selector),
+      (error: any) => {
+        assert.equal(error.details?.code, "USER_INTERVENED");
+        assert.equal(error.recoveryContext?.reinspection?.sameTargetProcessFields, true);
+        assert.equal(
+          error.recoveryContext?.reinspection?.sameTargetPerceptionInvariant,
+          true
+        );
+        assert.equal(error.recoveryContext?.reinspection?.sameSelectorResolution, "unique");
+        return true;
+      }
+    );
+    assert.equal(
+      inspectionCalls,
+      2,
+      "An action-side unknown outcome must trigger exactly one fresh read-only inspection"
+    );
+    assert.equal(
+      actionCalls,
+      1,
+      "An action-side USER_INTERVENED result must never dispatch a second press"
+    );
+    assert.equal(recoveryReconnects, 1);
+    assert.deepEqual(
+      recoveryOrder,
+      ["tree", "action", "reconnect", "tree"],
+      "Recovery inspection must follow a fresh-controller barrier"
+    );
+    assert.equal(observedActionRequestOptions?.timeout, opts.toolTimeoutMs);
+    assert.equal(
+      observedActionRequestOptions?.maxTotalTimeout,
+      opts.toolTimeoutMs
+    );
+
+    inspectionCalls = 0;
+    actionCalls = 0;
+    let transportReconnects = 0;
+    const transportFailureController: any = {
+      client: {
+        callTool: async ({ name }: { name: string }) => {
+          if (name === "computer_use_ax_tree") {
+            inspectionCalls += 1;
+            return toolSuccess(treePayload);
+          }
+          if (name === "computer_use_ax_action") {
+            actionCalls += 1;
+            throw new Error("simulated MCP transport disconnect");
+          }
+          throw new Error(`Unexpected tool ${name}`);
+        }
+      },
+      reconnectForRecovery: async () => {
+        transportReconnects += 1;
+        transportFailureController.client = {
+          callTool: async ({ name }: { name: string }) => {
+            assert.equal(name, "computer_use_ax_tree");
+            inspectionCalls += 1;
+            return toolSuccess(treePayload);
+          }
+        };
+      }
+    };
+    await assert.rejects(
+      performPressFlow(transportFailureController, opts, selector),
+      (error: any) => {
+        assert.equal(error.recoveryContext?.recoveryTransport, "fresh_mcp_process");
+        assert.equal(
+          error.recoveryContext?.reinspection?.sameTargetPerceptionInvariant,
+          true
+        );
+        return true;
+      }
+    );
+    assert.equal(actionCalls, 1);
+    assert.equal(transportReconnects, 1);
+    assert.equal(
+      inspectionCalls,
+      2,
+      "Transport failure recovery must inspect through the replacement client"
+    );
+
+    const changedTargetTree = {
+      ...treePayload,
+      ax_snapshot_id: "ax-snap-live-proof-after",
+      tree: {
+        ...treePayload.tree,
+        element_ref: "ax-el-live-proof-after",
+        identifier: "AllClear",
+        description: "All Clear"
+      }
+    };
+    inspectionCalls = 0;
+    const changedTargetController = {
+      client: {
+        callTool: async ({ name }: { name: string }) => {
+          assert.equal(name, "computer_use_ax_tree");
+          inspectionCalls += 1;
+          return toolSuccess(changedTargetTree);
+        }
+      }
+    };
+    const changedTargetReinspection = await runReinspection(
+      changedTargetController,
+      opts,
+      selector,
+      treePayload.target_app
+    );
+    assert.equal(inspectionCalls, 1);
+    assert.equal(changedTargetReinspection.sameSelectorResolution, "absent");
+    assert.equal(changedTargetReinspection.sameTargetProcessFields, true);
+    assert.equal(changedTargetReinspection.matchCount, 0);
+    assert.equal(changedTargetReinspection.match, null);
+    assert.equal(
+      changedTargetReinspection.treeData.ax_snapshot_id,
+      "ax-snap-live-proof-after",
+      "Fresh application reinspection must succeed even when a stateful target changes identity"
+    );
+
+    const disabledTargetTree = {
+      ...treePayload,
+      ax_snapshot_id: "ax-snap-live-proof-disabled",
+      tree: {
+        ...treePayload.tree,
+        element_ref: undefined,
+        supported_actions: undefined,
+        enabled: false
+      }
+    };
+    const disabledTargetController = {
+      client: {
+        callTool: async ({ name }: { name: string }) => {
+          assert.equal(name, "computer_use_ax_tree");
+          return toolSuccess(disabledTargetTree);
+        }
+      }
+    };
+    const disabledTargetReinspection = await runReinspection(
+      disabledTargetController,
+      opts,
+      selector,
+      treePayload.target_app
+    );
+    assert.equal(disabledTargetReinspection.sameSelectorResolution, "unique");
+    assert.equal(disabledTargetReinspection.match?.node.enabled, false);
+    assert.equal(disabledTargetReinspection.summaries?.advertises_press, false);
+    assert.equal(disabledTargetReinspection.summaries?.has_element_ref, false);
+
+    const truncatedMissingTree = {
+      ...changedTargetTree,
+      ax_snapshot_id: "ax-snap-live-proof-truncated",
+      truncated: true
+    };
+    const truncatedTargetController = {
+      client: {
+        callTool: async ({ name }: { name: string }) => {
+          assert.equal(name, "computer_use_ax_tree");
+          return toolSuccess(truncatedMissingTree);
+        }
+      }
+    };
+    const truncatedTargetReinspection = await runReinspection(
+      truncatedTargetController,
+      opts,
+      selector,
+      treePayload.target_app
+    );
+    assert.equal(
+      truncatedTargetReinspection.sameSelectorResolution,
+      "indeterminate_truncated"
+    );
+
+    const truncatedObservedTargetTree = {
+      ...treePayload,
+      ax_snapshot_id: "ax-snap-live-proof-truncated-observed",
+      truncated: true
+    };
+    const truncatedObservedTargetController = {
+      client: {
+        callTool: async ({ name }: { name: string }) => {
+          assert.equal(name, "computer_use_ax_tree");
+          return toolSuccess(truncatedObservedTargetTree);
+        }
+      }
+    };
+    const truncatedObservedReinspection = await runReinspection(
+      truncatedObservedTargetController,
+      opts,
+      selector,
+      treePayload.target_app
+    );
+    assert.equal(
+      truncatedObservedReinspection.sameSelectorResolution,
+      "indeterminate_truncated"
+    );
+
+    inspectionCalls = 0;
+    actionCalls = 0;
+    const truncatedPreActionController = {
+      client: {
+        callTool: async ({ name }: { name: string }) => {
+          if (name === "computer_use_ax_tree") {
+            inspectionCalls += 1;
+            return toolSuccess(truncatedObservedTargetTree);
+          }
+          if (name === "computer_use_ax_action") {
+            actionCalls += 1;
+            return toolSuccess(successActionPayload);
+          }
+          throw new Error(`Unexpected tool ${name}`);
+        }
+      }
+    };
+    await assert.rejects(
+      performPressFlow(truncatedPreActionController, opts, selector),
+      (error: any) => {
+        assert.equal(error.details?.code, "AX_TREE_TRUNCATED");
+        return true;
+      }
+    );
+    assert.equal(inspectionCalls, 1);
+    assert.equal(actionCalls, 0, "A truncated pre-action tree must never dispatch");
+
+    const changedAppTree = {
+      ...treePayload,
+      ax_snapshot_id: "ax-snap-live-proof-new-app",
+      app_instance_ref: "app-inst-live-proof-relaunched",
+      target_app: {
+        ...treePayload.target_app,
+        pid: 4321
+      }
+    };
+    const changedAppController = {
+      client: {
+        callTool: async ({ name }: { name: string }) => {
+          assert.equal(name, "computer_use_ax_tree");
+          return toolSuccess(changedAppTree);
+        }
+      }
+    };
+    const changedAppReinspection = await runReinspection(
+      changedAppController,
+      opts,
+      selector,
+      treePayload.target_app
+    );
+    assert.equal(changedAppReinspection.sameTargetProcessFields, false);
+
+    let lifecycleTreeCalls = 0;
+    actionCalls = 0;
+    const successfulLifecycleController = {
+      client: {
+        callTool: async ({ name }: { name: string }) => {
+          if (name === "computer_use_ax_tree") {
+            lifecycleTreeCalls += 1;
+            return toolSuccess({
+              ...treePayload,
+              ax_snapshot_id: `ax-snap-lifecycle-${lifecycleTreeCalls}`,
+              app_instance_ref: `app-inst-lifecycle-${lifecycleTreeCalls}`,
+              tree: {
+                ...treePayload.tree,
+                element_ref: `ax-el-lifecycle-${lifecycleTreeCalls}`
+              }
+            });
+          }
+          if (name === "computer_use_ax_action") {
+            actionCalls += 1;
+            return toolSuccess({
+              ...successActionPayload,
+              ax_snapshot_id: "ax-snap-lifecycle-1",
+              app_instance_ref: "app-inst-lifecycle-1",
+              element_ref: "ax-el-lifecycle-1"
+            });
+          }
+          throw new Error(`Unexpected tool ${name}`);
+        }
+      }
+    };
+    const lifecycleResult = await executeSuccessfulPressLifecycle(
+      successfulLifecycleController,
+      opts,
+      selector
+    );
+    assert.equal(lifecycleTreeCalls, 2);
+    assert.equal(actionCalls, 1);
+    assert.equal(lifecycleResult.reinspection.sameTargetProcessFields, true);
+    assert.equal(
+      lifecycleResult.reinspection.sameTargetPerceptionInvariant,
+      true
+    );
+    assert.notEqual(
+      lifecycleResult.pressAttempt.refs.app_instance_ref,
+      lifecycleResult.reinspection.treeData.app_instance_ref,
+      "Fresh per-inspection app_instance_ref values must not invalidate same-process evidence"
+    );
+
+    lifecycleTreeCalls = 0;
+    actionCalls = 0;
+    const beforeValueTree = {
+      ...treePayload,
+      ax_snapshot_id: "ax-snap-live-proof-value-before",
+      tree: {
+        ...treePayload.tree,
+        element_ref: "ax-el-live-proof-value-before",
+        value: "before"
+      }
+    };
+    const verifiedValueTree = {
+      ...treePayload,
+      ax_snapshot_id: "ax-snap-live-proof-value-verified",
+      tree: {
+        ...treePayload.tree,
+        element_ref: "ax-el-live-proof-value-verified",
+        value: "expected"
+      }
+    };
+    const verifiedValueLifecycleController = {
+      client: {
+        callTool: async ({ name }: { name: string }) => {
+          if (name === "computer_use_ax_tree") {
+            lifecycleTreeCalls += 1;
+            return toolSuccess(
+              lifecycleTreeCalls === 1 ? beforeValueTree : verifiedValueTree
+            );
+          }
+          if (name === "computer_use_ax_action") {
+            actionCalls += 1;
+            return toolSuccess({
+              ...successActionPayload,
+              ax_snapshot_id: beforeValueTree.ax_snapshot_id,
+              element_ref: beforeValueTree.tree.element_ref
+            });
+          }
+          throw new Error(`Unexpected tool ${name}`);
+        }
+      }
+    };
+    const verifiedValueLifecycle = await executeSuccessfulPressLifecycle(
+      verifiedValueLifecycleController,
+      { ...opts, beforeValue: "before", afterValue: "expected" },
+      selector
+    );
+    assert.equal(lifecycleTreeCalls, 2);
+    assert.equal(actionCalls, 1);
+    assert.equal(verifiedValueLifecycle.reinspection.observedValue, "expected");
+
+    lifecycleTreeCalls = 0;
+    actionCalls = 0;
+    const changedAppLifecycleController = {
+      client: {
+        callTool: async ({ name }: { name: string }) => {
+          if (name === "computer_use_ax_tree") {
+            lifecycleTreeCalls += 1;
+            return toolSuccess(lifecycleTreeCalls === 1 ? treePayload : changedAppTree);
+          }
+          if (name === "computer_use_ax_action") {
+            actionCalls += 1;
+            return toolSuccess(successActionPayload);
+          }
+          throw new Error(`Unexpected tool ${name}`);
+        }
+      }
+    };
+    await assert.rejects(
+      executeSuccessfulPressLifecycle(changedAppLifecycleController, opts, selector),
+      (error: any) => {
+        assert.equal(error.details?.code, "TARGET_PROCESS_CHANGED");
+        assert.equal(
+          error.completedActionContext?.reinspection?.sameTargetProcessFields,
+          false
+        );
+        return true;
+      }
+    );
+    assert.equal(lifecycleTreeCalls, 2);
+    assert.equal(actionCalls, 1);
+
+    lifecycleTreeCalls = 0;
+    actionCalls = 0;
+    const switchedSelectorIdentityTree = {
+      ...verifiedValueTree,
+      ax_snapshot_id: "ax-snap-live-proof-switched-identity",
+      tree: {
+        ...verifiedValueTree.tree,
+        id: "ax-AXButton-99",
+        element_ref: "ax-el-live-proof-switched-identity"
+      }
+    };
+    const switchedSelectorIdentityController = {
+      client: {
+        callTool: async ({ name }: { name: string }) => {
+          if (name === "computer_use_ax_tree") {
+            lifecycleTreeCalls += 1;
+            return toolSuccess(
+              lifecycleTreeCalls === 1
+                ? beforeValueTree
+                : switchedSelectorIdentityTree
+            );
+          }
+          if (name === "computer_use_ax_action") {
+            actionCalls += 1;
+            return toolSuccess({
+              ...successActionPayload,
+              ax_snapshot_id: beforeValueTree.ax_snapshot_id,
+              element_ref: beforeValueTree.tree.element_ref
+            });
+          }
+          throw new Error(`Unexpected tool ${name}`);
+        }
+      }
+    };
+    await assert.rejects(
+      executeSuccessfulPressLifecycle(
+        switchedSelectorIdentityController,
+        { ...opts, beforeValue: "before", afterValue: "expected" },
+        selector
+      ),
+      (error: any) => {
+        assert.equal(error.details?.code, "AFTER_VALUE_UNVERIFIABLE");
+        assert.equal(
+          error.completedActionContext?.reinspection
+            ?.sameTargetPerceptionInvariant,
+          false
+        );
+        return true;
+      }
+    );
+    assert.equal(lifecycleTreeCalls, 2);
+    assert.equal(actionCalls, 1);
+
+    lifecycleTreeCalls = 0;
+    actionCalls = 0;
+    const selectorDriftLifecycleController = {
+      client: {
+        callTool: async ({ name }: { name: string }) => {
+          if (name === "computer_use_ax_tree") {
+            lifecycleTreeCalls += 1;
+            return toolSuccess(lifecycleTreeCalls === 1 ? treePayload : changedTargetTree);
+          }
+          if (name === "computer_use_ax_action") {
+            actionCalls += 1;
+            return toolSuccess(successActionPayload);
+          }
+          throw new Error(`Unexpected tool ${name}`);
+        }
+      }
+    };
+    await assert.rejects(
+      executeSuccessfulPressLifecycle(
+        selectorDriftLifecycleController,
+        { ...opts, afterValue: "expected" },
+        selector
+      ),
+      (error: any) => {
+        assert.equal(error.details?.code, "AFTER_VALUE_UNVERIFIABLE");
+        return true;
+      }
+    );
+    assert.equal(lifecycleTreeCalls, 2);
+    assert.equal(actionCalls, 1);
+
+    lifecycleTreeCalls = 0;
+    actionCalls = 0;
+    const valueMismatchTree = {
+      ...treePayload,
+      ax_snapshot_id: "ax-snap-live-proof-value-mismatch",
+      tree: {
+        ...treePayload.tree,
+        element_ref: "ax-el-live-proof-value-mismatch",
+        value: "wrong"
+      }
+    };
+    const valueMismatchLifecycleController = {
+      client: {
+        callTool: async ({ name }: { name: string }) => {
+          if (name === "computer_use_ax_tree") {
+            lifecycleTreeCalls += 1;
+            return toolSuccess(lifecycleTreeCalls === 1 ? treePayload : valueMismatchTree);
+          }
+          if (name === "computer_use_ax_action") {
+            actionCalls += 1;
+            return toolSuccess(successActionPayload);
+          }
+          throw new Error(`Unexpected tool ${name}`);
+        }
+      }
+    };
+    await assert.rejects(
+      executeSuccessfulPressLifecycle(
+        valueMismatchLifecycleController,
+        { ...opts, afterValue: "expected" },
+        selector
+      ),
+      (error: any) => {
+        assert.equal(error.details?.code, "AFTER_VALUE_MISMATCH");
+        return true;
+      }
+    );
+    assert.equal(lifecycleTreeCalls, 2);
+    assert.equal(actionCalls, 1);
+
+    inspectionCalls = 0;
+    actionCalls = 0;
+    const mismatchedReceiptController = {
+      client: {
+        callTool: async ({ name }: { name: string }) => {
+          if (name === "computer_use_ax_tree") {
+            inspectionCalls += 1;
+            return toolSuccess(treePayload);
+          }
+          if (name === "computer_use_ax_action") {
+            actionCalls += 1;
+            return toolSuccess({
+              ...successActionPayload,
+              element_ref: "ax-el-wrong-authority"
+            });
+          }
+          throw new Error(`Unexpected tool ${name}`);
+        }
+      },
+      reconnectForRecovery: async () => {}
+    };
+    await assert.rejects(
+      performPressFlow(mismatchedReceiptController, opts, selector),
+      (error: any) => {
+        assert.equal(error.details?.code, "ACTION_RECEIPT_AUTHORITY_MISMATCH");
+        assert.equal(error.recoveryContext?.reinspection?.sameTargetProcessFields, true);
+        return true;
+      }
+    );
+    assert.equal(inspectionCalls, 2);
+    assert.equal(actionCalls, 1);
+  });
 });
 
 describe("Defect 4 & 5 Hardened Validation Tests", () => {
   test("AXTreeDataSchema positive and negative validation", () => {
     const validTreeData = {
       target_app: { pid: 123, bundle_id: "com.apple.calc", name: "Calc" },
+      ax_snapshot_id: "ax-snap-test-001",
+      app_instance_ref: "app-inst-test-001",
+      expires_at_ms: Date.now() + 30_000,
       topology_version: "top-sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
       node_count: 2,
       max_depth_reached: 2,
@@ -1062,6 +2354,10 @@ describe("Defect 4 & 5 Hardened Validation Tests", () => {
       }
     };
     assert.equal(AXTreeDataSchema.safeParse(validTreeData).success, true);
+
+    const missingLeaseData = { ...validTreeData } as any;
+    delete missingLeaseData.ax_snapshot_id;
+    assert.equal(AXTreeDataSchema.safeParse(missingLeaseData).success, false);
 
     // Negative: node_count mismatch
     const badCountData = { ...validTreeData, node_count: 99 };
@@ -1109,6 +2405,60 @@ describe("Defect 4 & 5 Hardened Validation Tests", () => {
       tree: { id: "ax-1", role: "AXWindow", title: "A".repeat(300), bounds: { x: 0, y: 0, width: 10, height: 10 } }
     };
     assert.equal(AXTreeDataSchema.safeParse(longStringData).success, false);
+    const longIdentifierData = {
+      ...validTreeData,
+      node_count: 1,
+      max_depth_reached: 1,
+      tree: { id: "ax-1", role: "AXButton", identifier: "I".repeat(257), bounds: { x: 0, y: 0, width: 10, height: 10 } }
+    };
+    assert.equal(AXTreeDataSchema.safeParse(longIdentifierData).success, false);
+    const longDescriptionData = {
+      ...validTreeData,
+      node_count: 1,
+      max_depth_reached: 1,
+      tree: { id: "ax-1", role: "AXButton", description: "D".repeat(257), bounds: { x: 0, y: 0, width: 10, height: 10 } }
+    };
+    assert.equal(AXTreeDataSchema.safeParse(longDescriptionData).success, false);
+
+    const unpairedElementRefData = {
+      ...negativeOriginData,
+      tree: {
+        id: "ax-1",
+        element_ref: "ax-el-without-actions",
+        role: "AXButton",
+        bounds: { x: 0, y: 0, width: 10, height: 10 }
+      }
+    };
+    assert.equal(AXTreeDataSchema.safeParse(unpairedElementRefData).success, false);
+
+    const actionableTextData = {
+      ...negativeOriginData,
+      tree: {
+        id: "ax-text-1",
+        element_ref: "ax-el-text-1",
+        supported_actions: ["press", "set_value"],
+        role: "AXTextField",
+        enabled: true,
+        bounds: { x: 0, y: 0, width: 100, height: 20 }
+      }
+    };
+    assert.equal(AXTreeDataSchema.safeParse(actionableTextData).success, true);
+    assert.equal(AXTreeDataSchema.safeParse({
+      ...actionableTextData,
+      tree: { ...actionableTextData.tree, subrole: "AXSecureTextField" }
+    }).success, false, "Secure text must never advertise set_value");
+    assert.equal(AXTreeDataSchema.safeParse({
+      ...actionableTextData,
+      tree: { ...actionableTextData.tree, enabled: false }
+    }).success, false, "Disabled text must never advertise set_value");
+    assert.equal(AXTreeDataSchema.safeParse({
+      ...actionableTextData,
+      tree: { ...actionableTextData.tree, role: "AXButton" }
+    }).success, false, "Non-text roles must never advertise set_value");
+    assert.equal(AXTreeDataSchema.safeParse({
+      ...actionableTextData,
+      tree: { ...actionableTextData.tree, supported_actions: ["set_value", "press"] }
+    }).success, false, "AX actions must use canonical wire order");
   });
 
   test("DragInputSchema rejects right/middle mouse buttons", () => {

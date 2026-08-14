@@ -36,12 +36,17 @@ export class MockHostClient implements HostClient {
   public tccState: "granted" | "denied" = "granted";
   public axAvailable: boolean = false;
   public axTrusted: boolean = false;
+  public operatorSafeAXActions: Array<"press" | "set_value"> = ["press", "set_value"];
   public inputMutationState: "enabled" | "disabled" = "disabled";
   public mockDisplayId: number = 1;
 
   public request: (method: string, params?: Record<string, unknown>, signal?: AbortSignal) => Promise<IPCResponse> = async (method, params) => {
     if (method === "status") {
       const topVer = "top-sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+      const operatorSafeAXActions = this.axAvailable
+        ? [...this.operatorSafeAXActions]
+        : [];
+      const operatorSafeAXAvailable = operatorSafeAXActions.length > 0;
       return {
         id: "mock-req",
         success: true,
@@ -51,6 +56,13 @@ export class MockHostClient implements HostClient {
           accessibility_available: this.axAvailable,
           accessibility_trusted: this.axTrusted,
           ax_tree_inspection_available: this.axAvailable,
+          operator_safe_ax_available: operatorSafeAXAvailable,
+          operator_safe_ax_actions: operatorSafeAXActions,
+          supported_action_strategies: [
+            ...(operatorSafeAXAvailable ? ["ax_semantic"] : []),
+            ...(this.inputMutationState === "enabled" ? ["exclusive_global_hid"] : [])
+          ],
+          global_hid_may_affect_pointer_or_focus: true,
           input_mutation_state: this.inputMutationState,
           topology_version: topVer,
           primary_display_id: this.mockDisplayId,
@@ -135,6 +147,7 @@ export class MockHostClient implements HostClient {
 
     if (method === "ax_tree") {
       const topVer = "top-sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+      const supportedActions = [...this.operatorSafeAXActions];
       return {
         id: "mock-ax",
         success: true,
@@ -144,19 +157,63 @@ export class MockHostClient implements HostClient {
             bundle_id: (params?.app_id as string) || "com.apple.calculator",
             name: "Calculator"
           },
+          ax_snapshot_id: "ax-snap-mock-001",
+          app_instance_ref: "app-inst-mock-001",
+          expires_at_ms: Date.now() + 30_000,
           topology_version: topVer,
           node_count: 1,
           max_depth_reached: 1,
           truncated: false,
           tree: {
             id: "ax-AXApplication-1",
-            role: "AXApplication",
+            ...(supportedActions.length > 0 ? {
+              element_ref: "ax-el-mock-001",
+              supported_actions: supportedActions
+            } : {}),
+            role: "AXTextField",
             subrole: "AXStandard",
+            identifier: "calculator-root",
+            description: "Calculator",
             title: "Calculator",
             enabled: true,
             focused: true,
             bounds: { x: 0, y: 0, width: 300, height: 400 }
           }
+        }
+      };
+    }
+
+    if (method === "ax_action") {
+      const action = params?.action;
+      if (
+        !this.axAvailable ||
+        (action !== "press" && action !== "set_value") ||
+        !this.operatorSafeAXActions.includes(action)
+      ) {
+        return {
+          id: "mock-ax-action-unsupported",
+          success: false,
+          error: {
+            code: "NONINTERFERING_ACTION_UNSUPPORTED",
+            message: "Requested AX action is not advertised by this host"
+          }
+        };
+      }
+      return {
+        id: "mock-ax-action",
+        success: true,
+        data: {
+          action_id: "ax-act-mock-001",
+          status: "dispatched",
+          strategy: "ax_semantic",
+          action,
+          ax_snapshot_id: params?.ax_snapshot_id,
+          app_instance_ref: params?.app_instance_ref,
+          element_ref: params?.element_ref,
+          topology_version: params?.topology_version,
+          requires_reinspection: true,
+          global_hid_posts: 0,
+          duration_ms: 1.25
         }
       };
     }
@@ -172,7 +229,7 @@ export class MockHostClient implements HostClient {
   };
 }
 
-const MUTATION_METHODS = new Set(["click", "move", "drag", "type", "shortcut", "scroll"]);
+const MUTATION_METHODS = new Set(["click", "move", "drag", "type", "shortcut", "scroll", "ax_action"]);
 
 export function getDefaultSocketPath(): string {
   const uid = process.getuid ? process.getuid() : 501;
@@ -227,6 +284,17 @@ export class UnixSocketHostClient implements HostClient {
       let client: net.Socket | null = null;
       let isDispatched = false;
       let isSettled = false;
+      const isAxAction = method === "ax_action";
+      const mutationErrorCode = isAxAction ? "OUTCOME_UNKNOWN" : "ACTION_OUTCOME_UNKNOWN";
+      const mutationRecoveryHint = isAxAction ? "computer_use_ax_tree" : "computer_use_observe";
+      const mutationOutcomeUnknown = (reason: string): IPCResponse => ({
+        id: reqId,
+        success: false,
+        error: {
+          code: mutationErrorCode,
+          message: `${reason}; action outcome is unknown. A fresh ${mutationRecoveryHint} snapshot is required.`
+        }
+      });
 
       const finish = (response: IPCResponse) => {
         if (isSettled) return;
@@ -240,14 +308,9 @@ export class UnixSocketHostClient implements HostClient {
 
       const timer = setTimeout(() => {
         if (isDispatched && MUTATION_METHODS.has(method)) {
-          finish({
-            id: reqId,
-            success: false,
-            error: {
-              code: "ACTION_OUTCOME_UNKNOWN",
-              message: `Mutation request '${method}' timed out after socket write; action outcome is unknown. A fresh computer_use_observe snapshot is required.`
-            }
-          });
+          finish(mutationOutcomeUnknown(
+            `Mutation request '${method}' timed out after socket write`
+          ));
         } else {
           finish({
             id: reqId,
@@ -263,14 +326,9 @@ export class UnixSocketHostClient implements HostClient {
       const abortHandler = () => {
         clearTimeout(timer);
         if (isDispatched && MUTATION_METHODS.has(method)) {
-          finish({
-            id: reqId,
-            success: false,
-            error: {
-              code: "ACTION_OUTCOME_UNKNOWN",
-              message: `Mutation request '${method}' aborted after socket write; action outcome is unknown. A fresh computer_use_observe snapshot is required.`
-            }
-          });
+          finish(mutationOutcomeUnknown(
+            `Mutation request '${method}' aborted after socket write`
+          ));
         } else {
           finish({
             id: reqId,
@@ -328,11 +386,9 @@ export class UnixSocketHostClient implements HostClient {
           if (err) {
             clearTimeout(timer);
             if (isDispatched) {
-              finish({
-                id: reqId,
-                success: false,
-                error: { code: "ACTION_OUTCOME_UNKNOWN", message: `Socket write error after dispatch: ${err.message}` }
-              });
+              finish(mutationOutcomeUnknown(
+                `Socket write error after mutation dispatch: ${err.message}`
+              ));
             } else {
               finish({
                 id: reqId,
@@ -358,11 +414,9 @@ export class UnixSocketHostClient implements HostClient {
             if (expectedLen > 16 * 1024 * 1024) {
               clearTimeout(timer);
               if (isDispatched) {
-                finish({
-                  id: reqId,
-                  success: false,
-                  error: { code: "ACTION_OUTCOME_UNKNOWN", message: `Oversized response payload length ${expectedLen} after mutation dispatch` }
-                });
+                finish(mutationOutcomeUnknown(
+                  `Oversized response payload length ${expectedLen} after mutation dispatch`
+                ));
               } else {
                 finish({
                   id: reqId,
@@ -383,11 +437,9 @@ export class UnixSocketHostClient implements HostClient {
             const parsedResp = IPCResponseSchema.parse(rawObj);
             if (parsedResp.id !== reqId) {
               if (isDispatched) {
-                finish({
-                  id: reqId,
-                  success: false,
-                  error: { code: "ACTION_OUTCOME_UNKNOWN", message: `Response ID mismatch '${parsedResp.id}' after mutation dispatch` }
-                });
+                finish(mutationOutcomeUnknown(
+                  `Response ID mismatch '${parsedResp.id}' after mutation dispatch`
+                ));
               } else {
                 finish({
                   id: reqId,
@@ -400,11 +452,9 @@ export class UnixSocketHostClient implements HostClient {
             finish(parsedResp);
           } catch (parseErr: any) {
             if (isDispatched) {
-              finish({
-                id: reqId,
-                success: false,
-                error: { code: "ACTION_OUTCOME_UNKNOWN", message: `Response parse error after mutation dispatch: ${parseErr.message}` }
-              });
+              finish(mutationOutcomeUnknown(
+                `Response parse error after mutation dispatch: ${parseErr.message}`
+              ));
             } else {
               finish({
                 id: reqId,
@@ -419,11 +469,9 @@ export class UnixSocketHostClient implements HostClient {
       client.on("error", (err) => {
         clearTimeout(timer);
         if (isDispatched) {
-          finish({
-            id: reqId,
-            success: false,
-            error: { code: "ACTION_OUTCOME_UNKNOWN", message: `IPC socket error after dispatch: ${err.message}` }
-          });
+          finish(mutationOutcomeUnknown(
+            `IPC socket error after mutation dispatch: ${err.message}`
+          ));
         } else {
           finish({
             id: reqId,
@@ -437,11 +485,7 @@ export class UnixSocketHostClient implements HostClient {
         if (!isSettled && (expectedLen === null || responseBuffer.length < 4 + expectedLen)) {
           clearTimeout(timer);
           if (isDispatched) {
-            finish({
-              id: reqId,
-              success: false,
-              error: { code: "ACTION_OUTCOME_UNKNOWN", message: "Socket closed after mutation dispatch; action outcome is unknown." }
-            });
+            finish(mutationOutcomeUnknown("Socket closed after mutation dispatch"));
           } else {
             finish({
               id: reqId,
