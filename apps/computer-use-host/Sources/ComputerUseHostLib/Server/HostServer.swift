@@ -252,7 +252,7 @@ public actor HostServer {
                 let operatorSafeAXAvailable =
                     axEngine.isAvailable &&
                     axActionEngine.isOperatorSafeActionAvailable &&
-                    axActionEngine.supportedOperatorSafeActions == ["press"]
+                    axActionEngine.supportedOperatorSafeActions == ["press", "set_value"]
                 let supportedActionStrategies: [AnyCodable] =
                     (operatorSafeAXAvailable ? [.string("ax_semantic")] : []) +
                     (osAxTrusted ? [.string("exclusive_global_hid")] : [])
@@ -287,7 +287,7 @@ public actor HostServer {
                         "ax_tree_inspection_available": .bool(axEngine.isAvailable),
                         "operator_safe_ax_available": .bool(operatorSafeAXAvailable),
                         "operator_safe_ax_actions": operatorSafeAXAvailable
-                            ? .array([.string("press")])
+                            ? .array([.string("press"), .string("set_value")])
                             : .array([]),
                         "supported_action_strategies": .array(supportedActionStrategies),
                         "global_hid_may_affect_pointer_or_focus": .bool(true),
@@ -425,8 +425,24 @@ public actor HostServer {
                       !action.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                     throw ComputerUseError.ipcError(reason: "action parameter is required and must be nonblank")
                 }
-                guard action == "press" else {
+                guard action == "press" || action == "set_value" else {
                     throw ComputerUseError.noninterferingActionUnsupported(action: action)
+                }
+                let value: String?
+                if action == "set_value" {
+                    guard let rawValue = request.params?["value"]?.rawValue as? String else {
+                        throw ComputerUseError.ipcError(
+                            reason: "value parameter is required when action is set_value"
+                        )
+                    }
+                    value = try DefaultAXInspector.validateSetValueInput(rawValue)
+                } else {
+                    guard request.params?["value"] == nil else {
+                        throw ComputerUseError.ipcError(
+                            reason: "value parameter is valid only when action is set_value"
+                        )
+                    }
+                    value = nil
                 }
                 guard let snapshotId = request.params?["ax_snapshot_id"]?.rawValue as? String,
                       !snapshotId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -455,7 +471,8 @@ public actor HostServer {
                 guard axActionEngine.isOperatorSafeActionAvailable else {
                     throw ComputerUseError.noninterferingActionUnsupported(action: action)
                 }
-                guard axActionEngine.supportedOperatorSafeActions == ["press"] else {
+                guard axActionEngine.supportedOperatorSafeActions == ["press", "set_value"],
+                      axActionEngine.supportedOperatorSafeActions.contains(action) else {
                     throw ComputerUseError.noninterferingActionUnsupported(action: action)
                 }
 
@@ -464,6 +481,7 @@ public actor HostServer {
                     appInstanceRef: appInstanceRef,
                     elementRef: elementRef,
                     action: action,
+                    value: value,
                     topologyVersion: requestedTopologyVersion
                 )
                 guard !result.actionId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,

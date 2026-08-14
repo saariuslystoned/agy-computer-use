@@ -1,14 +1,14 @@
 ---
 name: computer-use
-description: Provides explicit-app AX inspection, one-shot operator-safe semantic press, desktop perception, and exclusive-session global input tools for macOS. Contract Version v0.3.0-operator-safe-ax.
+description: Provides explicit-app AX inspection, one-shot operator-safe AX press and set_value, desktop perception, and exclusive-session global input tools for macOS. Contract Version v0.4.0-operator-safe-ax-value.
 ---
 
-# Antigravity Computer Use Skill (`v0.3.0-operator-safe-ax`)
+# Antigravity Computer Use Skill (`v0.4.0-operator-safe-ax-value`)
 
 This skill teaches Google Antigravity agents and Gemini models how to interact with macOS through the ten-tool `computer-use-mcp` suite.
 
 > [!NOTE]
-> **Operator-safe Phase 1**: `computer_use_ax_tree` plus `computer_use_ax_action` provides an exact-element semantic `press` path that never falls back to global HID. The older coordinate and keyboard tools remain available only for explicitly exclusive GUI sessions.
+> **Operator-safe AX**: `computer_use_ax_tree` plus `computer_use_ax_action` provides exact-element semantic `press` and bounded `set_value` paths that never fall back to global HID. The older coordinate and keyboard tools remain available only for explicitly exclusive GUI sessions.
 
 ---
 
@@ -33,16 +33,18 @@ This skill teaches Google Antigravity agents and Gemini models how to interact w
 
 ### 2. Accessibility Tree Inspection (`computer_use_ax_tree`)
 - Call `computer_use_ax_tree` with an explicit `app_id`; never rely on the frontmost application.
-- The response may include `ax_snapshot_id`, `app_instance_ref`, expiry, and an `element_ref` plus `supported_actions: ["press"]` on exact retained controls.
+- The response may include `ax_snapshot_id`, `app_instance_ref`, expiry, and an `element_ref` plus element-specific `supported_actions` containing `press`, `set_value`, or both. `set_value` is advertised only for enabled, non-secure `AXTextField`/`AXTextArea` elements whose `AXValue` is settable.
+- Secure text elements are redacted and receive neither an actionable ref nor `set_value`; never route passwords, tokens, or other secrets through this action.
 - Accessibility tree inspection enforces strict caps: depth limit (<= 10), node count (<= 500), string length (<= 256 chars), cycle detection, and secure text redaction (`[REDACTED]`).
 - Traversal `id`, `identifier`, `description`, title, label, bounds, and index are perception only. Only the opaque refs from the same fresh inspection authorize one action.
 
 ### 3. Operator-Safe Semantic Action (`computer_use_ax_action`)
 - Prefer this path on any shared operator workstation.
-- Pass the exact `ax_snapshot_id`, `app_instance_ref`, `element_ref`, `topology_version`, advertised `action: "press"`, and a nonblank `intent`.
-- The lease is short-lived and consumed once. Stale, replayed, mismatched, disabled, relabeled/reparented, moved-to-another-window, terminated-process, unsupported, or operator/system-input-intervened targets fail closed.
+- Pass the exact `ax_snapshot_id`, `app_instance_ref`, `element_ref`, `topology_version`, one advertised `action`, and a nonblank `intent`.
+- For `press`, omit `value`. For `set_value`, pass `value` explicitly; empty is allowed for clearing, and the payload must be well-formed UTF-8 no larger than 4096 bytes. Do not duplicate the submitted value in `intent` or expect it in any receipt or error.
+- The lease is short-lived and consumed once. Stale, replayed (`AX_ACTION_REPLAYED`), secure (`SECURE_AX_VALUE_UNSUPPORTED`), disabled (`AX_ELEMENT_DISABLED`), non-settable (`AX_VALUE_NOT_SETTABLE`), mismatched, relabeled/reparented, moved-to-another-window, terminated-process, unsupported, or operator/system-input-intervened targets fail closed.
 - `status: "dispatched"` is not behavior proof. Always call `computer_use_ax_tree` again for the same explicit app and verify the intended semantic result before continuing.
-- A `USER_INTERVENED` error from read-only `computer_use_ax_tree` means no action lease was issued and that inspection may be retried. Once `computer_use_ax_action` is called, any `USER_INTERVENED`, `OUTCOME_UNKNOWN`, transport uncertainty, or other error may follow an already-dispatched `AXPress`: never automatically repeat the action.
+- A `USER_INTERVENED` error from read-only `computer_use_ax_tree` means no action lease was issued and that inspection may be retried. Once `computer_use_ax_action` is called, any `USER_INTERVENED`, `OUTCOME_UNKNOWN`, transport uncertainty, or other error may follow an already-dispatched AX mutation: never automatically repeat the action or reuse the old value/ref.
 - After any action-side error, run a fresh explicit-app `computer_use_ax_tree`, verify the target state, and let the controller or operator adjudicate whether another action is still needed. Never retry the old ref.
 
 ### 4. Exclusive Global-HID Actions

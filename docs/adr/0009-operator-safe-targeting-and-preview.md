@@ -1,6 +1,6 @@
 # ADR 0009: Operator-Safe Targeting and Preview Planes
 
-- **Status**: Accepted for Phase 1; preview plane deferred
+- **Status**: Accepted for Phase 1 press and Phase 2 set-value; preview plane deferred
 - **Date**: 2026-07-26
 
 ## Context
@@ -68,9 +68,21 @@ pending references. A change observed during an action makes the result
 indeterminate and requires fresh inspection; the host does not automatically
 retry.
 
-Phase 1 adds only exact-element AX `press`. It does not claim safe coordinate
-clicks, hover, drag/drop, arbitrary scroll, text entry, shortcuts, or full
-application coverage.
+Phase 1 added exact-element AX `press`. Phase 2 adds one bounded `set_value`
+class for enabled, non-secure `AXTextField` and `AXTextArea` elements whose
+`kAXValueAttribute` is proven settable at inspection and revalidated immediately
+before dispatch. The submitted value is call-scoped, accepts empty text, is
+limited to 4096 well-formed UTF-8 bytes, and never enters a lease, fingerprint,
+receipt, log, error, or proof. The host calls
+`AXUIElementSetAttributeValue` exactly once, never focuses the element, uses the
+pasteboard, posts global HID, or retries after dispatch. This still does not
+claim safe coordinate clicks, hover, drag/drop, arbitrary scroll, shortcuts,
+secure text entry, or full application coverage.
+
+The one-shot lease is consumed before set dispatch. Replay, secure, disabled,
+non-settable, stale, and user-intervened outcomes are typed. `cannotComplete`,
+input intervention during dispatch, or IPC ambiguity require a fresh explicit-
+app AX inspection and prohibit automatic retry.
 
 ### 3. Operator presentation planes
 
@@ -125,6 +137,7 @@ observe(explicit app)
 inspect(snapshot_ref)
   -> element_ref + advertised actions
 act(snapshot_ref, element_ref, "press")
+  or act(snapshot_ref, element_ref, "set_value", transient_value)
   -> route + dispatched/indeterminate result
 observe(explicit app)
   -> verified state + verified_after preview

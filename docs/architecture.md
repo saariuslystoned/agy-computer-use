@@ -2,16 +2,21 @@
 
 ## System Architecture
 
-`agy-computer-use` bridges Google Antigravity / Gemini 3.6 Flash with macOS UI automation capabilities via a dual-process architecture:
+`agy-computer-use` bridges Google Antigravity / Gemini 3.7 Flash with macOS UI automation capabilities via a dual-process architecture:
 
 1. **Staged Background Host (`apps/computer-use-host`)**:
    - Built with Swift targeting macOS 14.0+.
    - Single TCC permission principal (currently staged as an `ad_hoc_ephemeral` bundle) for Accessibility (`AXUIElement`) and Screen Recording (`ScreenCaptureKit`). A future non-ad-hoc team-signed candidate may become the durable TCC principal only after separately gated signing, installation, launch, and TCC proof.
    - Serves as the single source of truth for display topology, coordinate transformations (converting between physical pixels, logical points, and normalized `0...999` agent grid), and negative screen origins.
    - Retains short-lived, one-shot AX snapshot/app/element references for exact
-     semantic `press`. It revalidates topology, process birth, exact
-     window/ancestry identity, semantic fingerprints, enabled state, advertised
-     action, and macOS session input counters before dispatch.
+     semantic `press` and bounded `set_value`. It advertises `set_value` only
+     for enabled, non-secure text fields/areas whose `AXValue` is settable, then
+     revalidates topology, process birth, exact window/ancestry identity,
+     semantic fingerprints, role/subrole, enabled/settable state, advertised
+     action, and macOS session input counters immediately before dispatch.
+   - Keeps submitted `set_value` text call-scoped and bounded to 4096 UTF-8
+     bytes. It never copies that value into retained leases, fingerprints,
+     receipts, logs, or errors.
    - Keeps the operator-safe AX engine separate from the global-HID engine.
      The AX route never calls or falls back to global event posting.
    - Listens on a Unix domain socket in an owner-only runtime directory (`chmod 0700`).
@@ -26,7 +31,8 @@
 3. **Antigravity Skill (`.agents/skills/computer-use`)**:
    - Teaches Antigravity models the explicit-app AX inspect/action/reinspect loop
      and the separate display Observe-Action-Observe loop.
-   - Prioritizes exact semantic AX `press` on shared workstations.
+   - Prioritizes exact semantic AX `press` and bounded non-secure text
+     `set_value` on shared workstations.
    - Restricts global coordinate/keyboard synthesis to explicitly exclusive GUI
      sessions, VMs, or dedicated worker Macs.
    - Enforces prompt-injection skepticism and human safety gates.
@@ -39,9 +45,12 @@
 - **Action Authority**: Traversal IDs, identifiers, descriptions, labels, titles, bounds, and indexes never
   authorize mutation. Only matching opaque refs from the current unexpired
   snapshot may dispatch one advertised action.
-- **Honest Outcome**: A successful `AXUIElementPerformAction` receipt is
-  `dispatched`, not verified. Gemini must reinspect the same explicit app before
-  accepting the intended effect.
+- **Honest Outcome**: A successful `AXUIElementPerformAction` or
+  `AXUIElementSetAttributeValue` receipt is `dispatched`, not verified. Gemini
+  must reinspect the same explicit app before accepting the intended effect.
+- **Coupled Wire Contract**: Native status, per-node action advertisement, MCP
+  schemas, and protocol fixtures advance together. There is no press-only wire
+  negotiation in this revision; mismatched host/MCP revisions fail validation.
 - **Preview Boundary**: The future live operator HUD is tracked in
   [issue #8](https://github.com/saariuslystoned/agy-computer-use/issues/8) and
   remains separate from model observation, action authority, and Puppet's

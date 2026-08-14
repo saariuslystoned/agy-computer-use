@@ -5998,6 +5998,372 @@ public struct ComputerUseHostTestRunner {
             currentLaunchTime: 1_235.0
         ))
 
+        var replayTombstones = AXConsumedSnapshotTombstones(capacity: 2)
+        replayTombstones.remember("ax-snap-consumed-1")
+        replayTombstones.remember("ax-snap-consumed-2")
+        replayTombstones.remember("ax-snap-consumed-3")
+        assertTrue(
+            !replayTombstones.contains("ax-snap-consumed-1"),
+            "Bounded tombstone eviction must degrade an old replay only to stale"
+        )
+        assertTrue(replayTombstones.contains("ax-snap-consumed-2"))
+        assertTrue(replayTombstones.contains("ax-snap-consumed-3"))
+
+        let pressOnlyCapability = AXActionCapability(
+            role: "AXButton",
+            subrole: nil,
+            enabled: true,
+            pressSupported: true,
+            valueAttributeSettable: false
+        )
+        assertEqual(
+            DefaultAXInspector.supportedActions(for: pressOnlyCapability),
+            ["press"],
+            "Existing semantic press advertisement must remain unchanged"
+        )
+        let setValueCapability = AXActionCapability(
+            role: "AXTextField",
+            subrole: nil,
+            enabled: true,
+            pressSupported: false,
+            valueAttributeSettable: true
+        )
+
+        func capabilityFromInjectedAXAPI(
+            enabled: Bool = true,
+            role: String = "AXTextField",
+            subrole: String? = nil,
+            valueAttributeSettable: Bool = true,
+            calls: inout [String]
+        ) throws -> AXActionCapability {
+            try DefaultAXInspector.currentSetValueCapability(
+                copyAttributeValue: { attribute in
+                    let name = attribute as String
+                    calls.append("copy:\(name)")
+                    if name == (kAXEnabledAttribute as String) {
+                        return (.success, NSNumber(value: enabled))
+                    }
+                    if name == (kAXRoleAttribute as String) {
+                        return (.success, role as CFString)
+                    }
+                    if name == (kAXSubroleAttribute as String) {
+                        if let subrole {
+                            return (.success, subrole as CFString)
+                        }
+                        return (.noValue, nil)
+                    }
+                    return (.attributeUnsupported, nil)
+                },
+                isAttributeSettable: { attribute in
+                    calls.append("settable:\(attribute as String)")
+                    return (.success, valueAttributeSettable)
+                }
+            )
+        }
+
+        var injectedAXAPICalls: [String] = []
+        assertEqual(
+            try capabilityFromInjectedAXAPI(calls: &injectedAXAPICalls),
+            setValueCapability
+        )
+        assertEqual(
+            injectedAXAPICalls,
+            [
+                "copy:\(kAXEnabledAttribute as String)",
+                "copy:\(kAXRoleAttribute as String)",
+                "copy:\(kAXSubroleAttribute as String)",
+                "settable:\(kAXValueAttribute as String)"
+            ],
+            "The production AX API seam must re-read enabled, role, subrole, and AXValue settable state"
+        )
+
+        var injectedSecureAXAPICalls: [String] = []
+        let injectedSecureCapability = try capabilityFromInjectedAXAPI(
+            subrole: "AXSecureTextField",
+            calls: &injectedSecureAXAPICalls
+        )
+        assertEqual(
+            setValueCapabilityError(injectedSecureCapability),
+            .secureAXValueUnsupported
+        )
+        assertEqual(
+            injectedSecureAXAPICalls,
+            [
+                "copy:\(kAXEnabledAttribute as String)",
+                "copy:\(kAXRoleAttribute as String)",
+                "copy:\(kAXSubroleAttribute as String)"
+            ],
+            "A live secure subrole recheck must stop before even querying AXValue settable state"
+        )
+
+        var injectedNotSettableAXAPICalls: [String] = []
+        let injectedNotSettableCapability = try capabilityFromInjectedAXAPI(
+            valueAttributeSettable: false,
+            calls: &injectedNotSettableAXAPICalls
+        )
+        assertEqual(
+            setValueCapabilityError(injectedNotSettableCapability),
+            .axValueNotSettable
+        )
+        assertEqual(
+            injectedNotSettableAXAPICalls.last,
+            "settable:\(kAXValueAttribute as String)",
+            "A live non-settable AXValue result must reach the typed non-settable guard"
+        )
+        assertEqual(
+            DefaultAXInspector.supportedActions(for: setValueCapability),
+            ["set_value"]
+        )
+        let bothCapability = AXActionCapability(
+            role: "AXTextArea",
+            subrole: nil,
+            enabled: true,
+            pressSupported: true,
+            valueAttributeSettable: true
+        )
+        assertEqual(
+            DefaultAXInspector.supportedActions(for: bothCapability),
+            ["press", "set_value"]
+        )
+        assertEqual(
+            DefaultAXInspector.supportedActions(for: AXActionCapability(
+                role: "AXTextField",
+                subrole: "AXSecureTextField",
+                enabled: true,
+                pressSupported: false,
+                valueAttributeSettable: true
+            )),
+            [],
+            "Secure text elements must never advertise set_value"
+        )
+        assertEqual(
+            DefaultAXInspector.supportedActions(for: AXActionCapability(
+                role: "AXTextField",
+                subrole: nil,
+                enabled: false,
+                pressSupported: true,
+                valueAttributeSettable: true
+            )),
+            [],
+            "Disabled elements must never advertise operator-safe actions"
+        )
+
+        func setValueCapabilityError(
+            _ capability: AXActionCapability
+        ) -> ComputerUseError? {
+            do {
+                try DefaultAXInspector.validateSetValueCapability(capability)
+                return nil
+            } catch let error as ComputerUseError {
+                return error
+            } catch {
+                assertTrue(false, "set_value capability validation returned an unexpected error")
+                return nil
+            }
+        }
+        assertEqual(setValueCapabilityError(setValueCapability), nil)
+        assertEqual(
+            setValueCapabilityError(AXActionCapability(
+                role: "AXTextField",
+                subrole: "AXSecureTextField",
+                enabled: true,
+                pressSupported: false,
+                valueAttributeSettable: true
+            )),
+            .secureAXValueUnsupported
+        )
+        assertEqual(
+            setValueCapabilityError(AXActionCapability(
+                role: "AXTextField",
+                subrole: nil,
+                enabled: false,
+                pressSupported: false,
+                valueAttributeSettable: true
+            )),
+            .axElementDisabled(action: "set_value")
+        )
+        assertEqual(
+            setValueCapabilityError(AXActionCapability(
+                role: "AXButton",
+                subrole: nil,
+                enabled: true,
+                pressSupported: true,
+                valueAttributeSettable: true
+            )),
+            .noninterferingActionUnsupported(action: "set_value")
+        )
+        assertEqual(
+            setValueCapabilityError(AXActionCapability(
+                role: "AXTextField",
+                subrole: nil,
+                enabled: true,
+                pressSupported: false,
+                valueAttributeSettable: false
+            )),
+            .axValueNotSettable
+        )
+
+        assertEqual(try DefaultAXInspector.validateSetValueInput(""), "")
+        assertEqual(
+            try DefaultAXInspector.validateSetValueInput(
+                String(repeating: "a", count: 4_096)
+            ).utf8.count,
+            4_096
+        )
+        assertEqual(
+            DefaultAXInspector.setValueInputValidationError(
+                String(repeating: "é", count: 2_049)
+            ),
+            .ipcError(reason: "value UTF-8 payload exceeds the 4096-byte operator-safe limit"),
+            "set_value must enforce its limit in UTF-8 bytes, not characters"
+        )
+        assertEqual(
+            DefaultAXInspector.setValueInputValidationError(nil),
+            .ipcError(reason: "value parameter is required when action is set_value"),
+            "set_value must require an explicit value, including when clearing to empty"
+        )
+
+        var setAttributeCalls = 0
+        var transientUTF8ByteCount = -1
+        let setValueDispatchResult = try DefaultAXInspector.performAXSetValueCheckingOperatorInput(
+            value: "bounded-value",
+            observedEpoch: operatorEpoch,
+            epochProvider: FixedOperatorInputEpochProvider(epoch: operatorEpoch)
+        ) { transientValue in
+            setAttributeCalls += 1
+            transientUTF8ByteCount = (transientValue as? String)?.utf8.count ?? -1
+            return .success
+        }
+        assertEqual(setValueDispatchResult.rawValue, AXError.success.rawValue)
+        assertEqual(setAttributeCalls, 1, "set_value dispatch must call its AX setter exactly once")
+        assertEqual(transientUTF8ByteCount, 13)
+
+        var setValueInterventionError: ComputerUseError?
+        do {
+            _ = try DefaultAXInspector.performAXSetValueCheckingOperatorInput(
+                value: "bounded-value",
+                observedEpoch: operatorEpoch,
+                epochProvider: FixedOperatorInputEpochProvider(
+                    epoch: OperatorInputEpoch(counters: [10, 21, 30])
+                )
+            ) { _ in
+                setAttributeCalls += 1
+                return .success
+            }
+        } catch let error as ComputerUseError {
+            setValueInterventionError = error
+        }
+        assertEqual(
+            setValueInterventionError,
+            .axOutcomeUnknown(
+                reason: "Operator or system input changed during AX set_value dispatch"
+            )
+        )
+        assertEqual(
+            setAttributeCalls,
+            2,
+            "Post-dispatch intervention must report uncertainty without retrying the one setter call"
+        )
+
+        var revalidationStages: [String] = []
+        let revalidatedDispatchResult = try DefaultAXInspector.performRevalidatedAXSetValue(
+            value: "bounded-value",
+            retainedSupportedActions: ["set_value"],
+            observedEpoch: operatorEpoch,
+            epochProvider: FixedOperatorInputEpochProvider(epoch: operatorEpoch),
+            readLiveCapability: {
+                revalidationStages.append("live_capability")
+                return setValueCapability
+            },
+            validateAuthority: {
+                revalidationStages.append("authority")
+            },
+            setValue: { transientValue in
+                revalidationStages.append("set_attribute")
+                transientUTF8ByteCount = (transientValue as? String)?.utf8.count ?? -1
+                return .success
+            }
+        )
+        assertEqual(revalidatedDispatchResult.rawValue, AXError.success.rawValue)
+        assertEqual(
+            revalidationStages,
+            ["live_capability", "authority", "set_attribute"],
+            "Production set_value must re-read live capability and exact authority immediately before one setter call"
+        )
+
+        func revalidatedSetValueError(
+            capability: AXActionCapability,
+            authorityError: ComputerUseError? = nil
+        ) -> (ComputerUseError?, [String]) {
+            var stages: [String] = []
+            let authorityCheck: () throws -> Void = {
+                stages.append("authority")
+                if let authorityError {
+                    throw authorityError
+                }
+            }
+            let result = Result {
+                try DefaultAXInspector.performRevalidatedAXSetValue(
+                    value: "bounded-value",
+                    retainedSupportedActions: ["set_value"],
+                    observedEpoch: operatorEpoch,
+                    epochProvider: FixedOperatorInputEpochProvider(epoch: operatorEpoch),
+                    readLiveCapability: {
+                        stages.append("live_capability")
+                        return capability
+                    },
+                    validateAuthority: authorityCheck,
+                    setValue: { _ in
+                        stages.append("set_attribute")
+                        return .success
+                    }
+                )
+            }
+            switch result {
+            case .success:
+                return (nil, stages)
+            case .failure(let error as ComputerUseError):
+                return (error, stages)
+            case .failure:
+                assertTrue(false, "Revalidated set_value returned an unexpected error")
+                return (nil, stages)
+            }
+        }
+
+        let secureRevalidation = revalidatedSetValueError(capability: AXActionCapability(
+            role: "AXTextField",
+            subrole: "AXSecureTextField",
+            enabled: true,
+            pressSupported: false,
+            valueAttributeSettable: true
+        ))
+        assertEqual(secureRevalidation.0, .secureAXValueUnsupported)
+        assertEqual(secureRevalidation.1, ["live_capability"])
+
+        let notSettableRevalidation = revalidatedSetValueError(capability: AXActionCapability(
+            role: "AXTextArea",
+            subrole: nil,
+            enabled: true,
+            pressSupported: false,
+            valueAttributeSettable: false
+        ))
+        assertEqual(notSettableRevalidation.0, .axValueNotSettable)
+        assertEqual(notSettableRevalidation.1, ["live_capability"])
+
+        let interventionRevalidation = revalidatedSetValueError(
+            capability: setValueCapability,
+            authorityError: .userIntervened(reason: "Injected live input counter change")
+        )
+        assertEqual(
+            interventionRevalidation.0,
+            .userIntervened(reason: "Injected live input counter change")
+        )
+        assertEqual(
+            interventionRevalidation.1,
+            ["live_capability", "authority"],
+            "User intervention during revalidation must prevent the setter call"
+        )
+
         // 7. Targeted AX snapshots and semantic actions stay on a dedicated,
         // element-retaining engine and never enter the global input backend.
         final class TargetedAXSemanticEngine: AXInspectionEngine, AXSemanticActionEngine, @unchecked Sendable {
@@ -6006,6 +6372,7 @@ public struct ComputerUseHostTestRunner {
                 let appInstanceRef: String
                 let elementRef: String
                 let action: String
+                let valueUTF8ByteCount: Int?
                 let topologyVersion: String
             }
 
@@ -6015,16 +6382,20 @@ public struct ComputerUseHostTestRunner {
             var activeAppInstanceRef: String?
             var activeElementRef: String?
             var activeTopologyVersion: String?
+            var consumedSnapshotIds = Set<String>()
             var actionCalls: [ActionCall] = []
             var returnUnsafeReceiptOnce = false
             var rejectUnsupportedOnce = false
+            var rejectSecureOnce = false
+            var rejectDisabledOnce = false
+            var rejectNotSettableOnce = false
             var rejectUserIntervenedOnce = false
             var rejectOutcomeUnknownOnce = false
 
             var isAvailable: Bool { true }
             func isAccessibilityTrusted() -> Bool { true }
             var isOperatorSafeActionAvailable: Bool { true }
-            var supportedOperatorSafeActions: [String] { ["press"] }
+            var supportedOperatorSafeActions: [String] { ["press", "set_value"] }
 
             func inspectTree(maxDepth: Int, appId: String, topologyVersion: String) throws -> AXTreeResultDTO {
                 let snapshotId: String
@@ -6058,9 +6429,9 @@ public struct ComputerUseHostTestRunner {
                     tree: AXNodeDTO(
                         id: "ax-AXButton-1",
                         elementRef: elementRef,
-                        supportedActions: ["press"],
-                        role: "AXButton",
-                        title: "Continue",
+                        supportedActions: ["press", "set_value"],
+                        role: "AXTextField",
+                        title: "Destination",
                         enabled: true,
                         focused: false,
                         bounds: AXRect(x: 20, y: 30, width: 80, height: 24)
@@ -6073,6 +6444,7 @@ public struct ComputerUseHostTestRunner {
                 appInstanceRef: String,
                 elementRef: String,
                 action: String,
+                value: String?,
                 topologyVersion: String
             ) throws -> AXSemanticActionResultDTO {
                 lock.lock()
@@ -6083,16 +6455,30 @@ public struct ComputerUseHostTestRunner {
                     appInstanceRef: appInstanceRef,
                     elementRef: elementRef,
                     action: action,
+                    valueUTF8ByteCount: value?.utf8.count,
                     topologyVersion: topologyVersion
                 ))
 
-                guard action == "press" else {
+                guard action == "press" || action == "set_value" else {
                     throw ComputerUseError.noninterferingActionUnsupported(action: action)
                 }
+                if action == "set_value" {
+                    _ = try DefaultAXInspector.validateSetValueInput(value)
+                } else if value != nil {
+                    throw ComputerUseError.ipcError(
+                        reason: "value parameter is valid only when action is set_value"
+                    )
+                }
                 guard let currentSnapshotId = activeSnapshotId else {
+                    if consumedSnapshotIds.contains(snapshotId) {
+                        throw ComputerUseError.axActionReplayed
+                    }
                     throw ComputerUseError.staleAXSnapshot(current: "", received: snapshotId)
                 }
                 guard snapshotId == currentSnapshotId else {
+                    if consumedSnapshotIds.contains(snapshotId) {
+                        throw ComputerUseError.axActionReplayed
+                    }
                     throw ComputerUseError.staleAXSnapshot(current: currentSnapshotId, received: snapshotId)
                 }
                 guard appInstanceRef == activeAppInstanceRef else {
@@ -6118,10 +6504,23 @@ public struct ComputerUseHostTestRunner {
                 activeAppInstanceRef = nil
                 activeElementRef = nil
                 activeTopologyVersion = nil
+                consumedSnapshotIds.insert(snapshotId)
 
                 if rejectUnsupportedOnce {
                     rejectUnsupportedOnce = false
                     throw ComputerUseError.noninterferingActionUnsupported(action: action)
+                }
+                if rejectSecureOnce {
+                    rejectSecureOnce = false
+                    throw ComputerUseError.secureAXValueUnsupported
+                }
+                if rejectDisabledOnce {
+                    rejectDisabledOnce = false
+                    throw ComputerUseError.axElementDisabled(action: action)
+                }
+                if rejectNotSettableOnce {
+                    rejectNotSettableOnce = false
+                    throw ComputerUseError.axValueNotSettable
                 }
                 if rejectUserIntervenedOnce {
                     rejectUserIntervenedOnce = false
@@ -6179,6 +6578,24 @@ public struct ComputerUseHostTestRunner {
                 lock.unlock()
             }
 
+            func rejectNextAsSecure() {
+                lock.lock()
+                rejectSecureOnce = true
+                lock.unlock()
+            }
+
+            func rejectNextAsDisabled() {
+                lock.lock()
+                rejectDisabledOnce = true
+                lock.unlock()
+            }
+
+            func rejectNextAsNotSettable() {
+                lock.lock()
+                rejectNotSettableOnce = true
+                lock.unlock()
+            }
+
             func rejectNextAsUserIntervened() {
                 lock.lock()
                 rejectUserIntervenedOnce = true
@@ -6189,6 +6606,12 @@ public struct ComputerUseHostTestRunner {
                 lock.lock()
                 defer { lock.unlock() }
                 return actionCalls.count
+            }
+
+            var lastActionCall: ActionCall? {
+                lock.lock()
+                defer { lock.unlock() }
+                return actionCalls.last
             }
         }
 
@@ -6272,7 +6695,10 @@ public struct ComputerUseHostTestRunner {
         ))
         assertTrue(semanticStatus.success)
         assertEqual(semanticStatus.data?["operator_safe_ax_available"], .bool(true))
-        assertEqual(semanticStatus.data?["operator_safe_ax_actions"], .array([.string("press")]))
+        assertEqual(
+            semanticStatus.data?["operator_safe_ax_actions"],
+            .array([.string("press"), .string("set_value")])
+        )
         assertEqual(
             semanticStatus.data?["supported_action_strategies"],
             .array([.string("ax_semantic"), .string("exclusive_global_hid")])
@@ -6308,7 +6734,10 @@ public struct ComputerUseHostTestRunner {
             var elementRef = ""
             if case .dictionary(let root)? = response.data?["tree"] {
                 elementRef = root["element_ref"]?.rawValue as? String ?? ""
-                assertEqual(root["supported_actions"], .array([.string("press")]))
+                assertEqual(
+                    root["supported_actions"],
+                    .array([.string("press"), .string("set_value")])
+                )
             } else {
                 assertTrue(false, "Targeted AX response must include a tree dictionary")
             }
@@ -6326,9 +6755,10 @@ public struct ComputerUseHostTestRunner {
             elementRef: String,
             topologyVersion: String = semanticTopology.version,
             action: String = "press",
+            value: String? = nil,
             intent: String = "Press the retained Continue button"
         ) -> [String: AnyCodable] {
-            [
+            var params: [String: AnyCodable] = [
                 "ax_snapshot_id": .string(snapshotId),
                 "app_instance_ref": .string(appInstanceRef),
                 "element_ref": .string(elementRef),
@@ -6336,6 +6766,10 @@ public struct ComputerUseHostTestRunner {
                 "action": .string(action),
                 "intent": .string(intent)
             ]
+            if let value {
+                params["value"] = .string(value)
+            }
+            return params
         }
 
         let firstLease = await issueTargetedTree("ax-tree-targeted-1")
@@ -6442,7 +6876,85 @@ public struct ComputerUseHostTestRunner {
                 elementRef: firstLease.2
             )
         ))
-        assertEqual(replay.error?.code, "STALE_AX_SNAPSHOT")
+        assertEqual(replay.error?.code, "AX_ACTION_REPLAYED")
+
+        let setValueLease = await issueTargetedTree("ax-tree-targeted-set-value")
+        let callsBeforeMalformedSetValue = semanticEngine.actionCallCount
+        let missingSetValue = await semanticServer.handleRequest(IPCRequest(
+            id: "ax-action-set-value-missing-value",
+            method: "ax_action",
+            params: semanticParams(
+                snapshotId: setValueLease.0,
+                appInstanceRef: setValueLease.1,
+                elementRef: setValueLease.2,
+                action: "set_value",
+                intent: "Clear the retained destination field"
+            )
+        ))
+        assertEqual(missingSetValue.error?.code, "IPC_ERROR")
+        assertEqual(semanticEngine.actionCallCount, callsBeforeMalformedSetValue)
+
+        let oversizedSetValue = await semanticServer.handleRequest(IPCRequest(
+            id: "ax-action-set-value-oversized",
+            method: "ax_action",
+            params: semanticParams(
+                snapshotId: setValueLease.0,
+                appInstanceRef: setValueLease.1,
+                elementRef: setValueLease.2,
+                action: "set_value",
+                value: String(repeating: "é", count: 2_049),
+                intent: "Update the retained destination field"
+            )
+        ))
+        assertEqual(oversizedSetValue.error?.code, "IPC_ERROR")
+        assertEqual(semanticEngine.actionCallCount, callsBeforeMalformedSetValue)
+
+        let submittedSetValue = "new destination"
+        let validSetValue = await semanticServer.handleRequest(IPCRequest(
+            id: "ax-action-set-value-valid",
+            method: "ax_action",
+            params: semanticParams(
+                snapshotId: setValueLease.0,
+                appInstanceRef: setValueLease.1,
+                elementRef: setValueLease.2,
+                action: "set_value",
+                value: submittedSetValue,
+                intent: "Update the retained destination field"
+            )
+        ))
+        assertTrue(validSetValue.success)
+        assertEqual(validSetValue.data?["status"], .string("dispatched"))
+        assertEqual(validSetValue.data?["strategy"], .string("ax_semantic"))
+        assertEqual(validSetValue.data?["action"], .string("set_value"))
+        assertEqual(validSetValue.data?["requires_reinspection"], .bool(true))
+        assertEqual(validSetValue.data?["global_hid_posts"], .int(0))
+        assertEqual(validSetValue.data?["value"], nil)
+        assertEqual(
+            semanticEngine.lastActionCall?.valueUTF8ByteCount,
+            submittedSetValue.utf8.count
+        )
+        let encodedSetValueReceipt = String(
+            data: try JSONEncoder().encode(validSetValue),
+            encoding: .utf8
+        ) ?? ""
+        assertTrue(
+            !encodedSetValueReceipt.contains(submittedSetValue),
+            "set_value receipts must never echo the submitted value"
+        )
+
+        let setValueReplay = await semanticServer.handleRequest(IPCRequest(
+            id: "ax-action-set-value-replay",
+            method: "ax_action",
+            params: semanticParams(
+                snapshotId: setValueLease.0,
+                appInstanceRef: setValueLease.1,
+                elementRef: setValueLease.2,
+                action: "set_value",
+                value: "replacement attempt",
+                intent: "Repeat the retained destination update"
+            )
+        ))
+        assertEqual(setValueReplay.error?.code, "AX_ACTION_REPLAYED")
 
         let expiredLease = await issueTargetedTree("ax-tree-targeted-expired")
         semanticEngine.expireActiveLease()
@@ -6470,6 +6982,56 @@ public struct ComputerUseHostTestRunner {
         ))
         assertEqual(engineUnsupported.error?.code, "NONINTERFERING_ACTION_UNSUPPORTED")
 
+        let secureLease = await issueTargetedTree("ax-tree-targeted-secure")
+        semanticEngine.rejectNextAsSecure()
+        let secureSubmittedValue = "must-not-echo-secure-value"
+        let secureSetValue = await semanticServer.handleRequest(IPCRequest(
+            id: "ax-action-set-value-secure",
+            method: "ax_action",
+            params: semanticParams(
+                snapshotId: secureLease.0,
+                appInstanceRef: secureLease.1,
+                elementRef: secureLease.2,
+                action: "set_value",
+                value: secureSubmittedValue,
+                intent: "Attempt a secure destination update"
+            )
+        ))
+        assertEqual(secureSetValue.error?.code, "SECURE_AX_VALUE_UNSUPPORTED")
+        assertTrue(secureSetValue.error?.message.contains(secureSubmittedValue) == false)
+
+        let disabledElementLease = await issueTargetedTree("ax-tree-targeted-element-disabled")
+        semanticEngine.rejectNextAsDisabled()
+        let disabledSetValue = await semanticServer.handleRequest(IPCRequest(
+            id: "ax-action-set-value-element-disabled",
+            method: "ax_action",
+            params: semanticParams(
+                snapshotId: disabledElementLease.0,
+                appInstanceRef: disabledElementLease.1,
+                elementRef: disabledElementLease.2,
+                action: "set_value",
+                value: "disabled replacement",
+                intent: "Update a disabled retained destination"
+            )
+        ))
+        assertEqual(disabledSetValue.error?.code, "AX_ELEMENT_DISABLED")
+
+        let notSettableLease = await issueTargetedTree("ax-tree-targeted-not-settable")
+        semanticEngine.rejectNextAsNotSettable()
+        let notSettableValue = await semanticServer.handleRequest(IPCRequest(
+            id: "ax-action-set-value-not-settable",
+            method: "ax_action",
+            params: semanticParams(
+                snapshotId: notSettableLease.0,
+                appInstanceRef: notSettableLease.1,
+                elementRef: notSettableLease.2,
+                action: "set_value",
+                value: "not settable replacement",
+                intent: "Update a non-settable retained destination"
+            )
+        ))
+        assertEqual(notSettableValue.error?.code, "AX_VALUE_NOT_SETTABLE")
+
         let interventionLease = await issueTargetedTree("ax-tree-targeted-intervention")
         semanticEngine.rejectNextAsUserIntervened()
         let intervention = await semanticServer.handleRequest(IPCRequest(
@@ -6478,7 +7040,10 @@ public struct ComputerUseHostTestRunner {
             params: semanticParams(
                 snapshotId: interventionLease.0,
                 appInstanceRef: interventionLease.1,
-                elementRef: interventionLease.2
+                elementRef: interventionLease.2,
+                action: "set_value",
+                value: "intervened replacement",
+                intent: "Update the retained destination while checking input counters"
             )
         ))
         assertEqual(intervention.error?.code, "USER_INTERVENED")
@@ -6491,7 +7056,10 @@ public struct ComputerUseHostTestRunner {
             params: semanticParams(
                 snapshotId: uncertainLease.0,
                 appInstanceRef: uncertainLease.1,
-                elementRef: uncertainLease.2
+                elementRef: uncertainLease.2,
+                action: "set_value",
+                value: "uncertain replacement",
+                intent: "Update the retained destination once"
             )
         ))
         assertEqual(uncertain.error?.code, "OUTCOME_UNKNOWN")
@@ -6570,6 +7138,15 @@ public struct ComputerUseHostTestRunner {
         assertTrue(axInspectorSource.contains("kAXDescriptionAttribute as CFString"))
         assertTrue(axInspectorSource.contains("try Self.validateRetainedAuthority("))
         assertTrue(axInspectorSource.contains("try Self.performAXActionCheckingOperatorInput("))
+        assertEqual(
+            axInspectorSource.components(separatedBy: "AXUIElementSetAttributeValue(").count - 1,
+            1,
+            "Production set_value must have exactly one AX attribute setter call site"
+        )
+        assertTrue(
+            !axInspectorSource.contains("CGEvent.post"),
+            "The retained AX engine must not contain a global-HID posting fallback"
+        )
     }
 
     public static func run42_MoveScrollDragPointerValidationStaleCaptureSingleUseLeaseAndUnconditionalRelease() async throws {

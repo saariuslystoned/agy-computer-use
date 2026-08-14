@@ -21,6 +21,7 @@ const EXIT_TOOL_RETRY_EXHAUSTED = 5;
 const EXIT_ACTION_FAILED = 6;
 
 const SUPPORTED_AX_ACTION = "press";
+const OPERATOR_SAFE_AX_ACTIONS = ["press", "set_value"];
 
 function sha256Hex(value) {
   return createHash("sha256").update(String(value)).digest("hex");
@@ -238,8 +239,11 @@ function ensureStatusGate(status) {
   }
 
   const actions = Array.isArray(status.operator_safe_ax_actions) ? status.operator_safe_ax_actions : [];
-  if (!actions.includes(SUPPORTED_AX_ACTION)) {
-    missing.push("operator_safe_ax_actions must include 'press'");
+  if (
+    actions.length !== OPERATOR_SAFE_AX_ACTIONS.length ||
+    !actions.every((action, index) => action === OPERATOR_SAFE_AX_ACTIONS[index])
+  ) {
+    missing.push("operator_safe_ax_actions must be canonical ['press', 'set_value']");
   }
 
   const strategies = Array.isArray(status.supported_action_strategies) ? status.supported_action_strategies : [];
@@ -1044,6 +1048,7 @@ async function main() {
 }
 
 export {
+  ensureStatusGate,
   executeSuccessfulPressLifecycle,
   initializeController,
   performPressFlow,

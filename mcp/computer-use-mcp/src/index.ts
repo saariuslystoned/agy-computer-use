@@ -506,7 +506,7 @@ export function createComputerUseServer(hostClient: HostClient): Server {
 
   const AX_TREE_TOOL: Tool = {
     name: "computer_use_ax_tree",
-    description: "Inspects the accessibility hierarchy of one explicit running application. Returns a short-lived opaque AX action lease and opaque element references only for exact retained controls that advertise the operator-safe press action.",
+    description: "Inspects the accessibility hierarchy of one explicit running application. Returns a short-lived opaque AX action lease and opaque element references only for exact retained controls that advertise operator-safe press and/or set_value.",
     inputSchema: {
       type: "object",
       properties: {
@@ -529,7 +529,7 @@ export function createComputerUseServer(hostClient: HostClient): Server {
 
   const AX_ACTION_TOOL: Tool = {
     name: "computer_use_ax_action",
-    description: "Dispatches one operator-safe semantic AXPress against an exact retained element. The opaque snapshot/app/element lease is consumed once. This path never falls back to global HID and always requires fresh AX inspection to verify the effect.",
+    description: "Dispatches one operator-safe semantic AX press or AXValue set against an exact retained element. set_value is limited to an enabled, non-secure, text-capable element whose AXValue is still settable. The opaque snapshot/app/element lease is consumed once; there is no global-HID fallback or automatic retry, and fresh AX inspection is required after dispatch or uncertainty.",
     inputSchema: {
       type: "object",
       properties: {
@@ -537,10 +537,18 @@ export function createComputerUseServer(hostClient: HostClient): Server {
         app_instance_ref: { type: "string", minLength: 1, description: "Opaque exact process-instance reference from the same AX inspection." },
         element_ref: { type: "string", minLength: 1, description: "Opaque actionable element reference from the same AX inspection." },
         topology_version: { type: "string", description: "Exact topology version returned with the AX inspection." },
-        action: { type: "string", enum: ["press"], description: "Phase 1 supports only the advertised semantic press action." },
+        action: { type: "string", enum: ["press", "set_value"], description: "Exact action advertised for this retained element." },
+        value: { type: "string", maxLength: 4096, description: "Required only for set_value (empty allowed); must be well-formed UTF-8 no larger than 4096 bytes. Never returned in a receipt." },
         intent: { type: "string", minLength: 1, description: "Clear explanation of the action's intent." }
       },
       required: ["ax_snapshot_id", "app_instance_ref", "element_ref", "topology_version", "action", "intent"],
+      allOf: [
+        {
+          if: { properties: { action: { const: "set_value" } }, required: ["action"] },
+          then: { required: ["value"] },
+          else: { not: { required: ["value"] } }
+        }
+      ],
       additionalProperties: false
     }
   };

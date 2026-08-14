@@ -138,8 +138,13 @@
             "operator_safe_ax_available": { "type": "boolean" },
             "operator_safe_ax_actions": {
               "type": "array",
-              "maxItems": 1,
-              "items": { "const": "press" }
+              "maxItems": 2,
+              "uniqueItems": true,
+              "items": { "enum": ["press", "set_value"] },
+              "oneOf": [
+                { "maxItems": 0 },
+                { "const": ["press", "set_value"] }
+              ]
             },
             "supported_action_strategies": {
               "type": "array",
@@ -217,14 +222,24 @@
       "type": "object",
       "required": ["id", "role", "bounds"],
       "additionalProperties": false,
+      "dependencies": {
+        "element_ref": ["supported_actions"],
+        "supported_actions": ["element_ref"]
+      },
       "properties": {
         "id": { "type": "string", "minLength": 1 },
         "element_ref": { "type": "string", "minLength": 1, "maxLength": 256 },
         "supported_actions": {
           "type": "array",
           "minItems": 1,
-          "maxItems": 1,
-          "items": { "const": "press" }
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": { "enum": ["press", "set_value"] },
+          "oneOf": [
+            { "const": ["press"] },
+            { "const": ["set_value"] },
+            { "const": ["press", "set_value"] }
+          ]
         },
         "role": { "type": "string", "minLength": 1 },
         "subrole": { "type": "string" },
@@ -249,7 +264,28 @@
           "type": "array",
           "items": { "$ref": "#/definitions/AxNode" }
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "supported_actions": {
+                "type": "array",
+                "contains": { "const": "set_value" }
+              }
+            },
+            "required": ["supported_actions"]
+          },
+          "then": {
+            "properties": {
+              "role": { "enum": ["AXTextField", "AXTextArea"] },
+              "enabled": { "const": true },
+              "subrole": { "not": { "const": "AXSecureTextField" } }
+            },
+            "required": ["enabled"]
+          }
+        }
+      ]
     },
     "AxTreeResponse": {
       "type": "object",
@@ -301,9 +337,24 @@
             "app_instance_ref": { "type": "string", "minLength": 1, "maxLength": 256 },
             "element_ref": { "type": "string", "minLength": 1, "maxLength": 256 },
             "topology_version": { "type": "string", "pattern": "^top-sha256-[0-9a-f]{64}$" },
-            "action": { "const": "press" },
+            "action": { "enum": ["press", "set_value"] },
+            "value": {
+              "type": "string",
+              "maxLength": 4096,
+              "description": "Required only for set_value; runtime validation enforces well-formed UTF-8 of at most 4096 bytes"
+            },
             "intent": { "type": "string", "minLength": 1 }
-          }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": { "action": { "const": "set_value" } },
+                "required": ["action"]
+              },
+              "then": { "required": ["value"] },
+              "else": { "not": { "required": ["value"] } }
+            }
+          ]
         }
       }
     },
@@ -501,7 +552,7 @@
             "action_id": { "type": "string", "minLength": 1, "maxLength": 256 },
             "status": { "const": "dispatched" },
             "strategy": { "const": "ax_semantic" },
-            "action": { "const": "press" },
+            "action": { "enum": ["press", "set_value"] },
             "ax_snapshot_id": { "type": "string", "minLength": 1, "maxLength": 256 },
             "app_instance_ref": { "type": "string", "minLength": 1, "maxLength": 256 },
             "element_ref": { "type": "string", "minLength": 1, "maxLength": 256 },

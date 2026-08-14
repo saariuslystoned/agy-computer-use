@@ -52,7 +52,7 @@ export class MockHostClient implements HostClient {
           accessibility_trusted: this.axTrusted,
           ax_tree_inspection_available: this.axAvailable,
           operator_safe_ax_available: this.axAvailable,
-          operator_safe_ax_actions: this.axAvailable ? ["press"] : [],
+          operator_safe_ax_actions: this.axAvailable ? ["press", "set_value"] : [],
           supported_action_strategies: [
             ...(this.axAvailable ? ["ax_semantic"] : []),
             ...(this.inputMutationState === "enabled" ? ["exclusive_global_hid"] : [])
@@ -161,8 +161,8 @@ export class MockHostClient implements HostClient {
           tree: {
             id: "ax-AXApplication-1",
             element_ref: "ax-el-mock-001",
-            supported_actions: ["press"],
-            role: "AXApplication",
+            supported_actions: ["press", "set_value"],
+            role: "AXTextField",
             subrole: "AXStandard",
             identifier: "calculator-root",
             description: "Calculator",
@@ -183,7 +183,7 @@ export class MockHostClient implements HostClient {
           action_id: "ax-act-mock-001",
           status: "dispatched",
           strategy: "ax_semantic",
-          action: "press",
+          action: params?.action,
           ax_snapshot_id: params?.ax_snapshot_id,
           app_instance_ref: params?.app_instance_ref,
           element_ref: params?.element_ref,
