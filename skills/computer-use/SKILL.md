@@ -91,3 +91,4 @@ This skill teaches Google Antigravity agents and Gemini models how to interact w
 - [Dogfood Canary Reference](references/dogfood-canary.md)
 - [Observe-Action-Observe Loop Guide](references/observe-action-loop.md)
 - [Accessibility vs Vision Decision Matrix](references/ax-vs-vision.md)
+- [Dual-Lane Verification Architecture Guide](references/dual-lane-verification.md)
