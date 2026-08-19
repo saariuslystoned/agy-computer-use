@@ -1,0 +1,366 @@
+{
+  "closeout": null,
+  "created_at": "2026-08-19T23:04:31+00:00",
+  "current_focus": {
+    "cadence": "sequential",
+    "confirmed": true,
+    "confirmed_at": "2026-08-19T23:16:54+00:00",
+    "domain": "unified front door and end-to-end milestone definition",
+    "started_at": "2026-08-19T23:12:53+00:00",
+    "status": "inspected",
+    "summary": "Build agy-computer-use as the standalone Computer Use-like skill and local runtime for Antigravity. Keep Herdr-Puppet external and prove remote usability through dual-worker Gemini 3.7 rows that run a native AX canary and local browser-form fixture, verify fresh state, survive native detach/reattach, and preserve exact qualification rows for explicit cleanup."
+  },
+  "decisions": [
+    {
+      "baseline_ref": "git:origin/main@67f7d329737c067425b751a7aaaa65bad27789d7",
+      "candidate_refs": [],
+      "choice": "Task-first front door with automatic controller selection and advanced explicit overrides.",
+      "context_ref": null,
+      "created_at": "2026-08-19T23:04:41+00:00",
+      "deferred_reason": null,
+      "delivery_ref": null,
+      "dependencies": [],
+      "domain": "unified front door and end-to-end milestone definition",
+      "history": [
+        {
+          "at": "2026-08-19T23:04:41+00:00",
+          "choice": "Task-first front door with automatic controller selection and advanced explicit overrides.",
+          "from": "proposed",
+          "implementation_ref": null,
+          "note": "user accepted the scoped decision",
+          "to": "locked",
+          "verification_ref": null
+        },
+        {
+          "at": "2026-08-19T23:12:53+00:00",
+          "choice": "Task-first front door with automatic controller selection and advanced explicit overrides.",
+          "from": "locked",
+          "implementation_ref": null,
+          "note": "Owner clarified the primary product is the Antigravity computer-use skill; Herdr-Puppet is an external remote launch and qualification harness, not the AGY product-facing API.",
+          "to": "reopened",
+          "verification_ref": null
+        },
+        {
+          "at": "2026-08-19T23:16:53+00:00",
+          "choice": "Task-first front door with automatic controller selection and advanced explicit overrides.",
+          "from": "reopened",
+          "implementation_ref": null,
+          "note": "The product is the standalone Antigravity computer-use skill/runtime; remote machine/session/model selection remains Herdr-Puppet qualification infrastructure.",
+          "to": "superseded",
+          "verification_ref": null
+        }
+      ],
+      "id": "front-door-001",
+      "implementation_ref": null,
+      "question": "Should machine, workspace, fresh-tab, and model be mandatory user inputs or advanced overrides?",
+      "rationale": "A Computer-Use-like product should accept the task as the primary input while Herdr-Puppet retains orchestration authority and reports exact selections in sanitized receipts.",
+      "review_ref": null,
+      "status": "superseded",
+      "superseded_by": "product-boundary-001",
+      "updated_at": "2026-08-19T23:16:53+00:00",
+      "verification_ref": null
+    },
+    {
+      "baseline_ref": null,
+      "candidate_refs": [],
+      "choice": "No. Require both a native canary and a locally hosted browser-form fixture on both workers.",
+      "context_ref": null,
+      "created_at": "2026-08-19T23:04:42+00:00",
+      "deferred_reason": null,
+      "delivery_ref": null,
+      "dependencies": [
+        "front-door-001"
+      ],
+      "domain": "unified front door and end-to-end milestone definition",
+      "history": [
+        {
+          "at": "2026-08-19T23:04:42+00:00",
+          "choice": "No. Require both a native canary and a locally hosted browser-form fixture on both workers.",
+          "from": "proposed",
+          "implementation_ref": null,
+          "note": "user accepted the scoped decision",
+          "to": "locked",
+          "verification_ref": null
+        },
+        {
+          "at": "2026-08-19T23:12:53+00:00",
+          "choice": "No. Require both a native canary and a locally hosted browser-form fixture on both workers.",
+          "from": "locked",
+          "implementation_ref": null,
+          "note": "dependency front-door-001 changed: Owner clarified the primary product is the Antigravity computer-use skill; Herdr-Puppet is an external remote launch and qualification harness, not the AGY product-facing API.",
+          "to": "needs_reverification",
+          "verification_ref": null
+        },
+        {
+          "at": "2026-08-19T23:16:53+00:00",
+          "choice": "No. Require both a native canary and a locally hosted browser-form fixture on both workers.",
+          "from": "needs_reverification",
+          "implementation_ref": null,
+          "note": "Retain the two-rung dual-worker evidence, but bind Herdr only as the launch and qualification harness.",
+          "to": "superseded",
+          "verification_ref": null
+        }
+      ],
+      "id": "proof-definition-001",
+      "implementation_ref": null,
+      "question": "Is a deterministic native canary sufficient to close the next milestone?",
+      "rationale": "The native canary isolates AGY/TCC/AX/lifecycle correctness; the browser fixture proves the useful form-entry outcome without relying on a signed-in production service.",
+      "review_ref": null,
+      "status": "superseded",
+      "superseded_by": "qualification-proof-001",
+      "updated_at": "2026-08-19T23:16:53+00:00",
+      "verification_ref": null
+    },
+    {
+      "baseline_ref": null,
+      "candidate_refs": [],
+      "choice": "No. Use the validated active app/window/page by default and pause only on genuine ambiguity, mismatch, or target drift.",
+      "context_ref": null,
+      "created_at": "2026-08-19T23:08:03+00:00",
+      "deferred_reason": null,
+      "delivery_ref": null,
+      "dependencies": [
+        "front-door-001"
+      ],
+      "domain": "unified front door and end-to-end milestone definition",
+      "history": [
+        {
+          "at": "2026-08-19T23:08:03+00:00",
+          "choice": "No. Use the validated active app/window/page by default and pause only on genuine ambiguity, mismatch, or target drift.",
+          "from": "proposed",
+          "implementation_ref": null,
+          "note": "user accepted the scoped decision",
+          "to": "locked",
+          "verification_ref": null
+        },
+        {
+          "at": "2026-08-19T23:12:53+00:00",
+          "choice": "No. Use the validated active app/window/page by default and pause only on genuine ambiguity, mismatch, or target drift.",
+          "from": "locked",
+          "implementation_ref": null,
+          "note": "dependency front-door-001 changed: Owner clarified the primary product is the Antigravity computer-use skill; Herdr-Puppet is an external remote launch and qualification harness, not the AGY product-facing API.",
+          "to": "needs_reverification",
+          "verification_ref": null
+        },
+        {
+          "at": "2026-08-19T23:16:54+00:00",
+          "choice": "No. Use the validated active app/window/page by default and pause only on genuine ambiguity, mismatch, or target drift.",
+          "from": "needs_reverification",
+          "implementation_ref": null,
+          "note": "Retain the accepted active-target policy, now explicitly owned by the AGY skill rather than a cross-machine front door.",
+          "to": "superseded",
+          "verification_ref": null
+        }
+      ],
+      "id": "target-selection-001",
+      "implementation_ref": null,
+      "question": "Should the task-first front door pause whenever multiple windows or browser pages exist?",
+      "rationale": "This preserves Computer Use-like convenience while retaining AGY exact one-shot target authority and preventing silent fallback or stale retargeting.",
+      "review_ref": null,
+      "status": "superseded",
+      "superseded_by": "skill-target-selection-001",
+      "updated_at": "2026-08-19T23:16:54+00:00",
+      "verification_ref": null
+    },
+    {
+      "baseline_ref": null,
+      "candidate_refs": [],
+      "choice": "Preserve by default with explicit exact cleanup; never automatically close after uncertainty.",
+      "context_ref": null,
+      "created_at": "2026-08-19T23:09:12+00:00",
+      "deferred_reason": null,
+      "delivery_ref": null,
+      "dependencies": [
+        "front-door-001",
+        "proof-definition-001"
+      ],
+      "domain": "unified front door and end-to-end milestone definition",
+      "history": [
+        {
+          "at": "2026-08-19T23:09:12+00:00",
+          "choice": "Preserve by default with explicit exact cleanup; never automatically close after uncertainty.",
+          "from": "proposed",
+          "implementation_ref": null,
+          "note": "user accepted the scoped decision",
+          "to": "locked",
+          "verification_ref": null
+        },
+        {
+          "at": "2026-08-19T23:12:53+00:00",
+          "choice": "Preserve by default with explicit exact cleanup; never automatically close after uncertainty.",
+          "from": "locked",
+          "implementation_ref": null,
+          "note": "dependency front-door-001 changed: Owner clarified the primary product is the Antigravity computer-use skill; Herdr-Puppet is an external remote launch and qualification harness, not the AGY product-facing API.",
+          "to": "needs_reverification",
+          "verification_ref": null
+        },
+        {
+          "at": "2026-08-19T23:16:54+00:00",
+          "choice": "Preserve by default with explicit exact cleanup; never automatically close after uncertainty.",
+          "from": "needs_reverification",
+          "implementation_ref": null,
+          "note": "Retain the preservation policy but scope it exclusively to Herdr-Puppet qualification.",
+          "to": "superseded",
+          "verification_ref": null
+        }
+      ],
+      "id": "lifecycle-001",
+      "implementation_ref": null,
+      "question": "What should happen to the exact task-owned Herdr tab after success, failure, or uncertainty?",
+      "rationale": "Preservation retains the only useful debugging and resume state while the product is hardening. Verified runs return exact resume/close handles; detach/reattach proof precedes successful completion.",
+      "review_ref": null,
+      "status": "superseded",
+      "superseded_by": "herdr-qualification-lifecycle-001",
+      "updated_at": "2026-08-19T23:16:54+00:00",
+      "verification_ref": null
+    },
+    {
+      "baseline_ref": "git:origin/main@67f7d329737c067425b751a7aaaa65bad27789d7",
+      "candidate_refs": [],
+      "choice": "Build agy-computer-use as the standalone Computer Use-like skill and local runtime for Antigravity; use Herdr-Puppet only to launch, steer, resume, and qualify that skill on remote workers.",
+      "context_ref": null,
+      "created_at": "2026-08-19T23:12:53+00:00",
+      "deferred_reason": null,
+      "delivery_ref": null,
+      "dependencies": [],
+      "domain": "unified front door and end-to-end milestone definition",
+      "history": [
+        {
+          "at": "2026-08-19T23:16:53+00:00",
+          "choice": "Build agy-computer-use as the standalone Computer Use-like skill and local runtime for Antigravity; use Herdr-Puppet only to launch, steer, resume, and qualify that skill on remote workers.",
+          "from": "proposed",
+          "implementation_ref": null,
+          "note": "user accepted the scoped decision",
+          "to": "locked",
+          "verification_ref": null
+        }
+      ],
+      "id": "product-boundary-001",
+      "implementation_ref": null,
+      "question": "Where should the product boundary sit between agy-computer-use and Herdr-Puppet?",
+      "rationale": "This keeps the reusable computer-use product independent of fleet orchestration while requiring first-class remote-agent usability and dual-worker proof.",
+      "review_ref": null,
+      "status": "locked",
+      "superseded_by": null,
+      "updated_at": "2026-08-19T23:16:53+00:00",
+      "verification_ref": null
+    },
+    {
+      "baseline_ref": null,
+      "candidate_refs": [],
+      "choice": "On both aiworker Macs, a Herdr-launched Gemini 3.7 AGY row must discover and use the skill to pass a native AX canary and a local browser-form fixture with fresh semantic reinspection, plus native Herdr detach/reattach identity proof.",
+      "context_ref": null,
+      "created_at": "2026-08-19T23:16:53+00:00",
+      "deferred_reason": null,
+      "delivery_ref": null,
+      "dependencies": [
+        "product-boundary-001"
+      ],
+      "domain": "unified front door and end-to-end milestone definition",
+      "history": [
+        {
+          "at": "2026-08-19T23:16:53+00:00",
+          "choice": "On both aiworker Macs, a Herdr-launched Gemini 3.7 AGY row must discover and use the skill to pass a native AX canary and a local browser-form fixture with fresh semantic reinspection, plus native Herdr detach/reattach identity proof.",
+          "from": "proposed",
+          "implementation_ref": null,
+          "note": "user accepted the scoped decision",
+          "to": "locked",
+          "verification_ref": null
+        }
+      ],
+      "id": "qualification-proof-001",
+      "implementation_ref": null,
+      "question": "What evidence must prove the Antigravity skill works directly and when launched through Herdr-Puppet?",
+      "rationale": "The native canary isolates the AGY/TCC/AX loop; the browser fixture proves useful form entry; the Herdr bracket proves remote-agent usability without making Herdr part of the product API.",
+      "review_ref": null,
+      "status": "locked",
+      "superseded_by": null,
+      "updated_at": "2026-08-19T23:16:53+00:00",
+      "verification_ref": null
+    },
+    {
+      "baseline_ref": null,
+      "candidate_refs": [],
+      "choice": "Use the validated active app/window/page by default; pause only for genuine ambiguity, mismatch, or target drift; never silently retarget or fall back.",
+      "context_ref": null,
+      "created_at": "2026-08-19T23:16:53+00:00",
+      "deferred_reason": null,
+      "delivery_ref": null,
+      "dependencies": [
+        "product-boundary-001"
+      ],
+      "domain": "unified front door and end-to-end milestone definition",
+      "history": [
+        {
+          "at": "2026-08-19T23:16:54+00:00",
+          "choice": "Use the validated active app/window/page by default; pause only for genuine ambiguity, mismatch, or target drift; never silently retarget or fall back.",
+          "from": "proposed",
+          "implementation_ref": null,
+          "note": "user accepted the scoped decision",
+          "to": "locked",
+          "verification_ref": null
+        }
+      ],
+      "id": "skill-target-selection-001",
+      "implementation_ref": null,
+      "question": "How should the Antigravity skill select an app, window, or browser page?",
+      "rationale": "This keeps Computer Use-like convenience while preserving AGY exact one-shot action authority.",
+      "review_ref": null,
+      "status": "locked",
+      "superseded_by": null,
+      "updated_at": "2026-08-19T23:16:54+00:00",
+      "verification_ref": null
+    },
+    {
+      "baseline_ref": null,
+      "candidate_refs": [],
+      "choice": "Preserve the exact task-owned row after success, failure, or uncertainty; return exact resume/close handles; require explicit exact cleanup; never treat this as AGY product lifecycle.",
+      "context_ref": null,
+      "created_at": "2026-08-19T23:16:54+00:00",
+      "deferred_reason": null,
+      "delivery_ref": null,
+      "dependencies": [
+        "product-boundary-001",
+        "qualification-proof-001"
+      ],
+      "domain": "unified front door and end-to-end milestone definition",
+      "history": [
+        {
+          "at": "2026-08-19T23:16:54+00:00",
+          "choice": "Preserve the exact task-owned row after success, failure, or uncertainty; return exact resume/close handles; require explicit exact cleanup; never treat this as AGY product lifecycle.",
+          "from": "proposed",
+          "implementation_ref": null,
+          "note": "user accepted the scoped decision",
+          "to": "locked",
+          "verification_ref": null
+        }
+      ],
+      "id": "herdr-qualification-lifecycle-001",
+      "implementation_ref": null,
+      "question": "How should Herdr-Puppet retain qualification rows for AGY skill proof?",
+      "rationale": "This preserves remote qualification evidence and debugging state without coupling Herdr lifecycle to the standalone skill.",
+      "review_ref": null,
+      "status": "locked",
+      "superseded_by": null,
+      "updated_at": "2026-08-19T23:16:54+00:00",
+      "verification_ref": null
+    }
+  ],
+  "last_activation": {
+    "at": "2026-08-19T23:12:53+00:00",
+    "mechanism": "implicit"
+  },
+  "recommendation": {
+    "alternatives": [
+      "Build the deterministic native and browser qualification fixtures first if the blocker lacks an exact action or host receipt."
+    ],
+    "reason": "The product boundary and exit criteria are confirmed; the next useful work is evidence-backed AGY hardening, not more orchestration design.",
+    "recommended": "Audit the newly reported live AGY blocker against M11 and implement the smallest production-correct skill/runtime hardening slice.",
+    "recorded_at": "2026-08-19T23:20:28+00:00"
+  },
+  "schema_version": "grilltrack/v0.1",
+  "status": "active",
+  "title": "Task-first remote AGY computer-use milestone",
+  "track_id": "gt-20260819230431-cb42f3",
+  "updated_at": "2026-08-19T23:20:28+00:00"
+}
