@@ -2,7 +2,7 @@
 
 ## Architecture Overview & Scope Boundary
 This implementation plan establishes the architectural foundation (v0.1) and deterministic test suite for `agy-computer-use`.
-Work is partitioned into dependency-ordered milestones (M0–M10 and Dogfood D1–D3), strictly distinguishing **Implemented & Tested**, **Designed / Bounded Foundation**, and **Gated / Future Work (post-v0.1)**.
+Work is partitioned into dependency-ordered milestones (M0–M11 and Dogfood D1–D3), strictly distinguishing **Implemented & Tested**, **Designed / Bounded Foundation**, and **Gated / Future Work (post-v0.1)**.
 
 ---
 
@@ -23,6 +23,7 @@ Work is partitioned into dependency-ordered milestones (M0–M10 and Dogfood D1�
 | **D2** | Production-Bounded Native Observation Slice (Source Hardening) | `IMPLEMENTED & TESTED` | `ComputerUseHostTestRunner` (authoritative native tests), `SCScreenshotCaptureEngine`, `SystemDisplayTopologyProvider`, `HostServer` generation gate, `proof/d2_verification.md` |
 | **M9** | Production Bounded Input Synthesis & Physical Dogfooding | `IMPLEMENTED & PHYSICALLY DOGFOODED` | Five-tool surface (`status`, `observe`, `click`, `type`, `shortcut`), local ad-hoc staged app TCC proof, `proof/m9_physical_dogfood.md`. |
 | **M10** | Expanded AX Inspection & Continuous Pointer Actions (M10/D3) | `IMPLEMENTED & PHYSICALLY DOGFOODED` | Nine-tool surface (`status`, `observe`, `ax_tree`, `click`, `move`, `type`, `shortcut`, `scroll`, `drag`), `proof/m10_d3_physical_dogfood.md`. |
+| **M11** | Antigravity Skill Usability & Herdr-Puppet Qualification | `DESIGNED / BOUNDED FOUNDATION` | ADR 0010 and `.grilltrack/`; product implementation and live dual-worker proof are pending. |
 
 ---
 
@@ -89,3 +90,64 @@ Work is partitioned into dependency-ordered milestones (M0–M10 and Dogfood D1�
   - Active AX inspection with automatic secure text field subrole redaction (`[REDACTED]`).
   - Active continuous pointer movement (`move`), anchored relative scrolling (`scroll`), and button drag synthesis (`drag`).
   - Authoritative visual proof packet (`proof/m10_d3_physical_dogfood.md`) and media artifacts (`m10_proof_before.jpg`, `m10_proof_after.jpg`, `m10_hover_active.jpg`, `m10_ax_tree_redacted.json`, `m10_d3_end_to_end.mp4`).
+
+### M11: Antigravity Skill Usability & Herdr-Puppet Qualification
+- **Status**: Designed / Bounded Foundation
+- **Boundary**: [ADR 0010](../docs/adr/0010-antigravity-skill-and-herdr-qualification-boundary.md)
+- **Decision state**: `.grilltrack/ledger.json` and append-only `.grilltrack/events.jsonl`
+
+`agy-computer-use` remains the standalone Computer Use-like skill and local
+runtime for Antigravity. Herdr-Puppet is external qualification infrastructure;
+it does not become an AGY tool, accept local computer-use actions, or move
+machine/workspace/tab/model selectors into this repository's product API.
+
+#### Bounded implementation slice
+
+- Make the skill's normal task loop usable without Herdr concepts: readiness,
+  validated app/window/page selection, observation, exact semantic action or
+  purpose-built browser routing, and fresh result verification.
+- Default to a validated active target when it matches the task. Return a
+  typed ambiguity or drift result instead of guessing or silently retargeting.
+- Keep browser DOM behavior behind a separately qualified adapter consistent
+  with ADR 0001. Do not expose a vendor CLI as the AGY contract and do not
+  silently fall back to clipboard or global HID input.
+- Preserve submitted text and sensitive state outside receipts, logs, model
+  intent strings, and curated proof.
+- Treat any newly reported live blocker as source input to diagnose; do not
+  weaken target, freshness, TCC, or post-action verification authority merely
+  to make the dogfood pass.
+
+#### Required live exit criteria
+
+All criteria must pass independently on `aiworker-01` and `aiworker-02` from
+fresh Herdr-Puppet-owned Gemini 3.7 rows:
+
+1. The row's bound Antigravity installation discovers the current mirrored
+   `computer-use` skill and reaches the expected MCP/native-host surface.
+2. `computer_use_status` proves host connectivity, TCC readiness, mutation
+   policy, topology, and the advertised operator-safe action vector before any
+   mutation.
+3. A deterministic native fixture exercises one semantic `press` and one
+   non-secure `set_value`. Each action uses fresh exact references and is
+   followed by fresh AX inspection that proves the intended state; dispatched
+   status alone is insufficient.
+4. A local browser fixture exercises ordinary input and an event-sensitive or
+   controlled field through the qualified DOM/browser backend. Fresh semantic
+   read-back must prove the value and expected event-driven state.
+5. A real native Herdr client detach/reattach occurs during the task-owned row.
+   Session, workspace, tab, pane, terminal, SSH, harness, source, and relevant
+   computer-use target identities remain exact afterward.
+6. The controller preserves the exact row on success, failure, or uncertainty
+   and returns sanitized resume/close handles. Cleanup remains explicit.
+
+The M11 status must not advance to implemented or verified from source tests,
+a transport acknowledgement, a model assertion, one worker, a native-only
+demo, or a browser screenshot without semantic read-back.
+
+#### Deferred beyond M11
+
+- Signed-in production-site automation or external form submission.
+- Automatic Herdr row cleanup.
+- Live HUD, durable signing/notarization, full multi-display automation, and
+  broad noninterfering-action parity.
+- Admission and source-head attestation services.
