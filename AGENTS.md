@@ -3,6 +3,11 @@
 ## Overview & Mission
 This repository defines the production architecture, protocol specifications, Swift host foundation, and MCP server bridge for Computer Use with Google Antigravity and Gemini 3.7 Flash on macOS. It combines low-latency screen perception, bounded accessibility element tree querying (`AXUIElement`), coordinate normalization, input synthesis contracts, and local Unix-domain-socket IPC.
 
+## Computer Use Reference Target
+- Use the current upstream OpenAI @Computer runtime/release and this repository's `.agents/skills/computer-use/SKILL.md` as the behavioral references for computer-use changes. Refresh the current exposed API/skill and relevant behavior before making parity claims; old black-box reports are historical evidence only.
+- Record the reference version or access date and tested surface. If upstream source or a release identity is unavailable, say so; do not call an installed runtime a verified upstream `main` checkout.
+- Target background app/window operation, physical-pointer and foreground-focus isolation, fresh observations after actions, and reliable operator takeover handling. Prove our behavior independently on the same disposable tasks. Do not infer or copy private implementation internals.
+
 ## Depth & Quality Standards
 - **Production Architecture & Bounded Contracts**: Screen capture, AX DOM extraction, coordinate normalization, and input synthesis are bound by strict schemas, error handling, depth limits, and security redaction rules.
 - **Native OS Integration & Security Principal**: A staged background macOS app (`ComputerUseHost.app`, currently staged as an `ad_hoc_ephemeral` bundle) serves as the TCC principal for Screen Recording and Accessibility permissions. A future non-ad-hoc team-signed candidate may become the durable TCC principal only after separately gated signing, installation, launch, and TCC proof. The MCP server connects to the host over a local Unix domain socket in an owner-only runtime directory (`chmod 0700`).

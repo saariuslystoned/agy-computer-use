@@ -1,0 +1,8 @@
+[bin/agy-computer-use] Validating production-only configured stdio readiness (subcommand: production-ready)...
+[bin/agy-computer-use] Node.js version: v22.23.1
+[bin/agy-computer-use] Verified .agents/mcp_config.json strict single-server 'computer-use' registration.
+[bin/agy-computer-use] Verified production configured stdio MCP tool inventory: Exactly 10 tools (computer_use_ax_action, computer_use_ax_tree, computer_use_click, computer_use_drag, computer_use_move, computer_use_observe, computer_use_scroll, computer_use_shortcut, computer_use_status, computer_use_type)
+[bin/agy-computer-use] Verified minimal PATH configured launcher tool inventory: Exactly 10 tools (computer_use_ax_action, computer_use_ax_tree, computer_use_click, computer_use_drag, computer_use_move, computer_use_observe, computer_use_scroll, computer_use_shortcut, computer_use_status, computer_use_type)
+[bin/agy-computer-use] Verified missing-toolchain negative launcher failure diagnostic.
+[bin/agy-computer-use] Verified mismatched-version negative launcher failure diagnostic.
+[bin/agy-computer-use] ALL PRODUCTION CONFIGURED STDIO READINESS CHECKS PASSED!

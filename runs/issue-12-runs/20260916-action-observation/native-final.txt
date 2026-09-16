@@ -1,0 +1,29 @@
+[bin/agy-computer-use] Building and running native test suite with strict concurrency flags...
+[bin/agy-computer-use] XCTest discovery unavailable in environment; running ComputerUseHostTestRunner executable authority...
+[0/1] Planning build
+Building for debugging...
+[0/4] Write swift-version--1AB21518FC5DEDBE.txt
+[2/20] Compiling ComputerUseHostLib HostServer.swift
+[3/20] Compiling ComputerUseHostLib CoordinateMapper.swift
+[4/20] Compiling ComputerUseHostLib HostLifecycle.swift
+[5/20] Compiling ComputerUseHostLib SocketListener.swift
+[6/20] Compiling ComputerUseHostLib DisplayTopologyProvider.swift
+[7/20] Compiling ComputerUseHostLib IPCMessages.swift
+[8/20] Compiling ComputerUseHostLib InputSynthesisEngine.swift
+[9/20] Compiling ComputerUseHostLib CGEventInputSynthesisEngine.swift
+[10/20] Compiling ComputerUseHostLib ComputerUseError.swift
+[11/20] Compiling ComputerUseHostLib ScreenRecordingAuthorizing.swift
+[12/20] Compiling ComputerUseHostLib AXActionObservation.swift
+[13/20] Compiling ComputerUseHostLib Framing.swift
+[14/20] Emitting module ComputerUseHostLib
+[15/20] Compiling ComputerUseHostLib DisplayCaptureEngine.swift
+[16/20] Compiling ComputerUseHostLib POSIXSyscall.swift
+[17/20] Compiling ComputerUseHostLib AXInspectionEngine.swift
+[18/22] Emitting module ComputerUseHostTestRunner
+[19/22] Compiling ComputerUseHostTestRunner main.swift
+[19/21] Linking ComputerUseHostTestRunner
+[20/21] Applying ComputerUseHostTestRunner
+Build of product 'ComputerUseHostTestRunner' complete! (4.08s)
+[ComputerUseHostTestRunner] Starting Native Test Runner Authority...
+[ComputerUseHostTestRunner] Executed 43 native test cases successfully. ALL PASSED.
+[bin/agy-computer-use] Native test suite execution complete.

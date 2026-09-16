@@ -1,0 +1,17 @@
+{
+  "result": {
+    "id": "req-1789562281180-d33s9",
+    "success": false,
+    "error": {
+      "code": "USER_INTERVENED",
+      "message": "Operator or system input changed during the action lease: Operator intervention (target event type 11); the one-shot lease was consumed"
+    }
+  },
+  "state": {
+    "display": "5",
+    "expression": "2+3",
+    "field": "issue12-ok",
+    "pid": 72583,
+    "window_id": 152264
+  }
+}

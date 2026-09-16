@@ -539,6 +539,16 @@ export function createComputerUseServer(hostClient: HostClient): Server {
         topology_version: { type: "string", description: "Exact topology version returned with the AX inspection." },
         action: { type: "string", enum: ["press", "set_value"], description: "Exact action advertised for this retained element." },
         value: { type: "string", maxLength: 4096, description: "Required only for set_value (empty allowed); must be well-formed UTF-8 no larger than 4096 bytes. Never returned in a receipt." },
+        observe: {
+          type: "object",
+          properties: {
+            condition: { type: "string", enum: ["snapshot", "semantic_change"] },
+            timeout_ms: { type: "integer", minimum: 100, maximum: 2000 }
+          },
+          required: ["condition", "timeout_ms"],
+          additionalProperties: false,
+          description: "Optional native reinspection of the same process after exactly one dispatch. snapshot returns the next tree; semantic_change polls reads until change or timeout. A change is not proof of the intended effect."
+        },
         intent: { type: "string", minLength: 1, description: "Clear explanation of the action's intent." }
       },
       required: ["ax_snapshot_id", "app_instance_ref", "element_ref", "topology_version", "action", "intent"],
@@ -774,7 +784,22 @@ export function createComputerUseServer(hostClient: HostClient): Server {
           ]
         };
       }
-      const ipcResp = await hostClient.request("ax_action", parseRes.data, extra?.signal);
+      const compound = parseRes.data.observe !== undefined;
+      const ipcResp = await hostClient.request(compound ? "ax_action_observe" : "ax_action", parseRes.data, extra?.signal);
+      if (ipcResp.success && compound) {
+        const result = AXActionResultDataSchema.safeParse(ipcResp.data);
+        if (!result.success || !result.data.observation ||
+            result.data.action !== parseRes.data.action ||
+            result.data.ax_snapshot_id !== parseRes.data.ax_snapshot_id ||
+            result.data.app_instance_ref !== parseRes.data.app_instance_ref ||
+            result.data.element_ref !== parseRes.data.element_ref ||
+            result.data.topology_version !== parseRes.data.topology_version ||
+            result.data.observation.condition !== parseRes.data.observe?.condition) {
+          return formatToolResponse({ id: ipcResp.id, success: false, error: {
+            code: "OUTCOME_UNKNOWN", message: "Compound action returned an invalid, missing, or mismatched observation; inspect the explicit app and never automatically repeat the mutation."
+          } }, name);
+        }
+      }
       return formatToolResponse(ipcResp, name);
     }
 

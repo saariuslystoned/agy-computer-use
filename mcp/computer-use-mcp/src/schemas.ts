@@ -236,6 +236,7 @@ export function inspectTreeStructure(node: any, currentDepth = 1): { count: numb
 export const AXTreeDataSchema = z.object({
   target_app: AXTargetAppSchema,
   ax_snapshot_id: z.string().min(1).max(256),
+  intervention_scope: z.enum(["app", "global"]).optional(),
   app_instance_ref: z.string().min(1).max(256),
   expires_at_ms: z.number().int().positive().finite(),
   topology_version: TopologyVersionSchema,
@@ -266,7 +267,42 @@ export const AXTreeDataSchema = z.object({
   { message: "AX tree node IDs must be unique" }
 );
 
+export const AXObservationOptionsSchema = z.object({
+  condition: z.enum(["snapshot", "semantic_change"]),
+  timeout_ms: z.number().int().min(100).max(2_000)
+}).strict();
+
+export const AXActionObservationSchema = z.object({
+  status: z.enum(["changed", "unchanged", "timed_out", "failed"]),
+  condition: z.enum(["snapshot", "semantic_change"]),
+  attempts: z.number().int().nonnegative(),
+  elapsed_ms: z.number().nonnegative().finite(),
+  state: AXTreeDataSchema.optional(),
+  changes: z.object({
+    added: z.number().int().min(0).max(500),
+    removed: z.number().int().min(0).max(500),
+    changed: z.number().int().min(0).max(500),
+    node_ids: z.array(z.string().min(1).max(256)).max(16),
+    truncated: z.boolean()
+  }).strict().optional(),
+  error_code: z.string().min(1).max(256).optional()
+}).strict().superRefine((data, ctx) => {
+  const observed = data.status === "changed" || data.status === "unchanged";
+  if (observed !== (data.state !== undefined && data.changes !== undefined) ||
+      (!observed && (data.state !== undefined || data.changes !== undefined)) ||
+      observed === (data.error_code !== undefined) ||
+      (observed && data.attempts < 1) ||
+      (data.status === "unchanged" && data.condition !== "snapshot") ||
+      (data.status === "timed_out" && data.error_code !== "TIMEOUT")) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Inconsistent AX observation outcome" });
+  }
+  if (data.changes && ((data.changes.added + data.changes.removed + data.changes.changed > 0) !== (data.status === "changed"))) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "AX change summary contradicts observation outcome" });
+  }
+});
+
 const AXActionAuthorityFields = {
+  observe: AXObservationOptionsSchema.optional(),
   ax_snapshot_id: z.string().trim().min(1).max(256),
   app_instance_ref: z.string().trim().min(1).max(256),
   element_ref: z.string().trim().min(1).max(256),
@@ -298,6 +334,7 @@ export const AXActionInputSchema = z.discriminatedUnion("action", [
 ]);
 
 export const AXActionResultDataSchema = z.object({
+  observation: AXActionObservationSchema.optional(),
   action_id: z.string().min(1).max(256),
   status: z.literal("dispatched"),
   strategy: z.literal("ax_semantic"),
@@ -309,7 +346,11 @@ export const AXActionResultDataSchema = z.object({
   requires_reinspection: z.literal(true),
   global_hid_posts: z.literal(0),
   duration_ms: z.number().nonnegative().finite()
-}).strict();
+}).strict().refine((data) => !data.observation?.state || (
+  data.observation.state.ax_snapshot_id !== data.ax_snapshot_id &&
+  data.observation.state.app_instance_ref !== data.app_instance_ref &&
+  data.observation.state.topology_version === data.topology_version
+), { message: "AX observation must carry fresh authority and matching topology" });
 
 export const ClickInputSchema = z.object({
   capture_id: z.string().min(1),

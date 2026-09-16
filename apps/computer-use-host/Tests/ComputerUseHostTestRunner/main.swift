@@ -3793,6 +3793,8 @@ public struct ComputerUseHostTestRunner {
         assertThrows({ try validateFourSurfaces(FourSurfaces(manifest: surfaces.manifest, xctestFuncs: surfaces.xctestFuncs, allTests: surfaces.allTests, runnerCalls: [renamedItem] + Array(baseList.dropFirst()))) }, "Surface 4 renamed item must throw")
     }
 
+    private static let completedTests = AtomicCounter()
+
     private static func runWithWatchdog(name: String, timeoutSec: Double = 10.0, _ block: @Sendable @escaping () async throws -> Void) async throws {
         let sem = DispatchSemaphore(value: 0)
         let errorBox = ErrorBox()
@@ -3816,6 +3818,7 @@ public struct ComputerUseHostTestRunner {
         watchdogThread.start()
         _ = await task.value
         if let err = errorBox.value { throw err }
+        completedTests.increment()
     }
 
     public static func main() async throws {
@@ -3863,7 +3866,9 @@ public struct ComputerUseHostTestRunner {
         try await runWithWatchdog(name: "test40_ActionRoutingFreshnessLeaseAndInputSynthesis") { try await run40_ActionRoutingFreshnessLeaseAndInputSynthesis() }
         try await runWithWatchdog(name: "test41_AXTreeInspectionTargetingRedactionCapsAndTruncation") { try await run41_AXTreeInspectionTargetingRedactionCapsAndTruncation() }
         try await runWithWatchdog(name: "test42_MoveScrollDragPointerValidationStaleCaptureSingleUseLeaseAndUnconditionalRelease") { try await run42_MoveScrollDragPointerValidationStaleCaptureSingleUseLeaseAndUnconditionalRelease() }
-        fputs("[ComputerUseHostTestRunner] Executed 42 native test cases successfully. ALL PASSED.\n", stderr)
+        try await runWithWatchdog(name: "test44_TargetScopedIntervention") { try await run44_TargetScopedIntervention() }
+        try await runWithWatchdog(name: "test43_CompoundAXActionObservation") { try await run43_CompoundAXActionObservation() }
+        fputs("[ComputerUseHostTestRunner] Executed \(completedTests.value) native test cases successfully. ALL PASSED.\n", stderr)
     }
 
     public enum BudgetWaitResult: Equatable, Sendable {
@@ -7575,5 +7580,283 @@ public struct ComputerUseHostTestRunner {
         ))
         assertEqual(rightDragResp.success, false)
         assertEqual(rightDragResp.error?.code, "IPC_ERROR")
+    }
+}
+
+
+extension ComputerUseHostTestRunner {
+    public static func run43_CompoundAXActionObservation() async throws {
+        let topology = try FakeDisplayTopologyProvider().getTopology().version
+        func tree(_ generation: Int, value: String = "before", pid: Int = 101, children: [AXNodeDTO]? = nil) -> AXTreeResultDTO {
+            AXTreeResultDTO(
+                targetApp: AXTargetAppDTO(pid: pid, bundleId: "test.app", name: "Fixture"),
+                axSnapshotId: "snap-\(generation)", appInstanceRef: "app-\(generation)",
+                expiresAtMs: 30_000, topologyVersion: topology,
+                nodeCount: 1 + (children?.count ?? 0), maxDepthReached: children == nil ? 1 : 2,
+                truncated: false,
+                tree: AXNodeDTO(id: "field", elementRef: "element-\(generation)", supportedActions: ["set_value"],
+                    role: "AXTextField", value: value, enabled: true,
+                    bounds: AXRect(x: 0, y: 0, width: 100, height: 20), children: children)
+            )
+        }
+        func receipt(_ action: String = "press") -> AXSemanticActionResultDTO {
+            AXSemanticActionResultDTO(actionId: "act", status: "dispatched", action: action,
+                axSnapshotId: "snap-0", appInstanceRef: "app-0", elementRef: "element-0",
+                topologyVersion: topology, durationMs: 1)
+        }
+        let baseline = tree(0)
+        let snapshot = try AXObservationOptions(condition: "snapshot", timeoutMs: 500)
+        let change = try AXObservationOptions(condition: "semantic_change", timeoutMs: 300)
+        var dispatches = 0
+        var reads = 0
+        var invalidations = 0
+        let clock = TestManualClock()
+        let unchanged = try AXActionObservationRunner.run(baseline: baseline, options: snapshot,
+            dispatch: { dispatches += 1; return receipt() },
+            inspect: { _ in reads += 1; return tree(reads) },
+            invalidate: { invalidations += 1 }, now: { clock.now }, wait: { clock.advance(by: .milliseconds($0)) })
+        assertEqual(unchanged.observation?.status, "unchanged")
+        assertEqual(unchanged.observation?.state?.axSnapshotId, "snap-1")
+        assertEqual(unchanged.observation?.changes?.changed, 0, "Fresh opaque refs must not count as semantic changes")
+        assertEqual(dispatches, 1)
+        assertEqual(reads, 1)
+        assertEqual(invalidations, 0)
+
+        reads = 0
+        let delayed = try AXActionObservationRunner.run(baseline: baseline, options: change,
+            dispatch: { dispatches += 1; return receipt("set_value") },
+            inspect: { _ in reads += 1; return tree(reads, value: reads == 2 ? "after" : "before") },
+            invalidate: { invalidations += 1 }, now: { clock.now }, wait: { clock.advance(by: .milliseconds($0)) })
+        assertEqual(delayed.observation?.status, "changed")
+        assertEqual(delayed.observation?.attempts, 2)
+        assertEqual(delayed.observation?.state?.tree.value, "after")
+        assertEqual(delayed.observation?.changes?.nodeIds, ["field"])
+        assertEqual(dispatches, 2, "Polling must not repeat a mutation")
+
+        reads = 0
+        let timeout = try AXActionObservationRunner.run(baseline: baseline, options: change,
+            dispatch: { dispatches += 1; return receipt() },
+            inspect: { _ in reads += 1; return tree(reads) },
+            invalidate: { invalidations += 1 }, now: { clock.now }, wait: { clock.advance(by: .milliseconds($0)) })
+        assertEqual(timeout.observation?.status, "timed_out")
+        assertEqual(timeout.observation?.errorCode, "TIMEOUT")
+        assertEqual(timeout.observation?.attempts, 3)
+        assertEqual(timeout.observation?.state, nil, "Expired polling state must not escape as fresh authority")
+        assertEqual(dispatches, 3)
+
+        for injected in [ComputerUseError.axOutcomeUnknown(reason: "fixture"), .userIntervened(reason: "fixture"), .axActionReplayed] {
+            var attempted = 0
+            var inspected = 0
+            do {
+                _ = try AXActionObservationRunner.run(baseline: baseline, options: snapshot,
+                    dispatch: { attempted += 1; throw injected },
+                    inspect: { _ in inspected += 1; return tree(1) }, invalidate: {})
+                assertTrue(false, "Action error must propagate unchanged")
+            } catch let error as ComputerUseError { assertEqual(error, injected) }
+            assertEqual(attempted, 1)
+            assertEqual(inspected, 0)
+        }
+        for injected in [ComputerUseError.userIntervened(reason: "fixture"), .staleOperation(reason: "process replaced"), .timeout(operation: "read", seconds: 1)] {
+            let failed = try AXActionObservationRunner.run(baseline: baseline, options: snapshot,
+                dispatch: { receipt() }, inspect: { _ in throw injected }, invalidate: { invalidations += 1 })
+            assertEqual(failed.status, "dispatched", "Observation failure must preserve successful dispatch outcome")
+            assertEqual(failed.observation?.status, injected.errorCode == "TIMEOUT" ? "timed_out" : "failed")
+            assertEqual(failed.observation?.errorCode, injected.errorCode)
+            assertEqual(failed.observation?.state, nil)
+        }
+        for invalidTree in [tree(0), tree(1, pid: 102)] {
+            let wrong = try AXActionObservationRunner.run(baseline: baseline, options: snapshot,
+                dispatch: { receipt() }, inspect: { _ in invalidTree }, invalidate: { invalidations += 1 })
+            assertEqual(wrong.observation?.status, "failed")
+            assertEqual(wrong.observation?.errorCode, "STALE_OPERATION")
+            assertEqual(wrong.observation?.state, nil)
+        }
+        var lateInvalidated = false
+        let late = try AXActionObservationRunner.run(baseline: baseline, options: snapshot,
+            dispatch: { receipt() }, inspect: { _ in clock.advance(by: .milliseconds(501)); return tree(1, value: "late") },
+            invalidate: { lateInvalidated = true }, now: { clock.now }, wait: { clock.advance(by: .milliseconds($0)) })
+        assertEqual(late.observation?.status, "timed_out")
+        assertTrue(lateInvalidated)
+        assertEqual(late.observation?.state, nil)
+
+        let many = (0..<30).map { AXNodeDTO(id: "child-\($0)", role: "AXStaticText", value: "safe", bounds: AXRect(x: 0, y: 0, width: 1, height: 1)) }
+        let summary = AXChangeSummary.compare(baseline, tree(1, children: many))
+        assertEqual(summary.added, 30)
+        assertEqual(summary.nodeIds.count, 16)
+        assertTrue(summary.truncated)
+        let routedEngine = CompoundObservationFixtureEngine(result: unchanged)
+        let routedServer = HostServer(authorizer: FakeScreenRecordingAuthorizer(),
+            topologyProvider: FakeDisplayTopologyProvider(), captureEngine: FakeCaptureEngine(),
+            axActionEngine: routedEngine)
+        let validParams: [String: AnyCodable] = [
+            "ax_snapshot_id": .string("snap-0"), "app_instance_ref": .string("app-0"),
+            "element_ref": .string("element-0"), "topology_version": .string(topology),
+            "action": .string("press"), "intent": .string("Exercise compound routing"),
+            "observe": .dictionary(["condition": .string("snapshot"), "timeout_ms": .int(500)])
+        ]
+        let routed = await routedServer.handleRequest(IPCRequest(id: "compound", method: "ax_action_observe", params: validParams))
+        assertTrue(routed.success)
+        assertTrue(routed.data?["observation"] != nil)
+        assertEqual(routedEngine.compoundCalls, 1)
+        assertEqual(routedEngine.legacyCalls, 0)
+        for invalidOptions: AnyCodable in [.null, .dictionary([:]),
+            .dictionary(["condition": .string("snapshot"), "timeout_ms": .int(2001)]),
+            .dictionary(["condition": .string("snapshot"), "timeout_ms": .bool(true)]),
+            .dictionary(["condition": .string("snapshot"), "timeout_ms": .int(500), "app_id": .string("other")])] {
+            var params = validParams
+            params["observe"] = invalidOptions
+            let rejected = await routedServer.handleRequest(IPCRequest(id: "invalid", method: "ax_action_observe", params: params))
+            assertEqual(rejected.error?.code, "IPC_ERROR")
+            assertEqual(routedEngine.compoundCalls, 1, "Invalid options must fail before dispatch")
+        }
+        let legacyWithOption = await routedServer.handleRequest(IPCRequest(id: "legacy-option", method: "ax_action", params: validParams))
+        assertEqual(legacyWithOption.error?.code, "IPC_ERROR")
+        assertEqual(routedEngine.legacyCalls, 0)
+        let oldEngine = LegacyObservationFixtureEngine()
+        let oldServer = HostServer(topologyProvider: FakeDisplayTopologyProvider(), axActionEngine: oldEngine)
+        let unsupported = await oldServer.handleRequest(IPCRequest(id: "old-engine", method: "ax_action_observe", params: validParams))
+        assertEqual(unsupported.error?.code, "NONINTERFERING_ACTION_UNSUPPORTED")
+        assertEqual(oldEngine.calls, 0, "Missing compound support must not dispatch legacy mutation")
+        for shouldThrow in [false, true] {
+            let changingProvider = CompoundTopologyFixtureProvider(shouldThrow: shouldThrow)
+            let changingServer = HostServer(topologyProvider: changingProvider, axActionEngine: routedEngine)
+            let changedTopology = await changingServer.handleRequest(IPCRequest(id: "topology-change", method: "ax_action_observe", params: validParams))
+            assertTrue(changedTopology.success, "Topology observation failure must preserve known dispatch")
+            let encoded = try JSONEncoder().encode(changedTopology.data!)
+            let decoded = try JSONDecoder().decode(AXSemanticActionResultDTO.self, from: encoded)
+            assertEqual(decoded.status, "dispatched")
+            assertEqual(decoded.observation?.status, "failed")
+            assertEqual(decoded.observation?.errorCode, shouldThrow ? "TARGET_UNREACHABLE" : "STALE_TOPOLOGY")
+            assertEqual(decoded.observation?.state, nil)
+        }
+        routedEngine.result.observation = nil
+        let incomplete = await routedServer.handleRequest(IPCRequest(id: "incomplete", method: "ax_action_observe", params: validParams))
+        assertEqual(incomplete.error?.code, "OUTCOME_UNKNOWN")
+
+        for (condition, milliseconds) in [("invalid", 500), ("snapshot", 0), ("snapshot", 2001)] {
+            do { _ = try AXObservationOptions(condition: condition, timeoutMs: milliseconds); assertTrue(false) }
+            catch let error as ComputerUseError { assertEqual(error.errorCode, "IPC_ERROR") }
+        }
+    }
+}
+
+private final class CompoundObservationFixtureEngine: AXActionObservationEngine, @unchecked Sendable {
+    var result: AXSemanticActionResultDTO
+    var compoundCalls = 0
+    var legacyCalls = 0
+    init(result: AXSemanticActionResultDTO) { self.result = result }
+    var isOperatorSafeActionAvailable: Bool { true }
+    var supportedOperatorSafeActions: [String] { ["press", "set_value"] }
+    func performSemanticAction(snapshotId: String, appInstanceRef: String, elementRef: String,
+        action: String, value: String?, topologyVersion: String) throws -> AXSemanticActionResultDTO {
+        legacyCalls += 1
+        return result
+    }
+    func performSemanticActionAndObserve(snapshotId: String, appInstanceRef: String, elementRef: String,
+        action: String, value: String?, topologyVersion: String, options: AXObservationOptions) throws -> AXSemanticActionResultDTO {
+        compoundCalls += 1
+        return result
+    }
+}
+
+private final class LegacyObservationFixtureEngine: AXSemanticActionEngine, @unchecked Sendable {
+    var calls = 0
+    var isOperatorSafeActionAvailable: Bool { true }
+    var supportedOperatorSafeActions: [String] { ["press"] }
+    func performSemanticAction(snapshotId: String, appInstanceRef: String, elementRef: String,
+        action: String, value: String?, topologyVersion: String) throws -> AXSemanticActionResultDTO {
+        calls += 1
+        throw ComputerUseError.axOutcomeUnknown(reason: "Legacy route must not be called")
+    }
+}
+
+private final class CompoundTopologyFixtureProvider: DisplayTopologyProviding, @unchecked Sendable {
+    var reads = 0
+    let shouldThrow: Bool
+    init(shouldThrow: Bool) { self.shouldThrow = shouldThrow }
+    func getTopology() throws -> DisplayTopology {
+        reads += 1
+        let original = try FakeDisplayTopologyProvider().getTopology()
+        if reads == 1 { return original }
+        if shouldThrow { throw ComputerUseError.targetUnreachable(reason: "Topology unavailable") }
+        return DisplayTopology(version: "top-sha256-" + String(repeating: "0", count: 64),
+            primaryDisplayId: original.primaryDisplayId, displays: original.displays)
+    }
+}
+
+
+extension ComputerUseHostTestRunner {
+    public static func run44_TargetScopedIntervention() async throws {
+        let state = AXTargetInputState()
+        let baseline = state.epoch()
+        state.receive(.mouseMoved)
+        state.updateHealth(tapEnabled: true, trusted: true, secureInput: false,
+                           targetRunning: true, targetActive: false)
+        assertTrue(!DefaultAXInspector.operatorInputChanged(from: baseline, to: state.epoch()),
+                   "Movement and a healthy background target must preserve authority")
+
+        for event in [CGEventType.keyDown, .keyUp, .flagsChanged, .leftMouseDown,
+                      .rightMouseDown, .otherMouseDown, .leftMouseDragged, .scrollWheel] {
+            let monitor = AXTargetInputState()
+            let before = monitor.epoch()
+            monitor.receive(event)
+            assertTrue(DefaultAXInspector.operatorInputChanged(from: before, to: monitor.epoch()),
+                       "Every delivered target input must invalidate authority")
+        }
+        state.updateHealth(tapEnabled: true, trusted: true, secureInput: false,
+                           targetRunning: true, targetActive: true)
+        state.updateHealth(tapEnabled: true, trusted: true, secureInput: false,
+                           targetRunning: true, targetActive: false)
+        assertTrue(DefaultAXInspector.operatorInputChanged(from: baseline, to: state.epoch()),
+                   "Activating target and switching away cannot resurrect authority")
+
+        for fault in 0..<6 {
+            let monitor = AXTargetInputState()
+            let before = monitor.epoch()
+            if fault < 4 {
+                monitor.updateHealth(tapEnabled: fault != 0, trusted: fault != 1,
+                    secureInput: fault == 2, targetRunning: fault != 3, targetActive: false)
+            } else {
+                monitor.receive(fault == 4 ? .tapDisabledByTimeout : .tapDisabledByUserInput)
+            }
+            monitor.updateHealth(tapEnabled: true, trusted: true, secureInput: false,
+                                 targetRunning: true, targetActive: false)
+            let invalid = monitor.epoch()
+            assertTrue(DefaultAXInspector.operatorInputChanged(from: before, to: invalid))
+            assertTrue(DefaultAXInspector.operatorInputChanged(from: invalid, to: invalid),
+                       "Missing coverage cannot pass by comparing two invalid samples")
+            var invoked = false
+            do {
+                try DefaultAXInspector.validateRetainedAuthority(AXRetainedAuthorityValidation(
+                    windowIdentityMatches: true, ancestryMatches: true,
+                    elementFingerprintMatches: true, windowFingerprintMatches: true,
+                    operatorInputChanged: DefaultAXInspector.operatorInputChanged(from: before, to: invalid)))
+                invoked = true
+            } catch let error as ComputerUseError {
+                guard case .userIntervened = error else { throw error }
+            }
+            assertTrue(!invoked, "Monitor loss must stop before mutation")
+        }
+
+        struct Provider: OperatorInputEpochProviding {
+            let state: AXTargetInputState
+            func currentEpoch() -> OperatorInputEpoch { state.epoch() }
+        }
+        let during = AXTargetInputState()
+        let observed = during.epoch()
+        var mutations = 0
+        do {
+            _ = try DefaultAXInspector.performAXSetValueCheckingOperatorInput(
+                value: "synthetic", observedEpoch: observed, epochProvider: Provider(state: during)
+            ) { _ in
+                mutations += 1
+                during.receive(.keyDown)
+                return .success
+            }
+            assertTrue(false, "Takeover during dispatch must not return success")
+        } catch let error as ComputerUseError {
+            guard case .axOutcomeUnknown = error else { throw error }
+        }
+        assertEqual(mutations, 1, "An uncertain mutation must never repeat")
     }
 }

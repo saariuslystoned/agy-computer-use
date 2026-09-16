@@ -111,6 +111,7 @@ public struct AXNodeDTO: Codable, Equatable, Sendable {
 }
 
 public struct AXTreeResultDTO: Codable, Equatable, Sendable {
+    public var interventionScope: String? = nil
     public let targetApp: AXTargetAppDTO
     public let axSnapshotId: String
     public let appInstanceRef: String
@@ -122,6 +123,7 @@ public struct AXTreeResultDTO: Codable, Equatable, Sendable {
     public let tree: AXNodeDTO
 
     enum CodingKeys: String, CodingKey {
+        case interventionScope = "intervention_scope"
         case targetApp = "target_app"
         case axSnapshotId = "ax_snapshot_id"
         case appInstanceRef = "app_instance_ref"
@@ -147,6 +149,7 @@ public struct AXTreeResultDTO: Codable, Equatable, Sendable {
 }
 
 public struct AXSemanticActionResultDTO: Codable, Equatable, Sendable {
+    public var observation: AXActionObservation? = nil
     public let actionId: String
     public let status: String
     public let strategy: String
@@ -160,6 +163,7 @@ public struct AXSemanticActionResultDTO: Codable, Equatable, Sendable {
     public let durationMs: Double
 
     enum CodingKeys: String, CodingKey {
+        case observation
         case actionId = "action_id"
         case status
         case strategy
@@ -253,14 +257,23 @@ public struct DisabledAXInspector: AXInspectionEngine {
 
 package struct OperatorInputEpoch: Equatable, Sendable {
     package let counters: [UInt32]
+    package let coverageValid: Bool
 
-    package init(counters: [UInt32]) {
+    package init(counters: [UInt32], coverageValid: Bool = true) {
+        self.coverageValid = coverageValid
         self.counters = counters
     }
 }
 
 package protocol OperatorInputEpochProviding: Sendable {
     func currentEpoch() -> OperatorInputEpoch
+    var interventionScope: String { get }
+    var interventionReason: String { get }
+}
+
+package extension OperatorInputEpochProviding {
+    var interventionScope: String { "global" }
+    var interventionReason: String { "combined-session input changed" }
 }
 
 package final class AXSemanticOperationGate: @unchecked Sendable {
@@ -389,27 +402,37 @@ private struct RetainedAXSnapshot {
     let topologyVersion: String
     let leaseDeadline: ContinuousClock.Instant
     let operatorInputEpoch: OperatorInputEpoch
+    let inputMonitor: any OperatorInputEpochProviding
     let elements: [String: RetainedAXElement]
+    let treeResult: AXTreeResultDTO
+    let maxDepth: Int
 }
 
-public final class DefaultAXInspector: AXInspectionEngine, AXSemanticActionEngine, @unchecked Sendable {
+public final class DefaultAXInspector: AXInspectionEngine, AXActionObservationEngine, @unchecked Sendable {
     private static let actionLeaseLifetimeMs = 30_000
     package static let maxSetValueUTF8Bytes = 4_096
     private static let maxRememberedConsumedSnapshots = 64
 
     private let operationGate = AXSemanticOperationGate()
-    private let operatorInputEpochProvider: any OperatorInputEpochProviding
+    private let makeInputMonitor: @Sendable (pid_t) -> any OperatorInputEpochProviding
     private var activeSnapshot: RetainedAXSnapshot?
     private var consumedSnapshots = AXConsumedSnapshotTombstones(
         capacity: maxRememberedConsumedSnapshots
     )
 
     public convenience init() {
-        self.init(operatorInputEpochProvider: SystemOperatorInputEpochProvider())
+        self.init(makeInputMonitor: { pid in
+            if let monitor = AXTargetInputMonitor(pid: pid) { return monitor }
+            return SystemOperatorInputEpochProvider()
+        })
     }
 
     package init(operatorInputEpochProvider: any OperatorInputEpochProviding) {
-        self.operatorInputEpochProvider = operatorInputEpochProvider
+        self.makeInputMonitor = { _ in operatorInputEpochProvider }
+    }
+
+    private init(makeInputMonitor: @escaping @Sendable (pid_t) -> any OperatorInputEpochProviding) {
+        self.makeInputMonitor = makeInputMonitor
     }
 
     public var isAvailable: Bool {
@@ -432,6 +455,14 @@ public final class DefaultAXInspector: AXInspectionEngine, AXSemanticActionEngin
         operationGate.lockOperation()
         defer { operationGate.unlockOperation() }
 
+        return try inspectTreeLocked(maxDepth: requestedMaxDepth, appId: appId, topologyVersion: topologyVersion)
+    }
+
+    private func inspectTreeLocked(
+        maxDepth requestedMaxDepth: Int, appId: String, topologyVersion: String,
+        observationDeadline: ContinuousClock.Instant? = nil,
+        expectedProcess: RetainedAXSnapshot? = nil
+    ) throws -> AXTreeResultDTO {
         guard isAccessibilityTrusted() else {
             throw ComputerUseError.permissionDenied(permission: "accessibility")
         }
@@ -470,7 +501,16 @@ public final class DefaultAXInspector: AXInspectionEngine, AXSemanticActionEngin
         let appDTO = AXTargetAppDTO(pid: Int(pid), bundleId: app.bundleIdentifier, name: app.localizedName)
         let axApp = AXUIElementCreateApplication(pid)
 
-        AXUIElementSetMessagingTimeout(axApp, 5.0)
+        if let expectedProcess {
+            guard pid == expectedProcess.pid,
+                  app.bundleIdentifier == expectedProcess.bundleId,
+                  Self.matchesProcessBirth(expectedLaunchTime: expectedProcess.launchTime,
+                                           currentLaunchTime: app.launchDate?.timeIntervalSince1970) else {
+                throw ComputerUseError.staleOperation(reason: "Compound observation process identity changed")
+            }
+        }
+        let deadline = observationDeadline ?? (ContinuousClock().now + .seconds(5))
+        AXUIElementSetMessagingTimeout(axApp, observationDeadline == nil ? 5.0 : 0.1)
 
         let maxDepth = min(max(1, requestedMaxDepth), BoundedAXTraverser.defaultMaxDepth)
         let maxNodes = BoundedAXTraverser.defaultMaxNodes
@@ -479,7 +519,8 @@ public final class DefaultAXInspector: AXInspectionEngine, AXSemanticActionEngin
               launchTime > 0 else {
             throw ComputerUseError.staleOperation(reason: "Target application process birth identity is unavailable")
         }
-        let operatorInputEpochBefore = operatorInputEpochProvider.currentEpoch()
+        let inputMonitor = expectedProcess?.inputMonitor ?? makeInputMonitor(pid)
+        let operatorInputEpochBefore = inputMonitor.currentEpoch()
         let snapshotId = "ax-snap-\(UUID().uuidString.lowercased())"
         let appInstanceRef = "app-inst-\(UUID().uuidString.lowercased())"
         let expiresAtMs = Int(Date().timeIntervalSince1970 * 1_000) + Self.actionLeaseLifetimeMs
@@ -492,8 +533,6 @@ public final class DefaultAXInspector: AXInspectionEngine, AXSemanticActionEngin
         var visited = Set<AXUIElement>()
         var didTimeout = false
 
-        let deadline = ContinuousClock().now + .seconds(5)
-
         guard let rootNode = DefaultAXInspector.buildNode(
             axElement: axApp,
             currentDepth: 1,
@@ -504,18 +543,22 @@ public final class DefaultAXInspector: AXInspectionEngine, AXSemanticActionEngin
             isTruncated: &isTruncated,
             visited: &visited,
             deadline: deadline,
+            messagingTimeout: observationDeadline == nil ? nil : 0.1,
             didTimeout: &didTimeout,
             retainedElements: &retainedElements
         ), !didTimeout else {
             if didTimeout {
+                if observationDeadline != nil {
+                    throw ComputerUseError.timeout(operation: "AX action observation", seconds: 2)
+                }
                 throw ComputerUseError.targetUnreachable(reason: "AX tree inspection timed out after 5.0 seconds")
             }
             throw ComputerUseError.targetUnreachable(reason: "Failed to extract root AX element for application '\(app.localizedName ?? "\(pid)")'")
         }
 
-        let operatorInputEpochAfter = operatorInputEpochProvider.currentEpoch()
+        let operatorInputEpochAfter = inputMonitor.currentEpoch()
         guard !Self.operatorInputChanged(
-            from: operatorInputEpochBefore,
+            from: expectedProcess?.operatorInputEpoch ?? operatorInputEpochBefore,
             to: operatorInputEpochAfter
         ) else {
             throw ComputerUseError.userIntervened(
@@ -523,19 +566,7 @@ public final class DefaultAXInspector: AXInspectionEngine, AXSemanticActionEngin
             )
         }
 
-        activeSnapshot = RetainedAXSnapshot(
-            snapshotId: snapshotId,
-            appInstanceRef: appInstanceRef,
-            pid: pid,
-            bundleId: app.bundleIdentifier,
-            launchTime: launchTime,
-            topologyVersion: topologyVersion,
-            leaseDeadline: leaseDeadline,
-            operatorInputEpoch: operatorInputEpochAfter,
-            elements: retainedElements
-        )
-
-        return AXTreeResultDTO(
+        var result = AXTreeResultDTO(
             targetApp: appDTO,
             axSnapshotId: snapshotId,
             appInstanceRef: appInstanceRef,
@@ -546,6 +577,33 @@ public final class DefaultAXInspector: AXInspectionEngine, AXSemanticActionEngin
             truncated: isTruncated,
             tree: rootNode
         )
+
+        result.interventionScope = inputMonitor.interventionScope
+
+        if let expectedProcess {
+            guard let current = NSRunningApplication(processIdentifier: pid), !current.isTerminated,
+                  current.bundleIdentifier == expectedProcess.bundleId,
+                  Self.matchesProcessBirth(expectedLaunchTime: expectedProcess.launchTime,
+                                           currentLaunchTime: current.launchDate?.timeIntervalSince1970) else {
+                throw ComputerUseError.staleOperation(reason: "Compound observation process changed during inspection")
+            }
+        }
+        activeSnapshot = RetainedAXSnapshot(
+            snapshotId: snapshotId,
+            appInstanceRef: appInstanceRef,
+            pid: pid,
+            bundleId: app.bundleIdentifier,
+            launchTime: launchTime,
+            topologyVersion: topologyVersion,
+            leaseDeadline: leaseDeadline,
+            operatorInputEpoch: operatorInputEpochAfter,
+            inputMonitor: inputMonitor,
+            elements: retainedElements,
+            treeResult: result,
+            maxDepth: maxDepth
+        )
+
+        return result
     }
 
     public func performSemanticAction(
@@ -559,6 +617,48 @@ public final class DefaultAXInspector: AXInspectionEngine, AXSemanticActionEngin
         operationGate.lockOperation()
         defer { operationGate.unlockOperation() }
 
+        return try performSemanticActionLocked(
+            snapshotId: snapshotId, appInstanceRef: appInstanceRef, elementRef: elementRef,
+            action: action, value: value, topologyVersion: topologyVersion
+        )
+    }
+
+    public func performSemanticActionAndObserve(
+        snapshotId: String, appInstanceRef: String, elementRef: String,
+        action: String, value: String?, topologyVersion: String,
+        options: AXObservationOptions
+    ) throws -> AXSemanticActionResultDTO {
+        operationGate.lockOperation()
+        defer { operationGate.unlockOperation() }
+        // Validate even decoded options before reaching the mutating boundary.
+        let options = try AXObservationOptions(condition: options.condition, timeoutMs: options.timeoutMs)
+        guard let retained = activeSnapshot else {
+            // Preserve the authoritative replay/stale result from the old route.
+            return try performSemanticActionLocked(snapshotId: snapshotId, appInstanceRef: appInstanceRef,
+                elementRef: elementRef, action: action, value: value, topologyVersion: topologyVersion)
+        }
+        return try AXActionObservationRunner.run(
+            baseline: retained.treeResult, options: options,
+            dispatch: {
+                try self.performSemanticActionLocked(snapshotId: snapshotId, appInstanceRef: appInstanceRef,
+                    elementRef: elementRef, action: action, value: value, topologyVersion: topologyVersion)
+            },
+            inspect: { deadline in
+                guard !Self.operatorInputChanged(from: retained.operatorInputEpoch,
+                    to: retained.inputMonitor.currentEpoch()) else {
+                    throw ComputerUseError.userIntervened(reason: "Input changed after AX dispatch; observation cancelled")
+                }
+                return try self.inspectTreeLocked(maxDepth: retained.maxDepth, appId: String(retained.pid),
+                    topologyVersion: topologyVersion, observationDeadline: deadline, expectedProcess: retained)
+            },
+            invalidate: { self.activeSnapshot = nil }
+        )
+    }
+
+    private func performSemanticActionLocked(
+        snapshotId: String, appInstanceRef: String, elementRef: String,
+        action: String, value: String?, topologyVersion: String
+    ) throws -> AXSemanticActionResultDTO {
         guard isAccessibilityTrusted() else {
             throw ComputerUseError.permissionDenied(permission: "accessibility")
         }
@@ -616,10 +716,10 @@ public final class DefaultAXInspector: AXInspectionEngine, AXSemanticActionEngin
 
         guard !Self.operatorInputChanged(
             from: retained.operatorInputEpoch,
-            to: operatorInputEpochProvider.currentEpoch()
+            to: retained.inputMonitor.currentEpoch()
         ) else {
             throw ComputerUseError.userIntervened(
-                reason: "Operator or system input changed after AX inspection; the one-shot lease was consumed"
+                reason: "Operator intervention (\(retained.inputMonitor.interventionReason)); the one-shot lease was consumed"
             )
         }
 
@@ -687,11 +787,15 @@ public final class DefaultAXInspector: AXInspectionEngine, AXSemanticActionEngin
                     Self.semanticFingerprint(for: retainedElement.window) == retainedElement.windowFingerprint,
                 operatorInputChanged: Self.operatorInputChanged(
                     from: retained.operatorInputEpoch,
-                    to: self.operatorInputEpochProvider.currentEpoch()
+                    to: retained.inputMonitor.currentEpoch()
                 )
             ))
         }
 
+        // Compound reads use a short messaging timeout. Fresh references retain
+        // that setting, so restore the independent mutation budget before dispatch.
+        // Otherwise a normal AX press (>100 ms on AppKit) executes but times out.
+        AXUIElementSetMessagingTimeout(retainedElement.element, 5.0)
         let startedAt = ContinuousClock().now
         let axResult: AXError
         if let setValue {
@@ -699,7 +803,7 @@ public final class DefaultAXInspector: AXInspectionEngine, AXSemanticActionEngin
                 value: setValue,
                 retainedSupportedActions: retainedElement.supportedActions,
                 observedEpoch: retained.operatorInputEpoch,
-                epochProvider: operatorInputEpochProvider,
+                epochProvider: retained.inputMonitor,
                 readLiveCapability: {
                     try Self.currentSetValueCapability(for: retainedElement.element)
                 },
@@ -718,7 +822,7 @@ public final class DefaultAXInspector: AXInspectionEngine, AXSemanticActionEngin
             try validateCurrentAuthority()
             axResult = try Self.performAXActionCheckingOperatorInput(
                 observedEpoch: retained.operatorInputEpoch,
-                epochProvider: operatorInputEpochProvider
+                epochProvider: retained.inputMonitor
             ) {
                 AXUIElementPerformAction(
                     retainedElement.element,
@@ -777,7 +881,7 @@ public final class DefaultAXInspector: AXInspectionEngine, AXSemanticActionEngin
         from observed: OperatorInputEpoch,
         to current: OperatorInputEpoch
     ) -> Bool {
-        observed != current
+        !observed.coverageValid || !current.coverageValid || observed != current
     }
 
     package static func validateRetainedAuthority(
@@ -1279,6 +1383,7 @@ public final class DefaultAXInspector: AXInspectionEngine, AXSemanticActionEngin
         isTruncated: inout Bool,
         visited: inout Set<AXUIElement>,
         deadline: ContinuousClock.Instant,
+        messagingTimeout: Float? = nil,
         didTimeout: inout Bool,
         retainedElements: inout [String: RetainedAXElement]
     ) -> AXNodeDTO? {
@@ -1310,6 +1415,8 @@ public final class DefaultAXInspector: AXInspectionEngine, AXSemanticActionEngin
         var enabledVal: Bool? = nil
         var focusedVal: Bool? = nil
         var boundsRect = AXRect(x: 0, y: 0, width: 0, height: 0)
+
+        if let messagingTimeout { AXUIElementSetMessagingTimeout(axElement, messagingTimeout) }
 
         // Role
         var roleValue: CFTypeRef?
@@ -1498,6 +1605,7 @@ public final class DefaultAXInspector: AXInspectionEngine, AXSemanticActionEngin
                         isTruncated: &isTruncated,
                         visited: &visited,
                         deadline: deadline,
+                        messagingTimeout: messagingTimeout,
                         didTimeout: &didTimeout,
                         retainedElements: &retainedElements
                     ) {

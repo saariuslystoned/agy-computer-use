@@ -1,0 +1,4 @@
+{"phase":"started","base":"67f7d329737c067425b751a7aaaa65bad27789d7","scope":"issue-12-slice-1"}
+{"phase": "verification", "native": "43 cases passed before final topology-failure assertion additions; final rerun in progress", "mcp": "66 passed", "readiness": "passed", "live": "blocked: running unmanaged host PID 58198; untouched"}
+{"phase": "local_candidate_ready", "native_passed": 43, "mcp_passed": 66, "readiness": "passed", "build": "passed", "live": "WAITING_FOR_HUMAN", "host_pid": 58198}
+{"phase": "publication_authorized", "source_sha": "359aadf70354a93107f7de9398490774d2e9508e", "scope": "push branch and open PR; no merge or host handoff"}

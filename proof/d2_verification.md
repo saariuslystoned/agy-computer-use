@@ -53,3 +53,12 @@
 - Source commit $S$ (`57b0550b1d41588c99783ca7992d49e9e1a486b7`) has parent $S^\wedge = 53b1433c8c6095e54232ceb770cea36f8e84b356$.
 - Proof child commit $P$ (`15be6fbaf989ed9d4e887c6672c3d87ab92c59c1`) has exact parent $P^\wedge = S = 57b0550b1d41588c99783ca7992d49e9e1a486b7$.
 - `git diff-tree --no-commit-id --name-only -r P` touches strictly `proof/d2_verification.md`.
+
+
+## Issue 12 compound AX observation candidate — 2026-09-16
+
+Local first-slice candidate: 43 native cases, 66 MCP tests, TypeScript check, configured production readiness, and strict native host build pass. See [candidate proof and live gate](issue_12_action_observation_20260916.md). Live Gemini/AX qualification is pending; Issue 12 remains open.
+
+## September 16, 2026 — Issue 12 follow-up
+
+The original D2 evidence above remains historical. Current source `eb7968b90d3065b2961756f086c88c1457a6d5f7` passes 44 native cases, 66 MCP tests, TypeScript, strict native build, and production readiness. See [background coexistence proof](issue_12_background_20260916.md) for the frozen-build AGY calculator result, intervention checks, and the remaining compound-form qualification limit.

@@ -1,0 +1,16 @@
+{
+  "exit_code": 0,
+  "elapsed_s": 41.74,
+  "timed_out": false,
+  "model": "gemini-3.8-flash-high",
+  "effort": "high",
+  "result": {
+    "baseline_ok": false,
+    "blocker_code": "",
+    "completed": true,
+    "summary": "Completed 5 AX presses (Clear, 2, +, 3, =) with fresh snapshot leases and compound intent. Final displayed result verified as 5.",
+    "unchanged_ok": false,
+    "compound_ok": true,
+    "timeout_ok": false
+  }
+}

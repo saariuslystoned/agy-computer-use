@@ -479,6 +479,11 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
       "observe_request.json": { expectedValid: true, schemaTarget: "ObserveRequest" },
       "ax_tree_request.json": { expectedValid: true, schemaTarget: "AxTreeRequest" },
       "ax_tree_response.json": { expectedValid: true, schemaTarget: "AxTreeResponse" },
+      "ax_tree_app_scope_response.json": { expectedValid: true, schemaTarget: "AxTreeResponse" },
+      "invalid_ax_tree_intervention_scope.json": { expectedValid: false, schemaTarget: "AxTreeResponse" },
+      "ax_action_observe_request.json": { expectedValid: true, schemaTarget: "AxActionObserveRequest" },
+      "ax_action_observe_response.json": { expectedValid: true, schemaTarget: "AxActionResponse" },
+      "invalid_ax_action_observe_timeout.json": { expectedValid: false },
       "ax_action_request.json": { expectedValid: true, schemaTarget: "AxActionRequest" },
       "ax_action_response.json": { expectedValid: true, schemaTarget: "AxActionResponse" },
       "ax_set_value_request.json": { expectedValid: true, schemaTarget: "AxActionRequest" },
@@ -2487,6 +2492,12 @@ describe("Defect 4 & 5 Hardened Validation Tests", () => {
       tree: { id: "ax-1", role: "AXButton", description: "D".repeat(257), bounds: { x: 0, y: 0, width: 10, height: 10 } }
     };
     assert.equal(AXTreeDataSchema.safeParse(longDescriptionData).success, false);
+
+    for (const scope of ["app", "global"]) {
+      const parsed = AXTreeDataSchema.parse({ ...validTreeData, intervention_scope: scope });
+      assert.equal(parsed.intervention_scope, scope);
+    }
+    assert.equal(AXTreeDataSchema.safeParse({ ...validTreeData, intervention_scope: "none" }).success, false);
 
     const unpairedElementRefData = {
       ...negativeOriginData,

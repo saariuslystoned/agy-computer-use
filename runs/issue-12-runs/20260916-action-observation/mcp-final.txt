@@ -1,0 +1,455 @@
+
+> computer-use-mcp@0.1.0 test /Users/bobbybones/Developer/worktrees/agy-computer-use-issue-12-action-observation/mcp/computer-use-mcp
+> pnpm build && node --test dist/test/*.test.js
+
+
+> computer-use-mcp@0.1.0 build /Users/bobbybones/Developer/worktrees/agy-computer-use-issue-12-action-observation/mcp/computer-use-mcp
+> tsc && cp src/native-authority-selection-core.js dist/src/
+
+TAP version 13
+# Subtest: compound option returns fresh state through exactly one native operation
+ok 1 - compound option returns fresh state through exactly one native operation
+  ---
+  duration_ms: 12.581709
+  type: 'test'
+  ...
+# Subtest: legacy route is preserved and compound action errors never repeat or trigger bridge reads
+ok 2 - legacy route is preserved and compound action errors never repeat or trigger bridge reads
+  ---
+  duration_ms: 10.165667
+  type: 'test'
+  ...
+# Subtest: observation errors preserve dispatch and a missing compound result fails closed
+ok 3 - observation errors preserve dispatch and a missing compound result fails closed
+  ---
+  duration_ms: 3.073459
+  type: 'test'
+  ...
+# Subtest: invalid observation options fail before host dispatch
+ok 4 - invalid observation options fail before host dispatch
+  ---
+  duration_ms: 5.194042
+  type: 'test'
+  ...
+# Subtest: schema rejects stale authority and contradictory, partial or oversized observation results
+ok 5 - schema rejects stale authority and contradictory, partial or oversized observation results
+  ---
+  duration_ms: 4.097583
+  type: 'test'
+  ...
+# Subtest: malformed or request-mismatched compound replies remain uncertain without retry
+ok 6 - malformed or request-mismatched compound replies remain uncertain without retry
+  ---
+  duration_ms: 2.620917
+  type: 'test'
+  ...
+# Subtest: compound socket timeout, cancellation and EOF retain mutation uncertainty with one write
+ok 7 - compound socket timeout, cancellation and EOF retain mutation uncertainty with one write
+  ---
+  duration_ms: 112.722083
+  type: 'test'
+  ...
+# [INFO] 2026-09-16T11:30:21.798Z - Successfully captured canary screenshot (image/png)
+# [INFO] 2026-09-16T11:30:21.800Z - Successfully captured canary screenshot (image/jpeg)
+# Subtest: Computer Use Canary MCP Server Protocol & Hardening Test Suite
+    # Subtest: Canary inventory contains EXACTLY ONE tool named 'computer_use_canary_screenshot'
+    ok 1 - Canary inventory contains EXACTLY ONE tool named 'computer_use_canary_screenshot'
+      ---
+      duration_ms: 8.394083
+      type: 'test'
+      ...
+    # Subtest: Happy Path: Valid PNG base64 and magic bytes yields ImageContent and isError is NOT true
+    ok 2 - Happy Path: Valid PNG base64 and magic bytes yields ImageContent and isError is NOT true
+      ---
+      duration_ms: 3.406292
+      type: 'test'
+      ...
+    # Subtest: Happy Path: Valid JPEG base64 and magic bytes yields ImageContent
+    ok 3 - Happy Path: Valid JPEG base64 and magic bytes yields ImageContent
+      ---
+      duration_ms: 1.487292
+      type: 'test'
+      ...
+    # Subtest: Base64 Pre-Allocation Guard: Rejects encoded input exceeding MAX_ENCODED_CHARS before Buffer.from
+    ok 4 - Base64 Pre-Allocation Guard: Rejects encoded input exceeding MAX_ENCODED_CHARS before Buffer.from
+      ---
+      duration_ms: 0.356334
+      type: 'test'
+      ...
+    # Subtest: Canonical Base64 Check: Rejects missing padding (length % 4 != 0)
+    ok 5 - Canonical Base64 Check: Rejects missing padding (length % 4 != 0)
+      ---
+      duration_ms: 0.12125
+      type: 'test'
+      ...
+    # Subtest: Canonical Base64 Check: Rejects misplaced or excess padding
+    ok 6 - Canonical Base64 Check: Rejects misplaced or excess padding
+      ---
+      duration_ms: 0.259125
+      type: 'test'
+      ...
+    # Subtest: Canonical Base64 Check: Rejects embedded whitespace and newlines
+    ok 7 - Canonical Base64 Check: Rejects embedded whitespace and newlines
+      ---
+      duration_ms: 0.089542
+      type: 'test'
+      ...
+    # Subtest: Canonical Base64 Check: Rejects trailing garbage characters
+    ok 8 - Canonical Base64 Check: Rejects trailing garbage characters
+      ---
+      duration_ms: 0.146041
+      type: 'test'
+      ...
+    # Subtest: Error Contract: Validates CANARY_RESPONSE_INVALID for non-object raw response
+    ok 9 - Error Contract: Validates CANARY_RESPONSE_INVALID for non-object raw response
+      ---
+      duration_ms: 0.124292
+      type: 'test'
+      ...
+    # Subtest: Error Contract: Validates CANARY_EMPTY_DECODED_BUFFER
+    ok 10 - Error Contract: Validates CANARY_EMPTY_DECODED_BUFFER
+      ---
+      duration_ms: 0.276541
+      type: 'test'
+      ...
+# [ERROR] 2026-09-16T11:30:21.856Z - Canary capture failed: CANARY_PEEKABOO_ERROR
+# [ERROR] 2026-09-16T11:30:21.857Z - Canary capture failed: CANARY_MAGIC_MISMATCH
+    # Subtest: Lifecycle Seam: Success, error, and timeout paths attempt cleanup (closeAttempted == true)
+    ok 11 - Lifecycle Seam: Success, error, and timeout paths attempt cleanup (closeAttempted == true)
+      ---
+      duration_ms: 51.542417
+      type: 'test'
+      ...
+    # Subtest: Negative: Rejects raw response with isError: true
+    ok 12 - Negative: Rejects raw response with isError: true
+      ---
+      duration_ms: 1.540666
+      type: 'test'
+      ...
+    # Subtest: Negative: Rejects Magic Bytes mismatch (JPEG header with image/png MIME)
+    ok 13 - Negative: Rejects Magic Bytes mismatch (JPEG header with image/png MIME)
+      ---
+      duration_ms: 1.572667
+      type: 'test'
+      ...
+    # Subtest: Negative: Rejects any arguments passed to computer_use_canary_screenshot
+    ok 14 - Negative: Rejects any arguments passed to computer_use_canary_screenshot
+      ---
+      duration_ms: 0.80425
+      type: 'test'
+      ...
+    1..14
+ok 8 - Computer Use Canary MCP Server Protocol & Hardening Test Suite
+  ---
+  duration_ms: 71.128625
+  type: 'suite'
+  ...
+# Subtest: Computer Use MCP Server & HostClient Test Suite (Milestone D2)
+    # Subtest: Exercises listTools and callTool using official SDK Client and InMemoryTransport linked pair
+    ok 1 - Exercises listTools and callTool using official SDK Client and InMemoryTransport linked pair
+      ---
+      duration_ms: 13.885417
+      type: 'test'
+      ...
+    # Subtest: Executes observe -> click -> observe -> type -> observe -> shortcut -> observe lease chain
+    ok 2 - Executes observe -> click -> observe -> type -> observe -> shortcut -> observe lease chain
+      ---
+      duration_ms: 4.036167
+      type: 'test'
+      ...
+    # Subtest: Normalizes omitted MCP arguments to empty object and strict parses status and observe
+    ok 3 - Normalizes omitted MCP arguments to empty object and strict parses status and observe
+      ---
+      duration_ms: 3.472292
+      type: 'test'
+      ...
+    # Subtest: Decoder-invocation seam: proves zero allocation on rejected Base64/JPEG payloads
+    ok 4 - Decoder-invocation seam: proves zero allocation on rejected Base64/JPEG payloads
+      ---
+      duration_ms: 37.021834
+      type: 'test'
+      ...
+    # Subtest: Adversarial: Stale top-v1 token fails closed with INVALID_RESPONSE_DATA
+    ok 5 - Adversarial: Stale top-v1 token fails closed with INVALID_RESPONSE_DATA
+      ---
+      duration_ms: 1.6325
+      type: 'test'
+      ...
+    # Subtest: Adversarial: Non-JPEG magic bytes fail closed
+    ok 6 - Adversarial: Non-JPEG magic bytes fail closed
+      ---
+      duration_ms: 0.155708
+      type: 'test'
+      ...
+    # Subtest: Adversarial: Truncated or missing JPEG SOF dimensions fail closed
+    ok 7 - Adversarial: Truncated or missing JPEG SOF dimensions fail closed
+      ---
+      duration_ms: 0.07875
+      type: 'test'
+      ...
+    # Subtest: Adversarial: Base64 unpadded (length % 4 != 0) fails closed
+    ok 8 - Adversarial: Base64 unpadded (length % 4 != 0) fails closed
+      ---
+      duration_ms: 0.151
+      type: 'test'
+      ...
+    # Subtest: Adversarial: Base64 non-canonical encoding fails closed
+    ok 9 - Adversarial: Base64 non-canonical encoding fails closed
+      ---
+      duration_ms: 0.143292
+      type: 'test'
+      ...
+    # Subtest: Adversarial: Mismatched response ID rejected by HostClient
+    ok 10 - Adversarial: Mismatched response ID rejected by HostClient
+      ---
+      duration_ms: 7.202375
+      type: 'test'
+      ...
+# strict mode: missing type "number" for keyword "minimum" at "\#/allOf/0/then/properties/attempts" (strictTypes)
+# strict mode: missing type "object" for keyword "properties" at "\#/allOf/2/then/properties/changes" (strictTypes)
+    # Subtest: Integration path: Official MCP Client -> createComputerUseServer -> UnixSocketHostClient -> UDS Socket
+    ok 11 - Integration path: Official MCP Client -> createComputerUseServer -> UnixSocketHostClient -> UDS Socket
+      ---
+      duration_ms: 2.823334
+      type: 'test'
+      ...
+    # Subtest: Verifies 100% recursive skill package sync drift between .agents/skills and skills/
+    ok 12 - Verifies 100% recursive skill package sync drift between .agents/skills and skills/
+      ---
+      duration_ms: 1.4375
+      type: 'test'
+      ...
+    # Subtest: Decoder-invocation seam: accepts exact N=10,485,760 byte boundary
+    ok 13 - Decoder-invocation seam: accepts exact N=10,485,760 byte boundary
+      ---
+      duration_ms: 13.15125
+      type: 'test'
+      ...
+    # Subtest: Adversarial: SOS before SOF in JPEG fails closed
+    ok 14 - Adversarial: SOS before SOF in JPEG fails closed
+      ---
+      duration_ms: 0.062666
+      type: 'test'
+      ...
+    # Subtest: Adversarial: Invalid SOF or SOS segment lengths in JPEG fail closed
+    ok 15 - Adversarial: Invalid SOF or SOS segment lengths in JPEG fail closed
+      ---
+      duration_ms: 0.041958
+      type: 'test'
+      ...
+    # Subtest: Validates all golden JSON fixtures in docs/fixtures/ using explicit fixture-to-schema mappings
+    ok 16 - Validates all golden JSON fixtures in docs/fixtures/ using explicit fixture-to-schema mappings
+      ---
+      duration_ms: 84.813583
+      type: 'test'
+      ...
+    # Subtest: UnixSocketHostClient: Oversized frame rejection (>16MB)
+    ok 17 - UnixSocketHostClient: Oversized frame rejection (>16MB)
+      ---
+      duration_ms: 1.916833
+      type: 'test'
+      ...
+    # Subtest: UnixSocketHostClient: EOF handling on premature socket close
+    ok 18 - UnixSocketHostClient: EOF handling on premature socket close
+      ---
+      duration_ms: 0.8975
+      type: 'test'
+      ...
+    # Subtest: UnixSocketHostClient: Request timeout handling
+    ok 19 - UnixSocketHostClient: Request timeout handling
+      ---
+      duration_ms: 102.432875
+      type: 'test'
+      ...
+    # Subtest: UnixSocketHostClient: Cancellation phase distinction (pre-dispatch vs post-dispatch)
+    ok 20 - UnixSocketHostClient: Cancellation phase distinction (pre-dispatch vs post-dispatch)
+      ---
+      duration_ms: 50.62525
+      type: 'test'
+      ...
+    # Subtest: UnixSocketHostClient: Received request then close maps post-dispatch mutation to ACTION_OUTCOME_UNKNOWN
+    ok 21 - UnixSocketHostClient: Received request then close maps post-dispatch mutation to ACTION_OUTCOME_UNKNOWN
+      ---
+      duration_ms: 1.093166
+      type: 'test'
+      ...
+    # Subtest: UnixSocketHostClient: ax_action timeout maps to OUTCOME_UNKNOWN and requests fresh ax_tree
+    ok 22 - UnixSocketHostClient: ax_action timeout maps to OUTCOME_UNKNOWN and requests fresh ax_tree
+      ---
+      duration_ms: 101.921292
+      type: 'test'
+      ...
+    # Subtest: UnixSocketHostClient: ax_action cancellation maps to OUTCOME_UNKNOWN and requests fresh ax_tree
+    ok 23 - UnixSocketHostClient: ax_action cancellation maps to OUTCOME_UNKNOWN and requests fresh ax_tree
+      ---
+      duration_ms: 52.007584
+      type: 'test'
+      ...
+    # Subtest: UnixSocketHostClient: ax_action received request then close maps post-dispatch mutation to OUTCOME_UNKNOWN
+    ok 24 - UnixSocketHostClient: ax_action received request then close maps post-dispatch mutation to OUTCOME_UNKNOWN
+      ---
+      duration_ms: 1.936916
+      type: 'test'
+      ...
+    # Subtest: Section 4: Canonical JPEG mutation table parity and byte identity
+    ok 25 - Section 4: Canonical JPEG mutation table parity and byte identity
+      ---
+      duration_ms: 1.463459
+      type: 'test'
+      ...
+    # Subtest: Section 5: Dimension rejection bounds (0, negative, overflow, exact 64M, exact 64M+1)
+    ok 26 - Section 5: Dimension rejection bounds (0, negative, overflow, exact 64M, exact 64M+1)
+      ---
+      duration_ms: 0.135625
+      type: 'test'
+      ...
+    # Subtest: Deterministic Configured Launcher: Stdio transport launcher under minimal ambient PATH and missing toolchain negative discriminator
+    ok 27 - Deterministic Configured Launcher: Stdio transport launcher under minimal ambient PATH and missing toolchain negative discriminator
+      ---
+      duration_ms: 1723.604959
+      type: 'test'
+      ...
+    # Subtest: MCP launcher mise fallback remains process-local and ignores worktree config
+    ok 28 - MCP launcher mise fallback remains process-local and ignores worktree config
+      ---
+      duration_ms: 496.515042
+      type: 'test'
+      ...
+    # Subtest: M9-ACCESSIBILITY-TRUTH: Trusted CGEvent input works when AX tree inspection is unavailable (accessibility_trusted=true, ax_tree_inspection_available=false)
+    ok 29 - M9-ACCESSIBILITY-TRUTH: Trusted CGEvent input works when AX tree inspection is unavailable (accessibility_trusted=true, ax_tree_inspection_available=false)
+      ---
+      duration_ms: 1.196541
+      type: 'test'
+      ...
+    # Subtest: M9-PID-NORMALIZATION: Tests status response with optional pid present and legacy no-pid fallback
+    ok 30 - M9-PID-NORMALIZATION: Tests status response with optional pid present and legacy no-pid fallback
+      ---
+      duration_ms: 1.815
+      type: 'test'
+      ...
+    # Subtest: M10-TOOL-SURFACE: Tests computer_use_ax_tree, computer_use_move, computer_use_scroll, computer_use_drag validation and forwarding
+    ok 31 - M10-TOOL-SURFACE: Tests computer_use_ax_tree, computer_use_move, computer_use_scroll, computer_use_drag validation and forwarding
+      ---
+      duration_ms: 3.266917
+      type: 'test'
+      ...
+    # Subtest: Press-only host status and semantic press remain compatible while set_value fails closed
+    ok 32 - Press-only host status and semantic press remain compatible while set_value fails closed
+      ---
+      duration_ms: 1.448583
+      type: 'test'
+      ...
+    # Subtest: Operator-safe set_value enforces UTF-8 bounds, typed single-dispatch failures, redacted receipts, and zero HID
+    ok 33 - Operator-safe set_value enforces UTF-8 bounds, typed single-dispatch failures, redacted receipts, and zero HID
+      ---
+      duration_ms: 2.502791
+      type: 'test'
+      ...
+    # Subtest: Live proof controller retries read-only inspection but never retries an outcome-unknown AX action
+    ok 34 - Live proof controller retries read-only inspection but never retries an outcome-unknown AX action
+      ---
+      duration_ms: 3.724542
+      type: 'test'
+      ...
+    1..34
+ok 9 - Computer Use MCP Server & HostClient Test Suite (Milestone D2)
+  ---
+  duration_ms: 2720.068834
+  type: 'suite'
+  ...
+# Subtest: Defect 4 & 5 Hardened Validation Tests
+    # Subtest: AXTreeDataSchema positive and negative validation
+    ok 1 - AXTreeDataSchema positive and negative validation
+      ---
+      duration_ms: 3.132875
+      type: 'test'
+      ...
+    # Subtest: DragInputSchema rejects right/middle mouse buttons
+    ok 2 - DragInputSchema rejects right/middle mouse buttons
+      ---
+      duration_ms: 0.085
+      type: 'test'
+      ...
+    1..2
+ok 10 - Defect 4 & 5 Hardened Validation Tests
+  ---
+  duration_ms: 3.274125
+  type: 'suite'
+  ...
+# Subtest: Native Authority Selection Classification Table
+    # Subtest: 1. Exact list success -> selects XCTest authority with status 0
+    ok 1 - 1. Exact list success -> selects XCTest authority with status 0
+      ---
+      duration_ms: 0.534
+      type: 'test'
+      ...
+    # Subtest: 2. Exit-zero empty discovery -> fails closed with status 1
+    ok 2 - 2. Exit-zero empty discovery -> fails closed with status 1
+      ---
+      duration_ms: 0.1115
+      type: 'test'
+      ...
+    # Subtest: 3. Missing names in discovered list -> fails closed with status 1
+    ok 3 - 3. Missing names in discovered list -> fails closed with status 1
+      ---
+      duration_ms: 0.104
+      type: 'test'
+      ...
+    # Subtest: 4. Extra names in discovered list -> fails closed with status 1
+    ok 4 - 4. Extra names in discovered list -> fails closed with status 1
+      ---
+      duration_ms: 0.153083
+      type: 'test'
+      ...
+    # Subtest: 5. Duplicate names in discovered list -> fails closed with status 1
+    ok 5 - 5. Duplicate names in discovered list -> fails closed with status 1
+      ---
+      duration_ms: 0.085708
+      type: 'test'
+      ...
+    # Subtest: 6. Compiler failure -> fails closed with status 1
+    ok 6 - 6. Compiler failure -> fails closed with status 1
+      ---
+      duration_ms: 0.070834
+      type: 'test'
+      ...
+    # Subtest: 7. Unrecognized nonzero exit -> fails closed with status 1
+    ok 7 - 7. Unrecognized nonzero exit -> fails closed with status 1
+      ---
+      duration_ms: 0.15475
+      type: 'test'
+      ...
+    # Subtest: 8. Unsupported-XCTest fallback route -> selects fallback authority with status 0
+    ok 8 - 8. Unsupported-XCTest fallback route -> selects fallback authority with status 0
+      ---
+      duration_ms: 0.269083
+      type: 'test'
+      ...
+    1..8
+ok 11 - Native Authority Selection Classification Table
+  ---
+  duration_ms: 2.266375
+  type: 'suite'
+  ...
+# Subtest: Hermetic Child-Process CLI Authority Selection (`bin/agy-computer-use test-native`)
+    # Subtest: Executes bin/agy-computer-use test-native with stubbed swift binary in PATH
+    ok 1 - Executes bin/agy-computer-use test-native with stubbed swift binary in PATH
+      ---
+      duration_ms: 274.779833
+      type: 'test'
+      ...
+    1..1
+ok 12 - Hermetic Child-Process CLI Authority Selection (`bin/agy-computer-use test-native`)
+  ---
+  duration_ms: 275.041375
+  type: 'suite'
+  ...
+1..12
+# tests 66
+# suites 5
+# pass 66
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 2865.385708

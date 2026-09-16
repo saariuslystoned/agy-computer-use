@@ -1,0 +1,13 @@
+{
+  "from": "2026-09-16T12:38:33.350Z",
+  "through": "2026-09-16T12:38:58.511Z",
+  "samples": 240,
+  "distinct_pointer_positions": 48,
+  "target_became_foreground": false,
+  "distinct_foreground_apps": 1,
+  "focused_element_sample_statuses": [
+    -25204
+  ],
+  "mouse_move_counter_delta": 388,
+  "key_down_counter_delta": 0
+}

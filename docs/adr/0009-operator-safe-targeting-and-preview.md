@@ -62,11 +62,28 @@ Support explicitly classified backends:
 There is no silent fallback between these backends. A safe request that lacks a
 safe route returns a typed failure without mutation.
 
-The host snapshots the macOS combined-session mouse, keyboard, flags, and
-scroll event counters. Any observed counter change after inspection invalidates
-pending references. A change observed during an action makes the result
-indeterminate and requires fresh inspection; the host does not automatically
-retry.
+Issue #12 updates the intervention contract for qualified background AX actions
+([operator requirement](https://github.com/saariuslystoned/agy-computer-use/issues/12#issuecomment-5697178878)).
+The host attempts a passive per-process event tap plus an AX application-activation
+observer before inspection. A complete keyboard/button/drag/scroll mask, trusted
+accessibility, non-secure input, a responsive monitor loop, and an initially
+background target are required. The tree reports `intervention_scope: "app"`.
+Unrelated input and pure pointer movement preserve authority. Input delivered to
+any window in the target app or target activation invalidates pending authority;
+switching away does not restore it. This is conservative app scope, not independent
+window/session leases. Exact element/window validation remains mandatory.
+
+An unavailable monitor at initial qualification uses the original combined-session
+counter guard and reports `intervention_scope: "global"`. Once an app-scoped lease
+exists, disabled/stalled monitoring, permission loss, secure input, or target
+termination invalidates it permanently; there is no mid-lease fallback. Monitoring
+stores only an epoch and health, never keys, text, or event payloads. It posts no
+input, changes no focus, and requests no permissions. Compound reinspection shares
+the original monitor, avoiding a gap between dispatch and returned authority.
+
+Any intervention observed during a setter makes the outcome unknown and requires
+fresh inspection; no mutation is automatically retried. Global HID remains an
+explicitly exclusive path. See [background intervention](../background-intervention.md).
 
 Phase 1 added exact-element AX `press`. Phase 2 adds one bounded `set_value`
 class for enabled, non-secure `AXTextField` and `AXTextArea` elements whose
