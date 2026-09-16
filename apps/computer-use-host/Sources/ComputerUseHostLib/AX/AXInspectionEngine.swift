@@ -669,7 +669,7 @@ public final class DefaultAXInspector: AXWindowInspectionEngine, AXScopedActionE
         if let windowRef { ref = windowRef }
         else {
             let discovered = try windowBindings.discover(appID: appID, sessionID: sessionID, topology: topology)
-            guard discovered.windows.count == 1, let only = discovered.windows.first else {
+            guard !discovered.truncated, discovered.windows.count == 1, let only = discovered.windows.first else {
                 throw ComputerUseError.targetUnreachable(reason: "Explicit app has zero or multiple windows; discover and pass one exact window_ref")
             }
             ref = only.windowRef

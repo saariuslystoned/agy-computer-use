@@ -168,10 +168,16 @@ package struct AXWindowBindingStore {
         }
         let appDTO = AXTargetAppDTO(pid: Int(app.processIdentifier), bundleId: app.bundleIdentifier, name: app.localizedName)
         var created: [AXWindowBinding] = []
+        var omitted = false
         let deadline = ContinuousClock().now + .seconds(5)
         for window in windows {
             guard ContinuousClock().now < deadline else { throw ComputerUseError.timeout(operation: "window discovery", seconds: 5) }
             let bounds = try Self.bounds(window)
+            // An auxiliary window can remain beyond every connected display
+            // after a topology change. Expose selectable siblings explicitly,
+            // but mark discovery incomplete so implicit selection cannot guess.
+            do { _ = try WindowGeometry.display(for: bounds, topology: topology) }
+            catch { omitted = true; continue }
             let title = Self.title(window)
             let matches = candidates.filter { $0.bounds == bounds && ($0.title == nil || $0.title == title) }
             let sameAXBounds = try windows.filter { try Self.bounds($0) == bounds && Self.title($0) == title }
@@ -186,7 +192,7 @@ package struct AXWindowBindingStore {
         let descriptors = try created.map { try $0.descriptor(topology: topology) }
         bindings = retainedBindings
         for binding in created { bindings[binding.ref] = binding }
-        return AXTargetDiscovery(apps: [appDTO], windows: descriptors, truncated: false, topologyVersion: topology.version)
+        return AXTargetDiscovery(apps: [appDTO], windows: descriptors, truncated: omitted, topologyVersion: topology.version)
     }
     static func windows(pid: Int32) throws -> [AXUIElement] {
         let app = AXUIElementCreateApplication(pid)

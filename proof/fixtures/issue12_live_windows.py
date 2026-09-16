@@ -110,6 +110,13 @@ try:
         assert math.isclose(fresh['display_normalized_offset_x'],(x-display['origin_x'])*1000/display['width_points'])
         assert math.isclose(fresh['display_normalized_offset_y'],(y-display['origin_y'])*1000/display['height_points'])
         record('display_'+label,**save_image(label,fresh))
+    command('move',x=250,y=1117+2200-202);time.sleep(.3)
+    off=ok(call('targets',app_id=windows,session_id='off-display'))
+    assert off['truncated'] and len(off['windows'])==1 and off['windows'][0]['title'].endswith(' B')
+    reject('incomplete_inventory_requires_explicit_selection',call('window_observe',app_id=windows,session_id='off-display-implicit'),['TARGET_UNREACHABLE'])
+    observe('off-display',off['windows'][0]['window_ref'])
+    record('off_display_auxiliary_preserves_explicit_sibling')
+    command('move',x=250,y=1117+850-202);time.sleep(.3)
     b=observe('window-two',refs2['B']);ok(call('ax_session_close',session_id='window-one'))
     reject('closed_session_reference',call('window_observe',app_id=windows,window_ref=refs['A'],session_id='window-one'),['STALE_OPERATION'])
     verified(action(b['state'],'window-two','issue12-input-B','survived-close'),'issue12-input-B','survived-close')
@@ -142,6 +149,6 @@ try:
     record('rejected_writes_never_applied')
 finally:
     (out/'assertions.json').write_text(json.dumps(results,indent=2)+'\n')
-    for session in ['window-one','window-two','foreign','ambiguous','app-one','app-two','replace','dialog','sheet','sheet-read','expiry']:
+    for session in ['window-one','window-two','foreign','ambiguous','app-one','app-two','replace','dialog','sheet','sheet-read','off-display','off-display-implicit','expiry']:
         call('ax_session_close',session_id=session)
 print(json.dumps({'passed':len(results),'failed':0}),flush=True)

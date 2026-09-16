@@ -4,7 +4,10 @@
 `app_id` to obtain exact opaque `window_ref` values. `computer_use_window_observe`
 requires an explicit app and, for multiple windows, one of those references. It
 returns the selected window's image and compact AX tree together. It never selects
-whichever application happens to be frontmost.
+whichever application happens to be frontmost. Windows whose centers cannot be
+assigned to one active display are omitted with `truncated: true`; usable siblings
+remain explicitly selectable. An incomplete discovery never permits implicit
+single-window selection.
 
 Each MCP connection creates a random logical session ID and sends it privately to
 the native host. Tool arguments cannot impersonate another connection's session.
