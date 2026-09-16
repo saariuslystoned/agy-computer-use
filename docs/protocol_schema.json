@@ -642,6 +642,7 @@
                 "name": { "type": "string" }
               }
             },
+            "intervention_scope": { "enum": ["app", "global"] },
             "ax_snapshot_id": { "type": "string", "minLength": 1, "maxLength": 256 },
             "app_instance_ref": { "type": "string", "minLength": 1, "maxLength": 256 },
             "expires_at_ms": { "type": "integer", "minimum": 1 },

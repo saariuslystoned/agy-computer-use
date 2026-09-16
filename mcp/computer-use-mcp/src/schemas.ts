@@ -236,6 +236,7 @@ export function inspectTreeStructure(node: any, currentDepth = 1): { count: numb
 export const AXTreeDataSchema = z.object({
   target_app: AXTargetAppSchema,
   ax_snapshot_id: z.string().min(1).max(256),
+  intervention_scope: z.enum(["app", "global"]).optional(),
   app_instance_ref: z.string().min(1).max(256),
   expires_at_ms: z.number().int().positive().finite(),
   topology_version: TopologyVersionSchema,

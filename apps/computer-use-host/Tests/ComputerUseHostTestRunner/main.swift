@@ -3866,6 +3866,7 @@ public struct ComputerUseHostTestRunner {
         try await runWithWatchdog(name: "test40_ActionRoutingFreshnessLeaseAndInputSynthesis") { try await run40_ActionRoutingFreshnessLeaseAndInputSynthesis() }
         try await runWithWatchdog(name: "test41_AXTreeInspectionTargetingRedactionCapsAndTruncation") { try await run41_AXTreeInspectionTargetingRedactionCapsAndTruncation() }
         try await runWithWatchdog(name: "test42_MoveScrollDragPointerValidationStaleCaptureSingleUseLeaseAndUnconditionalRelease") { try await run42_MoveScrollDragPointerValidationStaleCaptureSingleUseLeaseAndUnconditionalRelease() }
+        try await runWithWatchdog(name: "test44_TargetScopedIntervention") { try await run44_TargetScopedIntervention() }
         try await runWithWatchdog(name: "test43_CompoundAXActionObservation") { try await run43_CompoundAXActionObservation() }
         fputs("[ComputerUseHostTestRunner] Executed \(completedTests.value) native test cases successfully. ALL PASSED.\n", stderr)
     }
@@ -7780,5 +7781,82 @@ private final class CompoundTopologyFixtureProvider: DisplayTopologyProviding, @
         if shouldThrow { throw ComputerUseError.targetUnreachable(reason: "Topology unavailable") }
         return DisplayTopology(version: "top-sha256-" + String(repeating: "0", count: 64),
             primaryDisplayId: original.primaryDisplayId, displays: original.displays)
+    }
+}
+
+
+extension ComputerUseHostTestRunner {
+    public static func run44_TargetScopedIntervention() async throws {
+        let state = AXTargetInputState()
+        let baseline = state.epoch()
+        state.receive(.mouseMoved)
+        state.updateHealth(tapEnabled: true, trusted: true, secureInput: false,
+                           targetRunning: true, targetActive: false)
+        assertTrue(!DefaultAXInspector.operatorInputChanged(from: baseline, to: state.epoch()),
+                   "Movement and a healthy background target must preserve authority")
+
+        for event in [CGEventType.keyDown, .keyUp, .flagsChanged, .leftMouseDown,
+                      .rightMouseDown, .otherMouseDown, .leftMouseDragged, .scrollWheel] {
+            let monitor = AXTargetInputState()
+            let before = monitor.epoch()
+            monitor.receive(event)
+            assertTrue(DefaultAXInspector.operatorInputChanged(from: before, to: monitor.epoch()),
+                       "Every delivered target input must invalidate authority")
+        }
+        state.updateHealth(tapEnabled: true, trusted: true, secureInput: false,
+                           targetRunning: true, targetActive: true)
+        state.updateHealth(tapEnabled: true, trusted: true, secureInput: false,
+                           targetRunning: true, targetActive: false)
+        assertTrue(DefaultAXInspector.operatorInputChanged(from: baseline, to: state.epoch()),
+                   "Activating target and switching away cannot resurrect authority")
+
+        for fault in 0..<6 {
+            let monitor = AXTargetInputState()
+            let before = monitor.epoch()
+            if fault < 4 {
+                monitor.updateHealth(tapEnabled: fault != 0, trusted: fault != 1,
+                    secureInput: fault == 2, targetRunning: fault != 3, targetActive: false)
+            } else {
+                monitor.receive(fault == 4 ? .tapDisabledByTimeout : .tapDisabledByUserInput)
+            }
+            monitor.updateHealth(tapEnabled: true, trusted: true, secureInput: false,
+                                 targetRunning: true, targetActive: false)
+            let invalid = monitor.epoch()
+            assertTrue(DefaultAXInspector.operatorInputChanged(from: before, to: invalid))
+            assertTrue(DefaultAXInspector.operatorInputChanged(from: invalid, to: invalid),
+                       "Missing coverage cannot pass by comparing two invalid samples")
+            var invoked = false
+            do {
+                try DefaultAXInspector.validateRetainedAuthority(AXRetainedAuthorityValidation(
+                    windowIdentityMatches: true, ancestryMatches: true,
+                    elementFingerprintMatches: true, windowFingerprintMatches: true,
+                    operatorInputChanged: DefaultAXInspector.operatorInputChanged(from: before, to: invalid)))
+                invoked = true
+            } catch let error as ComputerUseError {
+                guard case .userIntervened = error else { throw error }
+            }
+            assertTrue(!invoked, "Monitor loss must stop before mutation")
+        }
+
+        struct Provider: OperatorInputEpochProviding {
+            let state: AXTargetInputState
+            func currentEpoch() -> OperatorInputEpoch { state.epoch() }
+        }
+        let during = AXTargetInputState()
+        let observed = during.epoch()
+        var mutations = 0
+        do {
+            _ = try DefaultAXInspector.performAXSetValueCheckingOperatorInput(
+                value: "synthetic", observedEpoch: observed, epochProvider: Provider(state: during)
+            ) { _ in
+                mutations += 1
+                during.receive(.keyDown)
+                return .success
+            }
+            assertTrue(false, "Takeover during dispatch must not return success")
+        } catch let error as ComputerUseError {
+            guard case .axOutcomeUnknown = error else { throw error }
+        }
+        assertEqual(mutations, 1, "An uncertain mutation must never repeat")
     }
 }

@@ -12,9 +12,10 @@ This skill teaches Google Antigravity agents and Gemini models how to interact w
 1. Route browser DOM work through Antigravity's available browser/DevTools integration. Use this host for native macOS apps; browser DOM is outside this repository's scope.
 2. Call `computer_use_status`, then `computer_use_ax_tree` with an explicit app selector. Use only advertised element actions and fresh opaque references.
 3. For one semantic mutation and its next state, call `computer_use_ax_action` with `observe: {"condition":"snapshot","timeout_ms":2000}`. Use `semantic_change` when waiting for a visible semantic change is useful. See [compound observations](references/action-observation.md).
-4. Check dispatch and observation separately. Verify the intended result in `observation.state` before using its fresh references. Never automatically repeat a mutation after an action error, transport uncertainty, or observation failure.
+4. Check `intervention_scope` in the tree: `app` allows unrelated input while the target remains in the background; `global` or an absent field retains the conservative session-wide guard. Target input/activation cancels app-scoped authority, even if the operator switches away. No background global-HID fallback is allowed.
+5. Check dispatch and observation separately. Verify the intended result in `observation.state` before using its fresh references. Never automatically repeat a mutation after an action error, transport uncertainty, or observation failure.
 
-Gemini 3.8 qualification is pending matched live trials. These are custom MCP tools; selecting a Gemini model does not enable Google's separate native computer-use API. No model-specific speedup is claimed.
+Gemini 3.8 qualification is bounded to recorded live trials. These are custom MCP tools; selecting a Gemini model does not enable Google's separate native computer-use API. No model-specific speedup is claimed.
 
 > [!NOTE]
 > **Operator-safe AX**: `computer_use_ax_tree` plus `computer_use_ax_action` provides exact-element semantic `press` and bounded `set_value` paths that never fall back to global HID. The older coordinate and keyboard tools remain available only for explicitly exclusive GUI sessions.
@@ -43,7 +44,7 @@ Gemini 3.8 qualification is pending matched live trials. These are custom MCP to
 - Prefer this path on any shared operator workstation.
 - Pass the exact `ax_snapshot_id`, `app_instance_ref`, `element_ref`, `topology_version`, one advertised `action`, and a nonblank `intent`.
 - For `press`, omit `value`. For `set_value`, pass `value` explicitly; empty is allowed for clearing, and the payload must be well-formed UTF-8 no larger than 4096 bytes. Do not duplicate the submitted value in `intent` or expect it in any receipt or error.
-- The lease is short-lived and consumed once. Stale, replayed (`AX_ACTION_REPLAYED`), secure (`SECURE_AX_VALUE_UNSUPPORTED`), disabled (`AX_ELEMENT_DISABLED`), non-settable (`AX_VALUE_NOT_SETTABLE`), mismatched, relabeled/reparented, moved-to-another-window, terminated-process, unsupported, or operator/system-input-intervened targets fail closed.
+- The lease is short-lived and consumed once. Stale, replayed (`AX_ACTION_REPLAYED`), secure (`SECURE_AX_VALUE_UNSUPPORTED`), disabled (`AX_ELEMENT_DISABLED`), non-settable (`AX_VALUE_NOT_SETTABLE`), mismatched, relabeled/reparented, moved-to-another-window, terminated-process, unsupported, or intervened targets fail closed according to the reported app/global intervention scope.
 - Secure, disabled, non-settable, and unsupported codes are preflight results. Once the AX setter is invoked, every non-success AX result is `OUTCOME_UNKNOWN`; never reinterpret a post-dispatch error as proof that no mutation occurred.
 - `status: "dispatched"` is not behavior proof. With `observe`, verify the intended result in the fresh `observation.state`; without it, call `computer_use_ax_tree` again for the same explicit app. An observed change alone does not prove the intended effect.
 - A `USER_INTERVENED` error from read-only `computer_use_ax_tree` means no action lease was issued and that inspection may be retried. Once `computer_use_ax_action` is called, any `USER_INTERVENED`, `OUTCOME_UNKNOWN`, transport uncertainty, or other error may follow an already-dispatched AX mutation: never automatically repeat the action or reuse the old value/ref.
