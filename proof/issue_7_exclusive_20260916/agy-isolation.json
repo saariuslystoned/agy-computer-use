@@ -1,0 +1,14 @@
+{
+  "elapsed_s" : 45.003211975097656,
+  "event_tap_coverage" : true,
+  "focus_changes" : 0,
+  "focus_read_errors" : 0,
+  "hid_key_down_delta" : 0,
+  "hid_mouse_move_delta" : 0,
+  "host_event_posts" : 0,
+  "host_pid" : 8627,
+  "pointer_position_changes" : 0,
+  "samples" : 818,
+  "sentinel_front_samples" : 0,
+  "target_front_samples" : 0
+}

@@ -110,6 +110,10 @@ export const StatusDataSchema = z.object({
   ).max(2),
   global_hid_may_affect_pointer_or_focus: z.literal(true),
   input_mutation_state: z.enum(["enabled", "disabled"]),
+  input_isolation_mode: z.enum(["operator_safe_ax", "exclusive_global_hid"]),
+  host_instance_id: z.string().min(1).max(128),
+  controller_id: z.string().min(1).max(128),
+  exclusive_admission_required: z.literal(true),
   topology_version: TopologyVersionSchema,
   primary_display_id: z.number().int().positive().finite(),
   display_count: z.number().int().positive().finite(),
@@ -132,6 +136,9 @@ export const StatusDataSchema = z.object({
 ).refine(
   (data) => (data.input_mutation_state === "enabled") === data.supported_action_strategies.includes("exclusive_global_hid"),
   { message: "exclusive_global_hid strategy must match input_mutation_state" }
+).refine(
+  (data) => (data.input_isolation_mode === "exclusive_global_hid") === (data.input_mutation_state === "enabled"),
+  { message: "Isolation mode must match native admission" }
 ).refine(
   (data) => new Set(data.supported_action_strategies).size === data.supported_action_strategies.length,
   { message: "supported_action_strategies must not contain duplicates" }
@@ -354,6 +361,7 @@ export const AXActionResultDataSchema = z.object({
 ), { message: "AX observation must carry fresh authority and matching topology" });
 
 export const ClickInputSchema = z.object({
+  exclusive_lease_id: z.string().min(1).max(128).optional(),
   capture_id: z.string().min(1),
   topology_version: TopologyVersionSchema,
   x: z.number().int().min(0).max(999),
@@ -364,6 +372,7 @@ export const ClickInputSchema = z.object({
 }).strict();
 
 export const MoveInputSchema = z.object({
+  exclusive_lease_id: z.string().min(1).max(128).optional(),
   capture_id: z.string().min(1),
   topology_version: TopologyVersionSchema,
   x: z.number().int().min(0).max(999),
@@ -372,6 +381,7 @@ export const MoveInputSchema = z.object({
 }).strict();
 
 export const ScrollInputSchema = z.object({
+  exclusive_lease_id: z.string().min(1).max(128).optional(),
   capture_id: z.string().min(1),
   topology_version: TopologyVersionSchema,
   x: z.number().int().min(0).max(999),
@@ -385,6 +395,7 @@ export const ScrollInputSchema = z.object({
 );
 
 export const DragInputSchema = z.object({
+  exclusive_lease_id: z.string().min(1).max(128).optional(),
   capture_id: z.string().min(1),
   topology_version: TopologyVersionSchema,
   start_x: z.number().int().min(0).max(999),
@@ -396,6 +407,7 @@ export const DragInputSchema = z.object({
 }).strict();
 
 export const TypeInputSchema = z.object({
+  exclusive_lease_id: z.string().min(1).max(128).optional(),
   capture_id: z.string().min(1),
   topology_version: TopologyVersionSchema,
   text: z.string().min(1).max(1000),
@@ -404,6 +416,7 @@ export const TypeInputSchema = z.object({
 }).strict();
 
 export const ShortcutInputSchema = z.object({
+  exclusive_lease_id: z.string().min(1).max(128).optional(),
   capture_id: z.string().min(1),
   topology_version: TopologyVersionSchema,
   keys: z.array(z.string().trim().min(1)).min(1).max(5),
@@ -411,6 +424,8 @@ export const ShortcutInputSchema = z.object({
 }).strict();
 
 export const ActionResultDataSchema = z.object({
+  strategy: z.literal("exclusive_global_hid"),
+  global_hid_posts: z.number().int().positive().max(1000),
   action_id: z.string().min(1),
   status: z.enum(["dispatched", "indeterminate"]),
   capture_id: z.string().min(1),
@@ -464,3 +479,14 @@ export const WindowObserveDataSchema = z.object({
     eq(d.display_normalized_offset_y, (w.bounds.y - w.display.origin_y) * 1000 / w.display.height_points);
   if (!bindings || !times || !transforms) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Window image/AX identity, timing or geometry mismatch" });
 });
+
+export const ExclusiveControlInputSchema = z.discriminatedUnion("operation", [
+  z.object({ operation: z.literal("acquire"), app_id: z.string().trim().min(1).max(256),
+    duration_ms: z.number().int().min(1000).max(60000) }).strict(),
+  z.object({ operation: z.literal("release") }).strict()
+]);
+export const ExclusiveControlDataSchema = z.union([
+  z.object({ lease_id: z.string().min(1).max(128), expires_at_ms: z.number().int().positive(),
+    strategy: z.literal("exclusive_global_hid"), may_affect_pointer_or_focus: z.literal(true) }).strict(),
+  z.object({ released: z.literal(true) }).strict()
+]);

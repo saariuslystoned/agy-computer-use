@@ -1,0 +1,284 @@
+[
+  {
+    "conclusion": "success",
+    "databaseId": 35109894780,
+    "event": "push",
+    "headSha": "526fc8a8ec8188a769b740c68b3c6c13bd9d1da1",
+    "jobs": [
+      {
+        "completedAt": "2026-09-16T14:42:34Z",
+        "conclusion": "success",
+        "databaseId": 104840556177,
+        "name": "macos-build-and-test",
+        "startedAt": "2026-09-16T14:38:30Z",
+        "status": "completed",
+        "steps": [
+          {
+            "completedAt": "2026-09-16T14:38:32Z",
+            "conclusion": "success",
+            "name": "Set up job",
+            "number": 1,
+            "startedAt": "2026-09-16T14:38:29Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-16T14:38:35Z",
+            "conclusion": "success",
+            "name": "Checkout Code",
+            "number": 2,
+            "startedAt": "2026-09-16T14:38:32Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-16T14:38:37Z",
+            "conclusion": "success",
+            "name": "Select Xcode & Verify Swift Toolchain",
+            "number": 3,
+            "startedAt": "2026-09-16T14:38:35Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-16T14:38:44Z",
+            "conclusion": "success",
+            "name": "Set up Node.js",
+            "number": 4,
+            "startedAt": "2026-09-16T14:38:38Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-16T14:38:46Z",
+            "conclusion": "success",
+            "name": "Install pnpm",
+            "number": 5,
+            "startedAt": "2026-09-16T14:38:44Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-16T14:38:47Z",
+            "conclusion": "success",
+            "name": "Run Source & Formatting Safety Guards",
+            "number": 6,
+            "startedAt": "2026-09-16T14:38:46Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-16T14:40:00Z",
+            "conclusion": "success",
+            "name": "Build & Run Native Swift Test Authority",
+            "number": 7,
+            "startedAt": "2026-09-16T14:38:47Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-16T14:41:20Z",
+            "conclusion": "success",
+            "name": "Stage Background App Bundle & Verify Principal Classification",
+            "number": 8,
+            "startedAt": "2026-09-16T14:40:00Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-16T14:41:56Z",
+            "conclusion": "success",
+            "name": "Build Release Executable & Guard Binary Symbols",
+            "number": 9,
+            "startedAt": "2026-09-16T14:41:20Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-16T14:42:11Z",
+            "conclusion": "success",
+            "name": "Build & Test TypeScript MCP Server",
+            "number": 10,
+            "startedAt": "2026-09-16T14:41:56Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-16T14:42:29Z",
+            "conclusion": "success",
+            "name": "Validate Offline Production MCP Readiness",
+            "number": 11,
+            "startedAt": "2026-09-16T14:42:11Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-16T14:42:30Z",
+            "conclusion": "success",
+            "name": "Post Install pnpm",
+            "number": 20,
+            "startedAt": "2026-09-16T14:42:29Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-16T14:42:30Z",
+            "conclusion": "success",
+            "name": "Post Set up Node.js",
+            "number": 21,
+            "startedAt": "2026-09-16T14:42:30Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-16T14:42:31Z",
+            "conclusion": "success",
+            "name": "Post Checkout Code",
+            "number": 22,
+            "startedAt": "2026-09-16T14:42:30Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-16T14:42:32Z",
+            "conclusion": "success",
+            "name": "Complete job",
+            "number": 23,
+            "startedAt": "2026-09-16T14:42:31Z",
+            "status": "completed"
+          }
+        ],
+        "url": "https://github.com/saariuslystoned/agy-computer-use/actions/runs/35109894780/job/104840556177"
+      }
+    ],
+    "status": "completed",
+    "url": "https://github.com/saariuslystoned/agy-computer-use/actions/runs/35109894780"
+  },
+  {
+    "conclusion": "success",
+    "databaseId": 35109923523,
+    "event": "pull_request",
+    "headSha": "526fc8a8ec8188a769b740c68b3c6c13bd9d1da1",
+    "jobs": [
+      {
+        "completedAt": "2026-09-16T14:42:32Z",
+        "conclusion": "success",
+        "databaseId": 104840657569,
+        "name": "macos-build-and-test",
+        "startedAt": "2026-09-16T14:38:46Z",
+        "status": "completed",
+        "steps": [
+          {
+            "completedAt": "2026-09-16T14:38:48Z",
+            "conclusion": "success",
+            "name": "Set up job",
+            "number": 1,
+            "startedAt": "2026-09-16T14:38:46Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-16T14:38:50Z",
+            "conclusion": "success",
+            "name": "Checkout Code",
+            "number": 2,
+            "startedAt": "2026-09-16T14:38:48Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-16T14:38:53Z",
+            "conclusion": "success",
+            "name": "Select Xcode & Verify Swift Toolchain",
+            "number": 3,
+            "startedAt": "2026-09-16T14:38:50Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-16T14:38:59Z",
+            "conclusion": "success",
+            "name": "Set up Node.js",
+            "number": 4,
+            "startedAt": "2026-09-16T14:38:53Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-16T14:39:00Z",
+            "conclusion": "success",
+            "name": "Install pnpm",
+            "number": 5,
+            "startedAt": "2026-09-16T14:38:59Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-16T14:39:01Z",
+            "conclusion": "success",
+            "name": "Run Source & Formatting Safety Guards",
+            "number": 6,
+            "startedAt": "2026-09-16T14:39:00Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-16T14:40:11Z",
+            "conclusion": "success",
+            "name": "Build & Run Native Swift Test Authority",
+            "number": 7,
+            "startedAt": "2026-09-16T14:39:01Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-16T14:41:22Z",
+            "conclusion": "success",
+            "name": "Stage Background App Bundle & Verify Principal Classification",
+            "number": 8,
+            "startedAt": "2026-09-16T14:40:11Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-16T14:41:56Z",
+            "conclusion": "success",
+            "name": "Build Release Executable & Guard Binary Symbols",
+            "number": 9,
+            "startedAt": "2026-09-16T14:41:22Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-16T14:42:08Z",
+            "conclusion": "success",
+            "name": "Build & Test TypeScript MCP Server",
+            "number": 10,
+            "startedAt": "2026-09-16T14:41:56Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-16T14:42:28Z",
+            "conclusion": "success",
+            "name": "Validate Offline Production MCP Readiness",
+            "number": 11,
+            "startedAt": "2026-09-16T14:42:08Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-16T14:42:28Z",
+            "conclusion": "success",
+            "name": "Post Install pnpm",
+            "number": 20,
+            "startedAt": "2026-09-16T14:42:28Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-16T14:42:28Z",
+            "conclusion": "success",
+            "name": "Post Set up Node.js",
+            "number": 21,
+            "startedAt": "2026-09-16T14:42:28Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-16T14:42:29Z",
+            "conclusion": "success",
+            "name": "Post Checkout Code",
+            "number": 22,
+            "startedAt": "2026-09-16T14:42:28Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-16T14:42:30Z",
+            "conclusion": "success",
+            "name": "Complete job",
+            "number": 23,
+            "startedAt": "2026-09-16T14:42:29Z",
+            "status": "completed"
+          }
+        ],
+        "url": "https://github.com/saariuslystoned/agy-computer-use/actions/runs/35109923523/job/104840657569"
+      }
+    ],
+    "status": "completed",
+    "url": "https://github.com/saariuslystoned/agy-computer-use/actions/runs/35109923523"
+  }
+]

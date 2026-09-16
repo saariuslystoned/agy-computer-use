@@ -31,3 +31,7 @@ Security issues should be reported confidentially. Do NOT open public GitHub iss
 
 4. **Human Gate Boundary**:
    - Destructive file operations, external communications, financial transactions, or system configuration mutations must be gated by explicit human approval (`CODEX_TEAMWORK_ACTION_REQUIRED`).
+
+## Exclusive global input
+
+Global input is natively denied by default, independently of AX trust. See [exclusive input](docs/exclusive-input.md) for the root-controlled environment admission boundary, controller/host binding, expiry, per-event focus and takeover guards, and release-only cleanup exception. Administrator provisioning belongs only on an explicitly owned isolated GUI environment; no model-facing tool can grant it.

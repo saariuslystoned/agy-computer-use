@@ -9,7 +9,7 @@ import {
 import { HostClient, UnixSocketHostClient, getDefaultSocketPath } from "./host-client.js";
 import {
   TargetsInputSchema, TargetsDataSchema, WindowObserveInputSchema, WindowObserveDataSchema,
-  StatusDataSchema,
+  StatusDataSchema, ExclusiveControlInputSchema, ExclusiveControlDataSchema,
   ObserveDataSchema,
   StatusInputSchema,
   ObserveInputSchema,
@@ -365,6 +365,11 @@ function formatToolResponse(ipcResp: any, toolName: string) {
     };
   }
 
+  if (toolName === "computer_use_exclusive_control") {
+    const parsed = ExclusiveControlDataSchema.safeParse(ipcResp.data);
+    if (!parsed.success) return { isError: true, content: [{ type: "text", text: JSON.stringify({ error: { code: "INVALID_RESPONSE_DATA", message: "Invalid exclusive admission receipt" } }) }] };
+    return { content: [{ type: "text", text: JSON.stringify(parsed.data) }] };
+  }
   if (toolName === "computer_use_targets") {
     const parsed = TargetsDataSchema.safeParse(ipcResp.data);
     if (!parsed.success) return { isError: true, content: [{ type: "text", text: JSON.stringify({ error: { code: "INVALID_RESPONSE_DATA", message: "Invalid target discovery" } }) }] };
@@ -454,8 +459,8 @@ function formatToolResponse(ipcResp: any, toolName: string) {
             type: "text",
             text: JSON.stringify({
               error: {
-                code: "INVALID_RESPONSE_DATA",
-                message: `Action response data failed Zod schema validation: ${parsedData.error.message}`
+                code: "OUTCOME_UNKNOWN",
+                message: "Global action receipt is invalid; do not retry the mutation."
               }
             }, null, 2)
           }
@@ -512,6 +517,15 @@ export function createComputerUseServer(hostClient: HostClient, sessionId: strin
   };
   server.onclose = () => { if (!sessionUsed) return; void hostClient.request("ax_session_close", { session_id: sessionId }).catch(() => {}); };
 
+  const EXCLUSIVE_TOOL: Tool = {
+    name: "computer_use_exclusive_control",
+    description: "Acquire up to 60 seconds of global input for this controller and an explicitly selected, already focused app/window. Requires administrator-provisioned isolated GUI admission; a caller boolean or display is never authority. Keyboard stays bound to the verified focused element. Release revokes this controller. Global mode can move the pointer and change focus; never use on a shared desktop.",
+    inputSchema: { type: "object", properties: {
+      operation: { type: "string", enum: ["acquire", "release"] },
+      app_id: { type: "string", minLength: 1, maxLength: 256 },
+      duration_ms: { type: "integer", minimum: 1000, maximum: 60000 }
+    }, required: ["operation"], additionalProperties: false }
+  };
   const STATUS_TOOL: Tool = {
     name: "computer_use_status",
     description: "Returns host connectivity, active display topology, TCC permission state, and mutation lockout state.",
@@ -599,10 +613,11 @@ export function createComputerUseServer(hostClient: HostClient, sessionId: strin
 
   const CLICK_TOOL: Tool = {
     name: "computer_use_click",
-    description: "Dispatches a single mouse click at normalized (x, y) coordinates [0...999] on the observed display geometry. Requires active capture_id and topology_version.",
+    description: "Exclusive isolated GUI only; can affect physical pointer/focus. Dispatches a single mouse click at normalized (x, y) coordinates [0...999] on the observed display geometry. Requires active capture_id and topology_version.",
     inputSchema: {
       type: "object",
       properties: {
+        exclusive_lease_id: { type: "string", minLength: 1, maxLength: 128, description: "Native exclusive admission lease for this controller; absent authority is rejected with zero posts." },
         capture_id: { type: "string", description: "Observation capture ID token from latest computer_use_observe." },
         topology_version: { type: "string", description: "Active display topology version token." },
         x: { type: "integer", minimum: 0, maximum: 999, description: "Normalized horizontal coordinate (0-999)." },
@@ -618,10 +633,11 @@ export function createComputerUseServer(hostClient: HostClient, sessionId: strin
 
   const MOVE_TOOL: Tool = {
     name: "computer_use_move",
-    description: "Dispatches a single mouse movement to normalized (x, y) coordinates [0...999] on the observed display geometry without clicking. Consumes active observation lease.",
+    description: "Exclusive isolated GUI only; can affect physical pointer/focus. Dispatches a single mouse movement to normalized (x, y) coordinates [0...999] on the observed display geometry without clicking. Consumes active observation lease.",
     inputSchema: {
       type: "object",
       properties: {
+        exclusive_lease_id: { type: "string", minLength: 1, maxLength: 128, description: "Native exclusive admission lease for this controller; absent authority is rejected with zero posts." },
         capture_id: { type: "string", description: "Observation capture ID token from latest computer_use_observe." },
         topology_version: { type: "string", description: "Active display topology version token." },
         x: { type: "integer", minimum: 0, maximum: 999, description: "Normalized horizontal coordinate (0-999)." },
@@ -635,10 +651,11 @@ export function createComputerUseServer(hostClient: HostClient, sessionId: strin
 
   const TYPE_TOOL: Tool = {
     name: "computer_use_type",
-    description: "Synthesizes Unicode text entry into the focused window/element, with optional Enter key press. Requires active capture_id and topology_version.",
+    description: "Exclusive isolated GUI only. Synthesizes Unicode into the deliberately verified app/window/element, with optional Enter key press. Requires active capture_id and topology_version.",
     inputSchema: {
       type: "object",
       properties: {
+        exclusive_lease_id: { type: "string", minLength: 1, maxLength: 128, description: "Native exclusive admission lease for this controller; absent authority is rejected with zero posts." },
         capture_id: { type: "string", description: "Observation capture ID token from latest computer_use_observe." },
         topology_version: { type: "string", description: "Active display topology version token." },
         text: { type: "string", minLength: 1, maxLength: 1000, description: "Unicode text payload to type (1-1000 characters)." },
@@ -652,10 +669,11 @@ export function createComputerUseServer(hostClient: HostClient, sessionId: strin
 
   const SHORTCUT_TOOL: Tool = {
     name: "computer_use_shortcut",
-    description: "Dispatches a bounded keyboard shortcut sequence (modifiers + navigation keys like Tab, Enter, Escape, Arrow keys, Home, End, PageUp/Down). Requires active capture_id and topology_version.",
+    description: "Exclusive isolated GUI only; can affect physical pointer/focus. Dispatches a bounded keyboard shortcut sequence (modifiers + navigation keys like Tab, Enter, Escape, Arrow keys, Home, End, PageUp/Down). Requires active capture_id and topology_version.",
     inputSchema: {
       type: "object",
       properties: {
+        exclusive_lease_id: { type: "string", minLength: 1, maxLength: 128, description: "Native exclusive admission lease for this controller; absent authority is rejected with zero posts." },
         capture_id: { type: "string", description: "Observation capture ID token from latest computer_use_observe." },
         topology_version: { type: "string", description: "Active display topology version token." },
         keys: {
@@ -674,10 +692,11 @@ export function createComputerUseServer(hostClient: HostClient, sessionId: strin
 
   const SCROLL_TOOL: Tool = {
     name: "computer_use_scroll",
-    description: "Dispatches a finite anchored scroll at normalized (x, y) coordinates with bounded nonzero scroll deltas. Consumes active observation lease.",
+    description: "Exclusive isolated GUI only; can affect physical pointer/focus. Dispatches a finite anchored scroll at normalized (x, y) coordinates with bounded nonzero scroll deltas. Consumes active observation lease.",
     inputSchema: {
       type: "object",
       properties: {
+        exclusive_lease_id: { type: "string", minLength: 1, maxLength: 128, description: "Native exclusive admission lease for this controller; absent authority is rejected with zero posts." },
         capture_id: { type: "string", description: "Observation capture ID token from latest computer_use_observe." },
         topology_version: { type: "string", description: "Active display topology version token." },
         x: { type: "integer", minimum: 0, maximum: 999, description: "Normalized horizontal coordinate (0-999)." },
@@ -693,10 +712,11 @@ export function createComputerUseServer(hostClient: HostClient, sessionId: strin
 
   const DRAG_TOOL: Tool = {
     name: "computer_use_drag",
-    description: "Dispatches a bounded same-display mouse drag operation from (start_x, start_y) to (end_x, end_y) with minimum safe button scope. Consumes active observation lease and guarantees input release.",
+    description: "Exclusive isolated GUI only; can affect physical pointer/focus. Dispatches a bounded same-display mouse drag operation from (start_x, start_y) to (end_x, end_y) with minimum safe button scope. Consumes active observation lease and guarantees input release.",
     inputSchema: {
       type: "object",
       properties: {
+        exclusive_lease_id: { type: "string", minLength: 1, maxLength: 128, description: "Native exclusive admission lease for this controller; absent authority is rejected with zero posts." },
         capture_id: { type: "string", description: "Observation capture ID token from latest computer_use_observe." },
         topology_version: { type: "string", description: "Active display topology version token." },
         start_x: { type: "integer", minimum: 0, maximum: 999, description: "Normalized start horizontal coordinate (0-999)." },
@@ -715,6 +735,7 @@ export function createComputerUseServer(hostClient: HostClient, sessionId: strin
     return {
       tools: [
         STATUS_TOOL,
+        EXCLUSIVE_TOOL,
         TARGETS_TOOL,
         WINDOW_TOOL,
         OBSERVE_TOOL,
@@ -753,6 +774,16 @@ export function createComputerUseServer(hostClient: HostClient, sessionId: strin
       return formatToolResponse(result, name);
     }
 
+    if (name === "computer_use_exclusive_control") {
+      const parsed = ExclusiveControlInputSchema.safeParse(args);
+      if (!parsed.success) return { isError: true, content: [{ type: "text", text: JSON.stringify({ error: { code: "INVALID_ARGUMENT", message: "Invalid exclusive control request" } }) }] };
+      sessionUsed = true;
+      const response = await hostClient.request("exclusive_control", { ...parsed.data, session_id: sessionId }, extra?.signal);
+      if (response.success && ((parsed.data.operation === "acquire") !== (typeof response.data?.lease_id === "string"))) {
+        return { isError: true, content: [{ type: "text", text: JSON.stringify({ error: { code: "INVALID_RESPONSE_DATA", message: "Mismatched exclusive admission response" } }) }] };
+      }
+      return formatToolResponse(response, name);
+    }
     if (name === "computer_use_status") {
       const parseRes = StatusInputSchema.safeParse(args);
       if (!parseRes.success) {
@@ -771,7 +802,7 @@ export function createComputerUseServer(hostClient: HostClient, sessionId: strin
           ]
         };
       }
-      const ipcResp = await hostClient.request("status", undefined, extra?.signal);
+      const ipcResp = await hostClient.request("status", { session_id: sessionId }, extra?.signal);
       return formatToolResponse(ipcResp, name);
     }
 
@@ -878,7 +909,7 @@ export function createComputerUseServer(hostClient: HostClient, sessionId: strin
           ]
         };
       }
-      const ipcResp = await hostClient.request("click", parseRes.data, extra?.signal);
+      const ipcResp = await hostClient.request("click", { ...parseRes.data, session_id: sessionId }, extra?.signal);
       return formatToolResponse(ipcResp, name);
     }
 
@@ -900,7 +931,7 @@ export function createComputerUseServer(hostClient: HostClient, sessionId: strin
           ]
         };
       }
-      const ipcResp = await hostClient.request("move", parseRes.data, extra?.signal);
+      const ipcResp = await hostClient.request("move", { ...parseRes.data, session_id: sessionId }, extra?.signal);
       return formatToolResponse(ipcResp, name);
     }
 
@@ -922,7 +953,7 @@ export function createComputerUseServer(hostClient: HostClient, sessionId: strin
           ]
         };
       }
-      const ipcResp = await hostClient.request("type", parseRes.data, extra?.signal);
+      const ipcResp = await hostClient.request("type", { ...parseRes.data, session_id: sessionId }, extra?.signal);
       return formatToolResponse(ipcResp, name);
     }
 
@@ -944,7 +975,7 @@ export function createComputerUseServer(hostClient: HostClient, sessionId: strin
           ]
         };
       }
-      const ipcResp = await hostClient.request("shortcut", parseRes.data, extra?.signal);
+      const ipcResp = await hostClient.request("shortcut", { ...parseRes.data, session_id: sessionId }, extra?.signal);
       return formatToolResponse(ipcResp, name);
     }
 
@@ -966,7 +997,7 @@ export function createComputerUseServer(hostClient: HostClient, sessionId: strin
           ]
         };
       }
-      const ipcResp = await hostClient.request("scroll", parseRes.data, extra?.signal);
+      const ipcResp = await hostClient.request("scroll", { ...parseRes.data, session_id: sessionId }, extra?.signal);
       return formatToolResponse(ipcResp, name);
     }
 
@@ -988,7 +1019,7 @@ export function createComputerUseServer(hostClient: HostClient, sessionId: strin
           ]
         };
       }
-      const ipcResp = await hostClient.request("drag", parseRes.data, extra?.signal);
+      const ipcResp = await hostClient.request("drag", { ...parseRes.data, session_id: sessionId }, extra?.signal);
       return formatToolResponse(ipcResp, name);
     }
 

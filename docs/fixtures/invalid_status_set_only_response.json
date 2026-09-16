@@ -8,8 +8,12 @@
     "accessibility_trusted": false,
     "ax_tree_inspection_available": true,
     "operator_safe_ax_available": true,
-    "operator_safe_ax_actions": ["set_value"],
-    "supported_action_strategies": ["ax_semantic"],
+    "operator_safe_ax_actions": [
+      "set_value"
+    ],
+    "supported_action_strategies": [
+      "ax_semantic"
+    ],
     "global_hid_may_affect_pointer_or_focus": true,
     "input_mutation_state": "disabled",
     "topology_version": "top-sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
@@ -31,6 +35,10 @@
           "rotation": 0
         }
       ]
-    }
+    },
+    "input_isolation_mode": "operator_safe_ax",
+    "host_instance_id": "fixture-host",
+    "controller_id": "fixture-controller",
+    "exclusive_admission_required": true
   }
 }

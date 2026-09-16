@@ -1,0 +1,64 @@
+{
+  "controller_id": "issue7-native-proof",
+  "exclusive_admission_required": true,
+  "input_isolation_mode": "operator_safe_ax",
+  "primary_display_id": 1,
+  "tcc_permission_state": "granted",
+  "operator_safe_ax_available": true,
+  "topology": {
+    "version": "top-sha256-bc5e20f3f988e9bec11e08919449f336f798e8c75b1be83651891304a4420188",
+    "primary_display_id": 1,
+    "displays": [
+      {
+        "scale_factor": 2,
+        "pixel_width": 3456,
+        "origin_y": 0,
+        "pixel_height": 2234,
+        "width_points": 1728,
+        "id": 1,
+        "height_points": 1117,
+        "rotation": 0,
+        "origin_x": 0
+      },
+      {
+        "scale_factor": 1,
+        "pixel_width": 1440,
+        "origin_y": -1443,
+        "pixel_height": 2560,
+        "width_points": 1440,
+        "id": 2,
+        "height_points": 2560,
+        "rotation": 270,
+        "origin_x": -1440
+      },
+      {
+        "scale_factor": 2,
+        "pixel_width": 3840,
+        "origin_y": -1080,
+        "pixel_height": 2160,
+        "width_points": 1920,
+        "id": 4,
+        "height_points": 1080,
+        "rotation": 0,
+        "origin_x": 0
+      }
+    ]
+  },
+  "host_instance_id": "08ce70d5-24c9-4523-a469-b8c11e66b649",
+  "ax_tree_inspection_available": true,
+  "topology_version": "top-sha256-bc5e20f3f988e9bec11e08919449f336f798e8c75b1be83651891304a4420188",
+  "pid": 8627,
+  "accessibility_available": true,
+  "supported_action_strategies": [
+    "ax_semantic"
+  ],
+  "input_mutation_state": "disabled",
+  "global_hid_may_affect_pointer_or_focus": true,
+  "accessibility_trusted": true,
+  "operator_safe_ax_actions": [
+    "press",
+    "set_value"
+  ],
+  "display_count": 3,
+  "connected": true
+}

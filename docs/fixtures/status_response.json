@@ -30,6 +30,10 @@
           "rotation": 0
         }
       ]
-    }
+    },
+    "input_isolation_mode": "operator_safe_ax",
+    "host_instance_id": "fixture-host",
+    "controller_id": "fixture-controller",
+    "exclusive_admission_required": true
   }
 }

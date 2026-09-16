@@ -208,6 +208,18 @@ public final class ComputerUseHostTests: XCTestCase {
         try runSync { try await ComputerUseHostTestRunner.run42_MoveScrollDragPointerValidationStaleCaptureSingleUseLeaseAndUnconditionalRelease() }
     }
 
+    public func test46_SharedModeNativeZeroPosts() throws {
+        try runSync { try await ComputerUseHostTestRunner.run46_SharedModeNativeZeroPosts() }
+    }
+
+    public func test47_ExclusiveDispatchAndRevocation() throws {
+        try runSync { try await ComputerUseHostTestRunner.run47_ExclusiveDispatchAndRevocation() }
+    }
+
+    public func test48_ExclusiveAdmissionOwnershipAndErrors() throws {
+        try runSync { try await ComputerUseHostTestRunner.run48_ExclusiveAdmissionOwnershipAndErrors() }
+    }
+
     public func test45_ScopedLeaseTable() throws {
         try runSync { try await ComputerUseHostTestRunner.run45_ScopedLeaseTable() }
     }
@@ -224,6 +236,9 @@ public final class ComputerUseHostTests: XCTestCase {
         ("test43_CompoundAXActionObservation", test43_CompoundAXActionObservation),
         ("test44_TargetScopedIntervention", test44_TargetScopedIntervention),
         ("test45_ScopedLeaseTable", test45_ScopedLeaseTable),
+        ("test46_SharedModeNativeZeroPosts", test46_SharedModeNativeZeroPosts),
+        ("test47_ExclusiveDispatchAndRevocation", test47_ExclusiveDispatchAndRevocation),
+        ("test48_ExclusiveAdmissionOwnershipAndErrors", test48_ExclusiveAdmissionOwnershipAndErrors),
         ("test01_LengthPrefixedFraming", test01_LengthPrefixedFraming),
         ("test02_OversizedFramingHeaderRejection", test02_OversizedFramingHeaderRejection),
         ("test03_DirectoryPreparation", test03_DirectoryPreparation),

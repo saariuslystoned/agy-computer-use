@@ -1,0 +1,18 @@
+{
+  "source": "526fc8a8ec8188a769b740c68b3c6c13bd9d1da1",
+  "semantic_actions": 20,
+  "iterations_with_human_keys": 20,
+  "action_loop_s": 24.283,
+  "host_input_events": 0,
+  "event_tap_coverage": true,
+  "hardware_keys": 247,
+  "sentinel_keys": 249,
+  "hardware_mouse_moves": 2163,
+  "sentinel_frontmost_samples": 474,
+  "total_samples": 474,
+  "focus_change_samples": 18,
+  "focus_read_errors": 0,
+  "iteration_end_field_focus_false": 0,
+  "typed_content_recorded": false,
+  "interpretation": "Live overlapping hardware activity and semantic writes passed with zero host HID and no target foreground activation. Sentinel focused-element was not invariant in this trial; the cause of those changes was not established. Earlier 25-second measurement had 460 invariant focus samples."
+}

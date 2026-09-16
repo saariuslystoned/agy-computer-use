@@ -212,6 +212,7 @@ public actor HostServer {
     private let resolutionObserver: ArbiterResolutionObserver?
 
     private var latestCapture: CaptureFrameDTO?
+    private var latestCaptureDeadline: ContinuousClock.Instant?
     private var activeTopology: DisplayTopology?
     private var latestIssuedGeneration: UInt64 = 0
 
@@ -263,7 +264,27 @@ public actor HostServer {
 
     public func handleRequest(_ request: IPCRequest) async -> IPCResponse {
         do {
+            if ["click", "move", "type", "shortcut", "scroll", "drag"].contains(request.method) {
+                try inputEngine.exclusiveAuthority.requireOwner(controller: try Self.sessionID(request),
+                    leaseID: request.params?["exclusive_lease_id"]?.rawValue as? String, action: request.method)
+            }
             switch request.method {
+            case "exclusive_control":
+                guard let session = try Self.sessionID(request),
+                      let operation = request.params?["operation"]?.rawValue as? String else {
+                    throw ComputerUseError.ipcError(reason: "Exclusive control requires a session and operation")
+                }
+                if operation == "release" {
+                    inputEngine.exclusiveAuthority.revoke(controller: session)
+                    return IPCResponse(id: request.id, success: true, data: ["released": .bool(true)])
+                }
+                guard operation == "acquire", let appID = request.params?["app_id"]?.rawValue as? String,
+                      let duration = request.params?["duration_ms"]?.rawValue as? Int else {
+                    throw ComputerUseError.ipcError(reason: "Admission requires acquire, app_id and duration_ms")
+                }
+                let admitted = try inputEngine.exclusiveAuthority.acquire(controller: session, appID: appID, durationMs: duration)
+                self.latestCapture = nil // admission never authorizes an earlier screenshot
+                return IPCResponse(id: request.id, success: true, data: admitted)
             case "status":
                 self.isConnected = true
                 let currentTopology = try topologyProvider.getTopology()
@@ -282,9 +303,10 @@ public actor HostServer {
                 let advertisedOperatorSafeAXActions = operatorSafeAXAvailable
                     ? engineOperatorSafeAXActions
                     : []
+                let exclusiveAdmitted = inputEngine.exclusiveAuthority.isAdmitted && osAxTrusted
                 let supportedActionStrategies: [AnyCodable] =
                     (operatorSafeAXAvailable ? [.string("ax_semantic")] : []) +
-                    (osAxTrusted ? [.string("exclusive_global_hid")] : [])
+                    (exclusiveAdmitted ? [.string("exclusive_global_hid")] : [])
 
                 let topologyDict: [String: AnyCodable] = [
                     "version": .string(currentTopology.version),
@@ -320,7 +342,11 @@ public actor HostServer {
                         ),
                         "supported_action_strategies": .array(supportedActionStrategies),
                         "global_hid_may_affect_pointer_or_focus": .bool(true),
-                        "input_mutation_state": .string(osAxTrusted ? "enabled" : "disabled"),
+                        "input_mutation_state": .string(exclusiveAdmitted ? "enabled" : "disabled"),
+                        "input_isolation_mode": .string(exclusiveAdmitted ? "exclusive_global_hid" : "operator_safe_ax"),
+                        "host_instance_id": .string(inputEngine.exclusiveAuthority.hostInstance),
+                        "controller_id": .string(try Self.sessionID(request) ?? "native-unscoped"),
+                        "exclusive_admission_required": .bool(true),
                         "topology_version": .string(currentTopology.version),
                         "primary_display_id": .int(currentTopology.primaryDisplayId),
                         "display_count": .int(currentTopology.displays.count),
@@ -516,6 +542,7 @@ public actor HostServer {
                 guard let sessionID = try Self.sessionID(request) else {
                     throw ComputerUseError.ipcError(reason: "session_id is required")
                 }
+                inputEngine.exclusiveAuthority.revoke(controller: sessionID)
                 guard let engine = axEngine as? any AXScopedInspectionEngine else {
                     throw ComputerUseError.targetUnreachable(reason: "Scoped AX sessions unavailable")
                 }
@@ -718,6 +745,7 @@ public actor HostServer {
                     throw ComputerUseError.ipcError(reason: "capture_id parameter is required")
                 }
                 guard let activeCap = self.latestCapture,
+                      let captureDeadline = latestCaptureDeadline, clock.now < captureDeadline,
                       activeCap.captureId == reqCapId,
                       activeCap.topologyVersion == reqTopVer else {
                     throw ComputerUseError.staleCapture(current: self.latestCapture?.captureId ?? "", received: reqCapId)
@@ -745,12 +773,17 @@ public actor HostServer {
                 self.latestCapture = nil
 
                 do {
-                    let result = try inputEngine.performClick(gridX: x, gridY: y, button: button, clickCount: clickCount, captureId: reqCapId, currentCaptureId: reqCapId, display: display)
+                    let permit = try inputEngine.exclusiveAuthority.permit(controller: try Self.sessionID(request),
+                        leaseID: request.params?["exclusive_lease_id"]?.rawValue as? String,
+                        action: request.method, captureID: reqCapId)
+                    let result = try inputEngine.performClick(gridX: x, gridY: y, button: button, clickCount: clickCount, captureId: reqCapId, currentCaptureId: reqCapId, display: display, permit: permit)
                     return IPCResponse(id: request.id, success: true, data: [
                         "action_id": .string(result.actionId),
                         "status": .string(result.status),
                         "capture_id": .string(result.captureId),
-                        "duration_ms": .double(result.durationMs)
+                        "duration_ms": .double(result.durationMs),
+                        "strategy": .string(result.strategy),
+                        "global_hid_posts": .int(result.globalHIDPosts)
                     ])
                 } catch {
                     inputEngine.releaseHeldInputs()
@@ -776,6 +809,7 @@ public actor HostServer {
                     throw ComputerUseError.ipcError(reason: "capture_id parameter is required")
                 }
                 guard let activeCap = self.latestCapture,
+                      let captureDeadline = latestCaptureDeadline, clock.now < captureDeadline,
                       activeCap.captureId == reqCapId,
                       activeCap.topologyVersion == reqTopVer else {
                     throw ComputerUseError.staleCapture(current: self.latestCapture?.captureId ?? "", received: reqCapId)
@@ -794,12 +828,17 @@ public actor HostServer {
                 self.latestCapture = nil
 
                 do {
-                    let result = try inputEngine.performMove(gridX: x, gridY: y, captureId: reqCapId, currentCaptureId: reqCapId, display: display)
+                    let permit = try inputEngine.exclusiveAuthority.permit(controller: try Self.sessionID(request),
+                        leaseID: request.params?["exclusive_lease_id"]?.rawValue as? String,
+                        action: request.method, captureID: reqCapId)
+                    let result = try inputEngine.performMove(gridX: x, gridY: y, captureId: reqCapId, currentCaptureId: reqCapId, display: display, permit: permit)
                     return IPCResponse(id: request.id, success: true, data: [
                         "action_id": .string(result.actionId),
                         "status": .string(result.status),
                         "capture_id": .string(result.captureId),
-                        "duration_ms": .double(result.durationMs)
+                        "duration_ms": .double(result.durationMs),
+                        "strategy": .string(result.strategy),
+                        "global_hid_posts": .int(result.globalHIDPosts)
                     ])
                 } catch {
                     inputEngine.releaseHeldInputs()
@@ -825,6 +864,7 @@ public actor HostServer {
                     throw ComputerUseError.ipcError(reason: "capture_id parameter is required")
                 }
                 guard let activeCap = self.latestCapture,
+                      let captureDeadline = latestCaptureDeadline, clock.now < captureDeadline,
                       activeCap.captureId == reqCapId,
                       activeCap.topologyVersion == reqTopVer else {
                     throw ComputerUseError.staleCapture(current: self.latestCapture?.captureId ?? "", received: reqCapId)
@@ -855,12 +895,17 @@ public actor HostServer {
                 self.latestCapture = nil
 
                 do {
-                    let result = try inputEngine.performScroll(gridX: x, gridY: y, deltaX: deltaX, deltaY: deltaY, captureId: reqCapId, currentCaptureId: reqCapId, display: display)
+                    let permit = try inputEngine.exclusiveAuthority.permit(controller: try Self.sessionID(request),
+                        leaseID: request.params?["exclusive_lease_id"]?.rawValue as? String,
+                        action: request.method, captureID: reqCapId)
+                    let result = try inputEngine.performScroll(gridX: x, gridY: y, deltaX: deltaX, deltaY: deltaY, captureId: reqCapId, currentCaptureId: reqCapId, display: display, permit: permit)
                     return IPCResponse(id: request.id, success: true, data: [
                         "action_id": .string(result.actionId),
                         "status": .string(result.status),
                         "capture_id": .string(result.captureId),
-                        "duration_ms": .double(result.durationMs)
+                        "duration_ms": .double(result.durationMs),
+                        "strategy": .string(result.strategy),
+                        "global_hid_posts": .int(result.globalHIDPosts)
                     ])
                 } catch {
                     inputEngine.releaseHeldInputs()
@@ -886,6 +931,7 @@ public actor HostServer {
                     throw ComputerUseError.ipcError(reason: "capture_id parameter is required")
                 }
                 guard let activeCap = self.latestCapture,
+                      let captureDeadline = latestCaptureDeadline, clock.now < captureDeadline,
                       activeCap.captureId == reqCapId,
                       activeCap.topologyVersion == reqTopVer else {
                     throw ComputerUseError.staleCapture(current: self.latestCapture?.captureId ?? "", received: reqCapId)
@@ -913,12 +959,17 @@ public actor HostServer {
                 self.latestCapture = nil
 
                 do {
-                    let result = try inputEngine.performDrag(startX: startX, startY: startY, endX: endX, endY: endY, button: button, captureId: reqCapId, currentCaptureId: reqCapId, display: display)
+                    let permit = try inputEngine.exclusiveAuthority.permit(controller: try Self.sessionID(request),
+                        leaseID: request.params?["exclusive_lease_id"]?.rawValue as? String,
+                        action: request.method, captureID: reqCapId)
+                    let result = try inputEngine.performDrag(startX: startX, startY: startY, endX: endX, endY: endY, button: button, captureId: reqCapId, currentCaptureId: reqCapId, display: display, permit: permit)
                     return IPCResponse(id: request.id, success: true, data: [
                         "action_id": .string(result.actionId),
                         "status": .string(result.status),
                         "capture_id": .string(result.captureId),
-                        "duration_ms": .double(result.durationMs)
+                        "duration_ms": .double(result.durationMs),
+                        "strategy": .string(result.strategy),
+                        "global_hid_posts": .int(result.globalHIDPosts)
                     ])
                 } catch {
                     inputEngine.releaseHeldInputs()
@@ -944,6 +995,7 @@ public actor HostServer {
                     throw ComputerUseError.ipcError(reason: "capture_id parameter is required")
                 }
                 guard let activeCap = self.latestCapture,
+                      let captureDeadline = latestCaptureDeadline, clock.now < captureDeadline,
                       activeCap.captureId == reqCapId,
                       activeCap.topologyVersion == reqTopVer else {
                     throw ComputerUseError.staleCapture(current: self.latestCapture?.captureId ?? "", received: reqCapId)
@@ -957,12 +1009,17 @@ public actor HostServer {
                 self.latestCapture = nil
 
                 do {
-                    let result = try inputEngine.performType(text: textPayload, pressEnter: pressEnter, captureId: reqCapId, currentCaptureId: reqCapId)
+                    let permit = try inputEngine.exclusiveAuthority.permit(controller: try Self.sessionID(request),
+                        leaseID: request.params?["exclusive_lease_id"]?.rawValue as? String,
+                        action: request.method, captureID: reqCapId)
+                    let result = try inputEngine.performType(text: textPayload, pressEnter: pressEnter, captureId: reqCapId, currentCaptureId: reqCapId, permit: permit)
                     return IPCResponse(id: request.id, success: true, data: [
                         "action_id": .string(result.actionId),
                         "status": .string(result.status),
                         "capture_id": .string(result.captureId),
-                        "duration_ms": .double(result.durationMs)
+                        "duration_ms": .double(result.durationMs),
+                        "strategy": .string(result.strategy),
+                        "global_hid_posts": .int(result.globalHIDPosts)
                     ])
                 } catch {
                     inputEngine.releaseHeldInputs()
@@ -988,6 +1045,7 @@ public actor HostServer {
                     throw ComputerUseError.ipcError(reason: "capture_id parameter is required")
                 }
                 guard let activeCap = self.latestCapture,
+                      let captureDeadline = latestCaptureDeadline, clock.now < captureDeadline,
                       activeCap.captureId == reqCapId,
                       activeCap.topologyVersion == reqTopVer else {
                     throw ComputerUseError.staleCapture(current: self.latestCapture?.captureId ?? "", received: reqCapId)
@@ -1004,12 +1062,17 @@ public actor HostServer {
                 self.latestCapture = nil
 
                 do {
-                    let result = try inputEngine.performShortcut(keys: keys, captureId: reqCapId, currentCaptureId: reqCapId)
+                    let permit = try inputEngine.exclusiveAuthority.permit(controller: try Self.sessionID(request),
+                        leaseID: request.params?["exclusive_lease_id"]?.rawValue as? String,
+                        action: request.method, captureID: reqCapId)
+                    let result = try inputEngine.performShortcut(keys: keys, captureId: reqCapId, currentCaptureId: reqCapId, permit: permit)
                     return IPCResponse(id: request.id, success: true, data: [
                         "action_id": .string(result.actionId),
                         "status": .string(result.status),
                         "capture_id": .string(result.captureId),
-                        "duration_ms": .double(result.durationMs)
+                        "duration_ms": .double(result.durationMs),
+                        "strategy": .string(result.strategy),
+                        "global_hid_posts": .int(result.globalHIDPosts)
                     ])
                 } catch {
                     inputEngine.releaseHeldInputs()
@@ -1023,11 +1086,16 @@ public actor HostServer {
                     error: IPCErrorPayload(code: "UNKNOWN_METHOD", message: "Method '\(request.method)' not implemented")
                 )
             }
+        } catch let err as GlobalInputFailure {
+            return IPCResponse(id: request.id, success: false,
+                error: IPCErrorPayload(code: err.code, message: err.message, details: err.details))
         } catch let err as ComputerUseError {
+            let details: [String: String]? = ["click", "move", "type", "shortcut", "scroll", "drag"].contains(request.method)
+                ? ["strategy": "rejected", "global_hid_posts": "0"] : nil
             return IPCResponse(
                 id: request.id,
                 success: false,
-                error: IPCErrorPayload(code: err.errorCode, message: err.errorMessage)
+                error: IPCErrorPayload(code: err.errorCode, message: err.errorMessage, details: details)
             )
         } catch is CancellationError {
             return IPCResponse(
@@ -1151,6 +1219,7 @@ public actor HostServer {
 
         self.activeTopology = currentTopology
         self.latestCapture = frame
+        self.latestCaptureDeadline = clock.now + .seconds(30)
         return currentTopology
     }
 }

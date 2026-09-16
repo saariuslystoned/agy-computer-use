@@ -1,0 +1,13 @@
+{
+  "proof/fixtures/issue7_shared_proof.py": "6f6f9aa3a6c946627f7433d079f99213f105e045270130028d1eed17d2e160c2",
+  "proof/fixtures/issue7_coexistence.py": "fa992033a353946952c132ed9285e9c4346d182a4f81a0ada35bb8fb96540d02",
+  "proof/fixtures/issue7_isolation.swift": "66a45a545ea75c0848bb0a859877378bf22cec59eb75d54b843b1576384fbd81",
+  "proof/fixtures/issue12_ax_lab.swift": "eb54d34e9d103daf37e034d12ed4716c1c37272c0cc553f7cabf537cc26db4b9",
+  "proof/fixtures/issue12_sentinel.swift": "1e79948eadf672bf4980c797686c294c9c965c8bfdd50a05f8ecb64edde86718",
+  "runs/issue-7-runs/20260916/Issue7Target.swift": "ed643bd4b23dfeb0578ff424cfda95bca41cc8ce814210c90854e6c3484cf36f",
+  "runs/issue-7-runs/20260916/Issue7Sentinel.swift": "ee2fe9b50eb7342470cf751f0898d071a7db8b25209eedf16929b4ea46605aeb",
+  "runs/issue-7-runs/20260916/issue7-isolation": "0d0a21e03210c156691db2874411fe20eddce620620908b080a727c70a2c8d93",
+  "runs/issue-7-runs/20260916/issue7_mcp_metrics.py": "481b18e159e8604b91e3aa50a7e2ef78d8b67154274c86b28bedb89daa2c6311",
+  "runs/issue-7-runs/20260916/Issue7Target.app/Contents/MacOS/Issue7Target": "d9e319c9f035fe1ea2f8b6c73b8c976112ec39070517b208b0015d20755260f1",
+  "runs/issue-7-runs/20260916/Issue7Sentinel.app/Contents/MacOS/Issue7Sentinel": "d7f3309465f4aaf5766116f2168132956d16ba6a8d60486e0fff8717f0e29ee2"
+}
