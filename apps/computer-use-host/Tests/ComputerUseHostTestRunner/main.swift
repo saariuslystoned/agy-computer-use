@@ -7679,6 +7679,40 @@ extension ComputerUseHostTestRunner {
         assertTrue(lateInvalidated)
         assertEqual(late.observation?.state, nil)
 
+        // A transient empty application hierarchy is not evidence that the form
+        // disappeared. The production runner must re-read without re-dispatching.
+        func appTree(_ generation: Int, populated: Bool) -> AXTreeResultDTO {
+            AXTreeResultDTO(targetApp: baseline.targetApp,
+                axSnapshotId: "app-snapshot-\(generation)", appInstanceRef: "instance-\(generation)",
+                expiresAtMs: 30_000, topologyVersion: topology, nodeCount: populated ? 2 : 1,
+                maxDepthReached: populated ? 2 : 1, truncated: false,
+                tree: AXNodeDTO(id: "app", role: "AXApplication", bounds: baseline.tree.bounds,
+                    children: populated ? [tree(generation, value: generation == 0 ? "before" : "after").tree] : nil))
+        }
+        for persistent in [false, true] {
+            var calls = 0
+            var readCount = 0
+            var discarded = 0
+            let missing = try AXActionObservationRunner.run(baseline: appTree(0, populated: true), options: snapshot,
+                dispatch: { calls += 1; return receipt("set_value") },
+                inspect: { _ in readCount += 1; return appTree(readCount, populated: !persistent && readCount > 1) },
+                invalidate: { discarded += 1 }, now: { clock.now }, wait: { clock.advance(by: .milliseconds($0)) })
+            assertEqual(calls, 1, "Incomplete observations must never repeat the setter")
+            assertEqual(missing.observation?.status, persistent ? "timed_out" : "changed")
+            assertTrue(discarded > 0, "Root-only candidates must lose authority")
+            if persistent {
+                assertEqual(missing.observation?.state, nil)
+                assertEqual(missing.observation?.changes, nil)
+                assertEqual(readCount, 5, "The original observation budget bounds all reinspection")
+            } else {
+                assertEqual(readCount, 2)
+                assertEqual(missing.observation?.state?.nodeCount, 2)
+            }
+        }
+        let shallow = try AXActionObservationRunner.run(baseline: appTree(0, populated: false), options: snapshot,
+            dispatch: { receipt() }, inspect: { _ in appTree(1, populated: false) }, invalidate: {})
+        assertEqual(shallow.observation?.status, "unchanged", "An intentionally shallow baseline remains valid")
+
         let many = (0..<30).map { AXNodeDTO(id: "child-\($0)", role: "AXStaticText", value: "safe", bounds: AXRect(x: 0, y: 0, width: 1, height: 1)) }
         let summary = AXChangeSummary.compare(baseline, tree(1, children: many))
         assertEqual(summary.added, 30)
