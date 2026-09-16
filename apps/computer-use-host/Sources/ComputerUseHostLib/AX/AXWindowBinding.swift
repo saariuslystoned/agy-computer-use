@@ -49,6 +49,22 @@ package struct AXWindowBinding: @unchecked Sendable {
               current.contains(where: { CFEqual($0, element) }) else {
             throw ComputerUseError.staleOperation(reason: "Window set changed, was replaced, or a dialog opened; rediscover the explicit app")
         }
+        var rawChildren: CFArray?
+        let childrenStatus = AXUIElementCopyAttributeValues(element, kAXChildrenAttribute as CFString, 0, 501, &rawChildren)
+        var roles: [String]?
+        if childrenStatus == .success, let children = rawChildren as? [AXUIElement], children.count <= 500 {
+            roles = []
+            let readDeadline = ContinuousClock().now + .seconds(1)
+            for child in children {
+                guard ContinuousClock().now < readDeadline else { roles = nil; break }
+                AXUIElementSetMessagingTimeout(child, 0.1)
+                var role: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(child, kAXRoleAttribute as CFString, &role) == .success,
+                      let name = role as? String else { roles = nil; break }
+                roles?.append(name)
+            }
+        }
+        try AXWindowSheetGuard.requireNone(status: childrenStatus, roles: roles)
         let bounds = try AXWindowBindingStore.bounds(element)
         let matching = AXWindowBindingStore.cgWindows(pid: Int32(app.pid)).filter { $0.id == windowID }
         guard matching.count == 1, matching[0].bounds == bounds else {
@@ -236,6 +252,17 @@ package struct AXWindowBindingStore {
             return CGWindowRecord(id: id, pid: owner,
                 bounds: AXRect(x: rect.minX, y: rect.minY, width: rect.width, height: rect.height),
                 title: row[kCGWindowName as String] as? String)
+        }
+    }
+}
+
+// A desktop-independent parent-window image does not promise to include a
+// separate attached sheet. Refuse that ambiguous image/AX combination and old
+// parent authority; app-only AX inspection remains the explicit dialog route.
+package enum AXWindowSheetGuard {
+    package static func requireNone(status: AXError, roles: [String]?) throws {
+        guard status == .success, let roles, roles.count <= 500, !roles.contains("AXSheet") else {
+            throw ComputerUseError.staleOperation(reason: "Attached sheet is present or unavailable; use fresh explicit-app AX inspection to resolve the dialog")
         }
     }
 }

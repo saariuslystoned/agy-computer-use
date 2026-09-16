@@ -7918,6 +7918,14 @@ extension ComputerUseHostTestRunner {
 
 extension ComputerUseHostTestRunner {
     public static func run45_ScopedLeaseTable() async throws {
+        try AXWindowSheetGuard.requireNone(status: .success, roles: [])
+        try AXWindowSheetGuard.requireNone(status: .success, roles: ["AXTextField", "AXGroup"])
+        for (status, roles): (AXError, [String]?) in [(.success, ["AXSheet"]), (.success, nil),
+            (.cannotComplete, nil), (.invalidUIElement, nil), (.attributeUnsupported, nil), (.noValue, nil),
+            (.success, Array(repeating: "AXGroup", count: 501))] {
+            do { try AXWindowSheetGuard.requireNone(status: status, roles: roles); assertTrue(false, "Attached or unreadable sheets must fail closed") }
+            catch let error as ComputerUseError { assertEqual(error.errorCode, "STALE_OPERATION") }
+        }
         // The production route must return fresh bound state, and revoke its
         // candidate on capture, identity, timing and AX-continuation failures.
         for mode in ["ok", "capture-error", "image-mismatch", "finish-error", "identity-mismatch", "old-timestamp"] {

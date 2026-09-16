@@ -5,6 +5,7 @@ import AppKit
 final class WindowsLab: NSObject, NSApplicationDelegate {
     var windows: [String: NSWindow] = [:]
     var fields: [String: NSTextField] = [:]
+    var alert: NSAlert?
     var sequence = 0
     var completed: String = ""
     let statePath = CommandLine.arguments[1]
@@ -44,13 +45,21 @@ final class WindowsLab: NSObject, NSApplicationDelegate {
                 windows[key]?.close(); make(key, origin: origin)
             case "dialog": make("Dialog", origin: NSPoint(x: 350, y: 350))
             case "close-dialog": windows["Dialog"]?.close(); windows["Dialog"] = nil; fields["Dialog"] = nil
+            case "sheet":
+                let sheet = NSAlert(); sheet.messageText = "Issue 12 — Modal dialog"
+                alert = sheet
+                if let parent = windows["A"] { sheet.beginSheetModal(for: parent) { [weak self] _ in self?.alert = nil } }
+            case "close-sheet":
+                if let parent = windows["A"], let sheet = parent.attachedSheet {
+                    parent.endSheet(sheet); sheet.orderOut(nil)
+                }
             default: break
             }
             completed = id; sequence += 1
         }
         let all = windows.mapValues { window in ["window_id": window.windowNumber, "visible": window.isVisible] as [String: Any] }
         let state: [String: Any] = ["pid": ProcessInfo.processInfo.processIdentifier,
-            "windows": all, "values": fields.mapValues { $0.stringValue }, "sequence": sequence, "completed": completed]
+            "sheet_window_id": windows["A"]?.attachedSheet?.windowNumber ?? 0, "windows": all, "values": fields.mapValues { $0.stringValue }, "sequence": sequence, "completed": completed]
         if let bytes = try? JSONSerialization.data(withJSONObject: state, options: [.sortedKeys]) {
             try? bytes.write(to: URL(fileURLWithPath: statePath), options: [.atomic])
         }

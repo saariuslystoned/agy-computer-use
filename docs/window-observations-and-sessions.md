@@ -36,7 +36,9 @@ correlation; unavailable or ambiguous mapping fails rather than guessing. Window
 movement permits a fresh observation of the same reference, while an older action
 lease fails its existing geometry fingerprint. Window replacement, window-set
 changes and newly opened dialogs require rediscovery. No reference silently moves
-to the new window.
+to the new window. Attached modal sheets fail closed for window images and pending
+parent-window authority because the capture API does not promise to include their
+separate surface; use fresh explicit-app AX inspection to resolve the dialog.
 
 The host selects the display containing the window center. Missing or overlapping
 display coverage fails. The returned top-left window bounds are global screen

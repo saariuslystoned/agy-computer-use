@@ -1,9 +1,10 @@
 """Explicit disposable-fixture proof. Never enumerates/captures other app content."""
-import base64, hashlib, json, math, socket, struct, sys, time, uuid
+import base64, hashlib, json, math, socket, struct, subprocess, sys, time, uuid
 from pathlib import Path
-socket_path, fixture_root, output_root = sys.argv[1:]
+socket_path, fixture_root, output_root = sys.argv[1:4]
+other_state = sys.argv[4] if len(sys.argv) > 4 else "lab-state.json"
 f = Path(fixture_root); out = Path(output_root); out.mkdir(parents=True, exist_ok=True)
-lab = str(json.loads((f/'lab-state.json').read_text())['pid'])
+lab = str(json.loads((f/other_state).read_text())['pid'])
 windows = str(json.loads((f/'windows-state.json').read_text())['pid'])
 results = []
 def call(method, **params):
@@ -45,7 +46,14 @@ def discover(session):
     data=ok(call('targets',app_id=windows,session_id=session))
     return {w['title'].rsplit(' ',1)[-1]:w['window_ref'] for w in data['windows']}
 def observe(session, ref):
-    return ok(call('window_observe',app_id=windows,window_ref=ref,session_id=session))
+    for attempt in range(3):
+        response=call('window_observe',app_id=windows,window_ref=ref,session_id=session)
+        if response['success']: return response['data']
+        if response.get('error',{}).get('code')!='STALE_OPERATION' or attempt==2: return ok(response)
+        # Reads alone may be repeated after a rejected image/AX bracket. No
+        # mutation is retried and no rejected response provides authority.
+        record('read_only_bracket_reobservation',attempt=attempt+1,error_code='STALE_OPERATION')
+        time.sleep(.2)
 def command(op, key='A', **extra):
     ident=str(uuid.uuid4()); value=dict(id=ident,op=op,window=key,**extra)
     temp=f/'windows-command.tmp';temp.write_text(json.dumps(value));temp.replace(f/'windows-command.json')
@@ -68,6 +76,7 @@ def save_image(label,data):
     return dict(display=data['window']['display'],bounds=data['window']['bounds'],pixels=[encoded['pixel_width'],encoded['pixel_height']],
         scale=encoded['scale_factor'],image_sha256=encoded['image_sha256'],node_count=data['state']['node_count'],timing=timing)
 try:
+    command('close-sheet');command('close-dialog');time.sleep(.5)
     status=ok(call('status'));assert status['display_count']==3
     (out/'topology.json').write_text(json.dumps(status['topology'],indent=2)+'\n')
     refs=discover('window-one');refs2=discover('window-two')
@@ -112,8 +121,18 @@ try:
     time.sleep(.5)
     refs=discover('dialog');command('dialog')
     reject('new_dialog_requires_rediscovery',call('window_observe',app_id=windows,window_ref=refs['A'],session_id='dialog'),['STALE_OPERATION'])
+    time.sleep(.5)
     new=discover('dialog');assert 'Dialog' in new
     record('dialog_discovered_explicitly');command('close-dialog');time.sleep(.5)
+    refs=discover('sheet');old_sheet_parent=observe('sheet',refs['A'])
+    command('sheet');time.sleep(.5)
+    reject('attached_sheet_rejects_parent_image',call('window_observe',app_id=windows,window_ref=refs['A'],session_id='sheet'),['STALE_OPERATION'])
+    reject('attached_sheet_rejects_parent_authority',action(old_sheet_parent['state'],'sheet','issue12-input-A','forbidden-sheet'),['STALE_OPERATION','STALE_AX_SNAPSHOT'])
+    dialog_tree=ok(call('ax_tree',app_id=windows,session_id='sheet-read'))
+    assert any(n['role']=='AXSheet' for n in nodes(dialog_tree['tree']))
+    sheet_state=json.loads((f/'windows-state.json').read_text());assert sheet_state['sheet_window_id']>0
+    subprocess.run(['screencapture','-x','-o','-l',str(sheet_state['sheet_window_id']),str(out/'modal-sheet.png')],check=True)
+    record('modal_sheet_visible_and_explicit_app_ax_available');command('close-sheet');time.sleep(.5)
     refs=discover('expiry');expiry=observe('expiry',refs['B'])
     print('Display, binding and session assertions passed; checking real lease expiry.',flush=True)
     time.sleep(31)
@@ -123,6 +142,6 @@ try:
     record('rejected_writes_never_applied')
 finally:
     (out/'assertions.json').write_text(json.dumps(results,indent=2)+'\n')
-    for session in ['window-one','window-two','foreign','ambiguous','app-one','app-two','replace','dialog','expiry']:
+    for session in ['window-one','window-two','foreign','ambiguous','app-one','app-two','replace','dialog','sheet','sheet-read','expiry']:
         call('ax_session_close',session_id=session)
 print(json.dumps({'passed':len(results),'failed':0}),flush=True)
