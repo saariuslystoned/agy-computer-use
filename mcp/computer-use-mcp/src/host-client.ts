@@ -229,7 +229,7 @@ export class MockHostClient implements HostClient {
   };
 }
 
-const MUTATION_METHODS = new Set(["click", "move", "drag", "type", "shortcut", "scroll", "ax_action"]);
+const MUTATION_METHODS = new Set(["click", "move", "drag", "type", "shortcut", "scroll", "ax_action", "ax_action_observe"]);
 
 export function getDefaultSocketPath(): string {
   const uid = process.getuid ? process.getuid() : 501;
@@ -284,7 +284,7 @@ export class UnixSocketHostClient implements HostClient {
       let client: net.Socket | null = null;
       let isDispatched = false;
       let isSettled = false;
-      const isAxAction = method === "ax_action";
+      const isAxAction = method === "ax_action" || method === "ax_action_observe";
       const mutationErrorCode = isAxAction ? "OUTCOME_UNKNOWN" : "ACTION_OUTCOME_UNKNOWN";
       const mutationRecoveryHint = isAxAction ? "computer_use_ax_tree" : "computer_use_observe";
       const mutationOutcomeUnknown = (reason: string): IPCResponse => ({

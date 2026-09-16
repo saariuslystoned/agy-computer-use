@@ -7,6 +7,7 @@
     { "$ref": "#/definitions/ObserveRequest" },
     { "$ref": "#/definitions/AxTreeRequest" },
     { "$ref": "#/definitions/AxActionRequest" },
+    { "$ref": "#/definitions/AxActionObserveRequest" },
     { "$ref": "#/definitions/ClickRequest" },
     { "$ref": "#/definitions/MoveRequest" },
     { "$ref": "#/definitions/TypeRequest" },
@@ -21,6 +22,299 @@
     { "$ref": "#/definitions/ErrorResponse" }
   ],
   "definitions": {
+    "AxActionObserveRequest": {
+      "type": "object",
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "method": {
+          "const": "ax_action_observe"
+        },
+        "params": {
+          "type": "object",
+          "required": [
+            "ax_snapshot_id",
+            "app_instance_ref",
+            "element_ref",
+            "topology_version",
+            "action",
+            "intent",
+            "observe"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "ax_snapshot_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "app_instance_ref": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "element_ref": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "topology_version": {
+              "type": "string",
+              "pattern": "^top-sha256-[0-9a-f]{64}$"
+            },
+            "action": {
+              "enum": [
+                "press",
+                "set_value"
+              ]
+            },
+            "value": {
+              "type": "string",
+              "maxLength": 4096,
+              "description": "Required only for set_value; runtime validation enforces well-formed UTF-8 of at most 4096 bytes"
+            },
+            "intent": {
+              "type": "string",
+              "minLength": 1
+            },
+            "observe": {
+              "$ref": "#/definitions/AxObservationOptions"
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "action": {
+                    "const": "set_value"
+                  }
+                },
+                "required": [
+                  "action"
+                ]
+              },
+              "then": {
+                "required": [
+                  "value"
+                ]
+              },
+              "else": {
+                "not": {
+                  "required": [
+                    "value"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "AxActionObservation": {
+      "type": "object",
+      "required": [
+        "status",
+        "condition",
+        "attempts",
+        "elapsed_ms"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "enum": [
+            "changed",
+            "unchanged",
+            "timed_out",
+            "failed"
+          ]
+        },
+        "condition": {
+          "enum": [
+            "snapshot",
+            "semantic_change"
+          ]
+        },
+        "attempts": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "elapsed_ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "state": {
+          "$ref": "#/definitions/AxTreeResponse/properties/data"
+        },
+        "changes": {
+          "type": "object",
+          "required": [
+            "added",
+            "removed",
+            "changed",
+            "node_ids",
+            "truncated"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "added": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 500
+            },
+            "removed": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 500
+            },
+            "changed": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 500
+            },
+            "node_ids": {
+              "type": "array",
+              "maxItems": 16,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              }
+            },
+            "truncated": {
+              "type": "boolean"
+            }
+          }
+        },
+        "error_code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "changed",
+                  "unchanged"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "state",
+              "changes"
+            ],
+            "not": {
+              "required": [
+                "error_code"
+              ]
+            },
+            "properties": {
+              "attempts": {
+                "minimum": 1
+              }
+            }
+          },
+          "else": {
+            "required": [
+              "error_code"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "state"
+                  ]
+                },
+                {
+                  "required": [
+                    "changes"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "timed_out"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "error_code": {
+                "const": "TIMEOUT"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "unchanged"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "condition": {
+                "const": "snapshot"
+              },
+              "changes": {
+                "properties": {
+                  "added": {
+                    "const": 0
+                  },
+                  "removed": {
+                    "const": 0
+                  },
+                  "changed": {
+                    "const": 0
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "AxObservationOptions": {
+      "type": "object",
+      "required": [
+        "condition",
+        "timeout_ms"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "condition": {
+          "enum": [
+            "snapshot",
+            "semantic_change"
+          ]
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 2000
+        }
+      }
+    },
     "StatusRequest": {
       "type": "object",
       "required": ["id", "method"],
@@ -588,6 +882,7 @@
           ],
           "additionalProperties": false,
           "properties": {
+            "observation": { "$ref": "#/definitions/AxActionObservation" },
             "action_id": { "type": "string", "minLength": 1, "maxLength": 256 },
             "status": { "const": "dispatched" },
             "strategy": { "const": "ax_semantic" },

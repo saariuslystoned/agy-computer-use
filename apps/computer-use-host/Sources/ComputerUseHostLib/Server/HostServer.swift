@@ -432,7 +432,7 @@ public actor HostServer {
                 let treeDict = try JSONDecoder().decode([String: AnyCodable].self, from: treeData)
                 return IPCResponse(id: request.id, success: true, data: treeDict)
 
-            case "ax_action":
+            case "ax_action", "ax_action_observe":
                 guard let intent = request.params?["intent"]?.rawValue as? String,
                       !intent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                     throw ComputerUseError.ipcError(reason: "intent parameter is required and must be nonblank")
@@ -497,14 +497,35 @@ public actor HostServer {
                     throw ComputerUseError.noninterferingActionUnsupported(action: action)
                 }
 
-                let result = try axActionEngine.performSemanticAction(
-                    snapshotId: snapshotId,
-                    appInstanceRef: appInstanceRef,
-                    elementRef: elementRef,
-                    action: action,
-                    value: value,
-                    topologyVersion: requestedTopologyVersion
-                )
+                var result: AXSemanticActionResultDTO
+                if request.method == "ax_action_observe" {
+                    guard case .dictionary(let observe) = request.params?["observe"],
+                          Set(observe.keys) == Set(["condition", "timeout_ms"]),
+                          case .string(let condition) = observe["condition"],
+                          case .int(let timeoutMs) = observe["timeout_ms"] else {
+                        throw ComputerUseError.ipcError(reason: "observe requires condition and integer timeout_ms only")
+                    }
+                    let options = try AXObservationOptions(condition: condition, timeoutMs: timeoutMs)
+                    guard let engine = axActionEngine as? any AXActionObservationEngine else {
+                        throw ComputerUseError.noninterferingActionUnsupported(action: "ax_action_observe")
+                    }
+                    result = try engine.performSemanticActionAndObserve(
+                        snapshotId: snapshotId, appInstanceRef: appInstanceRef, elementRef: elementRef,
+                        action: action, value: value, topologyVersion: requestedTopologyVersion, options: options
+                    )
+                } else {
+                    guard request.params?["observe"] == nil else {
+                        throw ComputerUseError.ipcError(reason: "Compound observations require ax_action_observe")
+                    }
+                    result = try axActionEngine.performSemanticAction(
+                        snapshotId: snapshotId,
+                        appInstanceRef: appInstanceRef,
+                        elementRef: elementRef,
+                        action: action,
+                        value: value,
+                        topologyVersion: requestedTopologyVersion
+                    )
+                }
                 guard !result.actionId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                       result.status == "dispatched",
                       result.strategy == "ax_semantic",
@@ -520,6 +541,26 @@ public actor HostServer {
                     throw ComputerUseError.axOutcomeUnknown(
                         reason: "AX semantic action engine returned an invalid or unsafe dispatch receipt"
                     )
+                }
+                if let observation = result.observation, observation.state != nil {
+                    do {
+                        let latestTopology = try topologyProvider.getTopology()
+                        guard latestTopology.version == requestedTopologyVersion else {
+                            throw ComputerUseError.staleTopology(current: latestTopology.version, received: requestedTopologyVersion)
+                        }
+                    } catch {
+                        // Dispatch is known to have succeeded; only its follow-up
+                        // observation failed. Do not expose mismatched authority.
+                        result.observation = AXActionObservation(
+                            status: "failed", condition: observation.condition,
+                            attempts: observation.attempts, elapsedMs: observation.elapsedMs,
+                            state: nil, changes: nil,
+                            errorCode: (error as? ComputerUseError)?.errorCode ?? "TARGET_UNREACHABLE"
+                        )
+                    }
+                }
+                guard (request.method == "ax_action_observe") == (result.observation != nil) else {
+                    throw ComputerUseError.axOutcomeUnknown(reason: "AX observation engine returned an incomplete receipt")
                 }
                 let encoder = JSONEncoder()
                 let resultData = try encoder.encode(result)

@@ -3,6 +3,8 @@
 > [!NOTE]
 > The ten-tool surface has two different lease loops. Prefer the exact-element AX loop on shared workstations. The display-coordinate loop uses global HID and is allowed only in an explicitly exclusive GUI session.
 
+For a one-exchange action and fresh state, use the [compound observation option](action-observation.md). The low-level loop below remains supported.
+
 ## Operator-safe AX loop
 
 ```text

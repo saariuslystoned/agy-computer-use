@@ -147,6 +147,7 @@ public struct AXTreeResultDTO: Codable, Equatable, Sendable {
 }
 
 public struct AXSemanticActionResultDTO: Codable, Equatable, Sendable {
+    public var observation: AXActionObservation? = nil
     public let actionId: String
     public let status: String
     public let strategy: String
@@ -160,6 +161,7 @@ public struct AXSemanticActionResultDTO: Codable, Equatable, Sendable {
     public let durationMs: Double
 
     enum CodingKeys: String, CodingKey {
+        case observation
         case actionId = "action_id"
         case status
         case strategy
@@ -390,9 +392,11 @@ private struct RetainedAXSnapshot {
     let leaseDeadline: ContinuousClock.Instant
     let operatorInputEpoch: OperatorInputEpoch
     let elements: [String: RetainedAXElement]
+    let treeResult: AXTreeResultDTO
+    let maxDepth: Int
 }
 
-public final class DefaultAXInspector: AXInspectionEngine, AXSemanticActionEngine, @unchecked Sendable {
+public final class DefaultAXInspector: AXInspectionEngine, AXActionObservationEngine, @unchecked Sendable {
     private static let actionLeaseLifetimeMs = 30_000
     package static let maxSetValueUTF8Bytes = 4_096
     private static let maxRememberedConsumedSnapshots = 64
@@ -432,6 +436,14 @@ public final class DefaultAXInspector: AXInspectionEngine, AXSemanticActionEngin
         operationGate.lockOperation()
         defer { operationGate.unlockOperation() }
 
+        return try inspectTreeLocked(maxDepth: requestedMaxDepth, appId: appId, topologyVersion: topologyVersion)
+    }
+
+    private func inspectTreeLocked(
+        maxDepth requestedMaxDepth: Int, appId: String, topologyVersion: String,
+        observationDeadline: ContinuousClock.Instant? = nil,
+        expectedProcess: RetainedAXSnapshot? = nil
+    ) throws -> AXTreeResultDTO {
         guard isAccessibilityTrusted() else {
             throw ComputerUseError.permissionDenied(permission: "accessibility")
         }
@@ -470,7 +482,16 @@ public final class DefaultAXInspector: AXInspectionEngine, AXSemanticActionEngin
         let appDTO = AXTargetAppDTO(pid: Int(pid), bundleId: app.bundleIdentifier, name: app.localizedName)
         let axApp = AXUIElementCreateApplication(pid)
 
-        AXUIElementSetMessagingTimeout(axApp, 5.0)
+        if let expectedProcess {
+            guard pid == expectedProcess.pid,
+                  app.bundleIdentifier == expectedProcess.bundleId,
+                  Self.matchesProcessBirth(expectedLaunchTime: expectedProcess.launchTime,
+                                           currentLaunchTime: app.launchDate?.timeIntervalSince1970) else {
+                throw ComputerUseError.staleOperation(reason: "Compound observation process identity changed")
+            }
+        }
+        let deadline = observationDeadline ?? (ContinuousClock().now + .seconds(5))
+        AXUIElementSetMessagingTimeout(axApp, observationDeadline == nil ? 5.0 : 0.1)
 
         let maxDepth = min(max(1, requestedMaxDepth), BoundedAXTraverser.defaultMaxDepth)
         let maxNodes = BoundedAXTraverser.defaultMaxNodes
@@ -492,8 +513,6 @@ public final class DefaultAXInspector: AXInspectionEngine, AXSemanticActionEngin
         var visited = Set<AXUIElement>()
         var didTimeout = false
 
-        let deadline = ContinuousClock().now + .seconds(5)
-
         guard let rootNode = DefaultAXInspector.buildNode(
             axElement: axApp,
             currentDepth: 1,
@@ -504,10 +523,14 @@ public final class DefaultAXInspector: AXInspectionEngine, AXSemanticActionEngin
             isTruncated: &isTruncated,
             visited: &visited,
             deadline: deadline,
+            messagingTimeout: observationDeadline == nil ? nil : 0.1,
             didTimeout: &didTimeout,
             retainedElements: &retainedElements
         ), !didTimeout else {
             if didTimeout {
+                if observationDeadline != nil {
+                    throw ComputerUseError.timeout(operation: "AX action observation", seconds: 2)
+                }
                 throw ComputerUseError.targetUnreachable(reason: "AX tree inspection timed out after 5.0 seconds")
             }
             throw ComputerUseError.targetUnreachable(reason: "Failed to extract root AX element for application '\(app.localizedName ?? "\(pid)")'")
@@ -523,19 +546,7 @@ public final class DefaultAXInspector: AXInspectionEngine, AXSemanticActionEngin
             )
         }
 
-        activeSnapshot = RetainedAXSnapshot(
-            snapshotId: snapshotId,
-            appInstanceRef: appInstanceRef,
-            pid: pid,
-            bundleId: app.bundleIdentifier,
-            launchTime: launchTime,
-            topologyVersion: topologyVersion,
-            leaseDeadline: leaseDeadline,
-            operatorInputEpoch: operatorInputEpochAfter,
-            elements: retainedElements
-        )
-
-        return AXTreeResultDTO(
+        let result = AXTreeResultDTO(
             targetApp: appDTO,
             axSnapshotId: snapshotId,
             appInstanceRef: appInstanceRef,
@@ -546,6 +557,30 @@ public final class DefaultAXInspector: AXInspectionEngine, AXSemanticActionEngin
             truncated: isTruncated,
             tree: rootNode
         )
+
+        if let expectedProcess {
+            guard let current = NSRunningApplication(processIdentifier: pid), !current.isTerminated,
+                  current.bundleIdentifier == expectedProcess.bundleId,
+                  Self.matchesProcessBirth(expectedLaunchTime: expectedProcess.launchTime,
+                                           currentLaunchTime: current.launchDate?.timeIntervalSince1970) else {
+                throw ComputerUseError.staleOperation(reason: "Compound observation process changed during inspection")
+            }
+        }
+        activeSnapshot = RetainedAXSnapshot(
+            snapshotId: snapshotId,
+            appInstanceRef: appInstanceRef,
+            pid: pid,
+            bundleId: app.bundleIdentifier,
+            launchTime: launchTime,
+            topologyVersion: topologyVersion,
+            leaseDeadline: leaseDeadline,
+            operatorInputEpoch: operatorInputEpochAfter,
+            elements: retainedElements,
+            treeResult: result,
+            maxDepth: maxDepth
+        )
+
+        return result
     }
 
     public func performSemanticAction(
@@ -559,6 +594,48 @@ public final class DefaultAXInspector: AXInspectionEngine, AXSemanticActionEngin
         operationGate.lockOperation()
         defer { operationGate.unlockOperation() }
 
+        return try performSemanticActionLocked(
+            snapshotId: snapshotId, appInstanceRef: appInstanceRef, elementRef: elementRef,
+            action: action, value: value, topologyVersion: topologyVersion
+        )
+    }
+
+    public func performSemanticActionAndObserve(
+        snapshotId: String, appInstanceRef: String, elementRef: String,
+        action: String, value: String?, topologyVersion: String,
+        options: AXObservationOptions
+    ) throws -> AXSemanticActionResultDTO {
+        operationGate.lockOperation()
+        defer { operationGate.unlockOperation() }
+        // Validate even decoded options before reaching the mutating boundary.
+        let options = try AXObservationOptions(condition: options.condition, timeoutMs: options.timeoutMs)
+        guard let retained = activeSnapshot else {
+            // Preserve the authoritative replay/stale result from the old route.
+            return try performSemanticActionLocked(snapshotId: snapshotId, appInstanceRef: appInstanceRef,
+                elementRef: elementRef, action: action, value: value, topologyVersion: topologyVersion)
+        }
+        return try AXActionObservationRunner.run(
+            baseline: retained.treeResult, options: options,
+            dispatch: {
+                try self.performSemanticActionLocked(snapshotId: snapshotId, appInstanceRef: appInstanceRef,
+                    elementRef: elementRef, action: action, value: value, topologyVersion: topologyVersion)
+            },
+            inspect: { deadline in
+                guard !Self.operatorInputChanged(from: retained.operatorInputEpoch,
+                    to: self.operatorInputEpochProvider.currentEpoch()) else {
+                    throw ComputerUseError.userIntervened(reason: "Input changed after AX dispatch; observation cancelled")
+                }
+                return try self.inspectTreeLocked(maxDepth: retained.maxDepth, appId: String(retained.pid),
+                    topologyVersion: topologyVersion, observationDeadline: deadline, expectedProcess: retained)
+            },
+            invalidate: { self.activeSnapshot = nil }
+        )
+    }
+
+    private func performSemanticActionLocked(
+        snapshotId: String, appInstanceRef: String, elementRef: String,
+        action: String, value: String?, topologyVersion: String
+    ) throws -> AXSemanticActionResultDTO {
         guard isAccessibilityTrusted() else {
             throw ComputerUseError.permissionDenied(permission: "accessibility")
         }
@@ -1279,6 +1356,7 @@ public final class DefaultAXInspector: AXInspectionEngine, AXSemanticActionEngin
         isTruncated: inout Bool,
         visited: inout Set<AXUIElement>,
         deadline: ContinuousClock.Instant,
+        messagingTimeout: Float? = nil,
         didTimeout: inout Bool,
         retainedElements: inout [String: RetainedAXElement]
     ) -> AXNodeDTO? {
@@ -1310,6 +1388,8 @@ public final class DefaultAXInspector: AXInspectionEngine, AXSemanticActionEngin
         var enabledVal: Bool? = nil
         var focusedVal: Bool? = nil
         var boundsRect = AXRect(x: 0, y: 0, width: 0, height: 0)
+
+        if let messagingTimeout { AXUIElementSetMessagingTimeout(axElement, messagingTimeout) }
 
         // Role
         var roleValue: CFTypeRef?
@@ -1498,6 +1578,7 @@ public final class DefaultAXInspector: AXInspectionEngine, AXSemanticActionEngin
                         isTruncated: &isTruncated,
                         visited: &visited,
                         deadline: deadline,
+                        messagingTimeout: messagingTimeout,
                         didTimeout: &didTimeout,
                         retainedElements: &retainedElements
                     ) {
