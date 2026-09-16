@@ -1,0 +1,11 @@
+{
+  "elapsed_s" : 70.003636002540588,
+  "focus_changes" : 0,
+  "focus_read_errors" : 0,
+  "hid_key_down_delta" : 439,
+  "hid_mouse_move_delta" : 0,
+  "pointer_position_changes" : 0,
+  "samples" : 1262,
+  "sentinel_front_samples" : 1262,
+  "target_front_samples" : 0
+}

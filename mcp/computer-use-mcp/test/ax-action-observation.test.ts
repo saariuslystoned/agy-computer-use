@@ -11,7 +11,15 @@ const fixture = (name: string) => JSON.parse(readFileSync(new URL(`../../../../d
 const request = fixture("ax_action_observe_request");
 const response = fixture("ax_action_observe_response");
 async function call(host: HostClient, args: unknown) {
-  const server = createComputerUseServer(host);
+  // Session cleanup is a distinct lifecycle operation. Mutation/read assertions
+  // below continue to count every functional request, including any retry.
+  const server = createComputerUseServer({ request: async (method, params, signal) => {
+    if (method === "ax_session_close") {
+      assert.deepEqual(params, { session_id: "test-session" });
+      return { id: "closed", success: true, data: { closed: true } };
+    }
+    return host.request(method, params, signal);
+  } }, "test-session");
   const client = new Client({ name: "compound-proof", version: "1" }, { capabilities: {} });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -25,7 +33,7 @@ test("compound option returns fresh state through exactly one native operation",
     calls.push({ method, params }); return response;
   } }, request.params);
   assert.equal(result.isError, undefined);
-  assert.deepEqual(calls, [{ method: "ax_action_observe", params: request.params }]);
+  assert.deepEqual(calls, [{ method: "ax_action_observe", params: { ...request.params, session_id: "test-session" } }]);
   const data = JSON.parse((result.content as any)[0].text);
   assert.equal(data.status, "dispatched");
   assert.equal(data.observation.status, "unchanged");

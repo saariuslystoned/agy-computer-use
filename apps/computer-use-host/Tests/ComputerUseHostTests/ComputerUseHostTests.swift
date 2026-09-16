@@ -208,6 +208,10 @@ public final class ComputerUseHostTests: XCTestCase {
         try runSync { try await ComputerUseHostTestRunner.run42_MoveScrollDragPointerValidationStaleCaptureSingleUseLeaseAndUnconditionalRelease() }
     }
 
+    public func test45_ScopedLeaseTable() throws {
+        try runSync { try await ComputerUseHostTestRunner.run45_ScopedLeaseTable() }
+    }
+
     public func test44_TargetScopedIntervention() throws {
         try runSync { try await ComputerUseHostTestRunner.run44_TargetScopedIntervention() }
     }
@@ -219,6 +223,7 @@ public final class ComputerUseHostTests: XCTestCase {
     nonisolated(unsafe) public static let __allTests = [
         ("test43_CompoundAXActionObservation", test43_CompoundAXActionObservation),
         ("test44_TargetScopedIntervention", test44_TargetScopedIntervention),
+        ("test45_ScopedLeaseTable", test45_ScopedLeaseTable),
         ("test01_LengthPrefixedFraming", test01_LengthPrefixedFraming),
         ("test02_OversizedFramingHeaderRejection", test02_OversizedFramingHeaderRejection),
         ("test03_DirectoryPreparation", test03_DirectoryPreparation),

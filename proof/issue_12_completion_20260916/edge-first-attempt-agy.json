@@ -1,0 +1,10 @@
+{
+  "model": "gemini-3.8-flash-high",
+  "effort": "high",
+  "elapsed_s": 301.96,
+  "exit_code": 0,
+  "result": {
+    "completed": false,
+    "blocker_code": "NO_STRUCTURED_FINAL"
+  }
+}

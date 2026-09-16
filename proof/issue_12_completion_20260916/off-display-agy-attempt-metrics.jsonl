@@ -1,0 +1,8 @@
+{"tool": "computer_use_targets", "elapsed_ms": 52.21, "response_bytes": 266, "error": "TARGET_UNREACHABLE", "observation_status": null, "observation_error": null, "attempts": null, "node_count": null}
+{"tool": "computer_use_status", "elapsed_ms": 15.98, "response_bytes": 1779, "error": null, "observation_status": null, "observation_error": null, "attempts": null, "node_count": null}
+{"tool": "computer_use_ax_tree", "elapsed_ms": 43.16, "response_bytes": 8760, "error": null, "observation_status": null, "observation_error": null, "attempts": null, "node_count": 18}
+{"tool": "computer_use_targets", "elapsed_ms": 10.99, "response_bytes": 266, "error": "TARGET_UNREACHABLE", "observation_status": null, "observation_error": null, "attempts": null, "node_count": null}
+{"tool": "computer_use_targets", "elapsed_ms": 33.88, "response_bytes": 11060, "error": null, "observation_status": null, "observation_error": null, "attempts": null, "node_count": null}
+{"tool": "computer_use_ax_tree", "elapsed_ms": 65.39, "response_bytes": 7532, "error": null, "observation_status": null, "observation_error": null, "attempts": null, "node_count": 15}
+{"tool": "computer_use_targets", "elapsed_ms": 16.1, "response_bytes": 813, "error": null, "observation_status": null, "observation_error": null, "attempts": null, "node_count": null}
+{"tool": "computer_use_targets", "elapsed_ms": 15.46, "response_bytes": 267, "error": "TARGET_UNREACHABLE", "observation_status": null, "observation_error": null, "attempts": null, "node_count": null}

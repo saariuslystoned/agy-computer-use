@@ -1,0 +1,32 @@
+[
+  {
+    "log": "aux-native.log",
+    "sha256": "bb80a03bf592caf439f4f2f9103ec51713165373205272499f6230fdf2d92179",
+    "markers": [
+      "Executed 45 native test cases successfully. ALL PASSED."
+    ]
+  },
+  {
+    "log": "accepted-mcp.log",
+    "sha256": "f967f9e97c87f129321a99ca7917a13e9a3765bd838af599e67b0af92de6354f",
+    "markers": [
+      "# tests 70",
+      "# pass 70",
+      "# fail 0"
+    ]
+  },
+  {
+    "log": "aux-build.log",
+    "sha256": "55c5bdcf98aaa5c9404a6723d531ac6c0fbf08314e92685abc5ad11bf2f58182",
+    "markers": [
+      "Build of product 'ComputerUseHost' complete!"
+    ]
+  },
+  {
+    "log": "accepted-readiness.log",
+    "sha256": "ac2cc716a529c4b1b9c0ee9be59e0a9abdf005304cd646f387a8bc78af072b12",
+    "markers": [
+      "ALL PRODUCTION CONFIGURED STDIO READINESS CHECKS PASSED!"
+    ]
+  }
+]

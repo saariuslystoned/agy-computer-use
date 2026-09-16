@@ -1,0 +1,44 @@
+{
+  "id": "targets",
+  "success": true,
+  "data": {
+    "apps": [
+      {
+        "pid": 4242,
+        "bundle_id": "test.app",
+        "name": "Window Fixture"
+      }
+    ],
+    "windows": [
+      {
+        "window_ref": "ax-window-fixture",
+        "target_app": {
+          "pid": 4242,
+          "bundle_id": "test.app",
+          "name": "Window Fixture"
+        },
+        "title": "Disposable window",
+        "bounds": {
+          "x": -100,
+          "y": -200,
+          "width": 50,
+          "height": 50
+        },
+        "display": {
+          "id": 1,
+          "width_points": 1000,
+          "height_points": 800,
+          "scale_factor": 2,
+          "origin_x": -1000,
+          "origin_y": -400,
+          "pixel_width": 2000,
+          "pixel_height": 1600,
+          "rotation": 0
+        },
+        "expires_at_ms": 1721593903000
+      }
+    ],
+    "truncated": false,
+    "topology_version": "top-sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  }
+}

@@ -3867,6 +3867,7 @@ public struct ComputerUseHostTestRunner {
         try await runWithWatchdog(name: "test41_AXTreeInspectionTargetingRedactionCapsAndTruncation") { try await run41_AXTreeInspectionTargetingRedactionCapsAndTruncation() }
         try await runWithWatchdog(name: "test42_MoveScrollDragPointerValidationStaleCaptureSingleUseLeaseAndUnconditionalRelease") { try await run42_MoveScrollDragPointerValidationStaleCaptureSingleUseLeaseAndUnconditionalRelease() }
         try await runWithWatchdog(name: "test44_TargetScopedIntervention") { try await run44_TargetScopedIntervention() }
+        try await runWithWatchdog(name: "test45_ScopedLeaseTable") { try await run45_ScopedLeaseTable() }
         try await runWithWatchdog(name: "test43_CompoundAXActionObservation") { try await run43_CompoundAXActionObservation() }
         fputs("[ComputerUseHostTestRunner] Executed \(completedTests.value) native test cases successfully. ALL PASSED.\n", stderr)
     }
@@ -7679,6 +7680,60 @@ extension ComputerUseHostTestRunner {
         assertTrue(lateInvalidated)
         assertEqual(late.observation?.state, nil)
 
+        let recovered = try AXApplicationChildren.read(role: "AXApplication",
+            children: { (.success, [Int]()) }, windows: { (.success, []) },
+            mainWindow: { (.success, 42) }, focusedWindow: { (.success, 42) }, equal: ==)
+        assertEqual(recovered.elements, [42], "Recover the explicit app's live window when enumeration is empty")
+        assertTrue(recovered.incomplete, "Omitted siblings/menu bars must remain visible as truncation")
+        let ordinary = try AXApplicationChildren.read(role: "AXApplication",
+            children: { (.success, [7]) }, windows: { assertTrue(false); return (.success, []) },
+            mainWindow: { assertTrue(false); return (.success, 42) }, focusedWindow: { (.success, 42) }, equal: ==)
+        assertEqual(ordinary.elements, [7]); assertTrue(!ordinary.incomplete)
+        for error in [AXError.cannotComplete, .invalidUIElement] {
+            do {
+                _ = try AXApplicationChildren.read(role: "AXApplication",
+                    children: { (error, [Int]()) }, windows: { (.success, [42]) },
+                    mainWindow: { (.success, 42) }, focusedWindow: { (.success, 42) }, equal: ==)
+                assertTrue(false, "Read errors must not be disguised by fallback")
+            } catch let failure as ComputerUseError {
+                assertEqual(failure.errorCode, error == .cannotComplete ? "TIMEOUT" : "STALE_OPERATION")
+            }
+        }
+
+        // A transient empty application hierarchy is not evidence that the form
+        // disappeared. The production runner must re-read without re-dispatching.
+        func appTree(_ generation: Int, populated: Bool) -> AXTreeResultDTO {
+            AXTreeResultDTO(targetApp: baseline.targetApp,
+                axSnapshotId: "app-snapshot-\(generation)", appInstanceRef: "instance-\(generation)",
+                expiresAtMs: 30_000, topologyVersion: topology, nodeCount: populated ? 2 : 1,
+                maxDepthReached: populated ? 2 : 1, truncated: false,
+                tree: AXNodeDTO(id: "app", role: "AXApplication", bounds: baseline.tree.bounds,
+                    children: populated ? [tree(generation, value: generation == 0 ? "before" : "after").tree] : nil))
+        }
+        for persistent in [false, true] {
+            var calls = 0
+            var readCount = 0
+            var discarded = 0
+            let missing = try AXActionObservationRunner.run(baseline: appTree(0, populated: true), options: snapshot,
+                dispatch: { calls += 1; return receipt("set_value") },
+                inspect: { _ in readCount += 1; return appTree(readCount, populated: !persistent && readCount > 1) },
+                invalidate: { discarded += 1 }, now: { clock.now }, wait: { clock.advance(by: .milliseconds($0)) })
+            assertEqual(calls, 1, "Incomplete observations must never repeat the setter")
+            assertEqual(missing.observation?.status, persistent ? "timed_out" : "changed")
+            assertTrue(discarded > 0, "Root-only candidates must lose authority")
+            if persistent {
+                assertEqual(missing.observation?.state, nil)
+                assertEqual(missing.observation?.changes, nil)
+                assertEqual(readCount, 5, "The original observation budget bounds all reinspection")
+            } else {
+                assertEqual(readCount, 2)
+                assertEqual(missing.observation?.state?.nodeCount, 2)
+            }
+        }
+        let shallow = try AXActionObservationRunner.run(baseline: appTree(0, populated: false), options: snapshot,
+            dispatch: { receipt() }, inspect: { _ in appTree(1, populated: false) }, invalidate: {})
+        assertEqual(shallow.observation?.status, "unchanged", "An intentionally shallow baseline remains valid")
+
         let many = (0..<30).map { AXNodeDTO(id: "child-\($0)", role: "AXStaticText", value: "safe", bounds: AXRect(x: 0, y: 0, width: 1, height: 1)) }
         let summary = AXChangeSummary.compare(baseline, tree(1, children: many))
         assertEqual(summary.added, 30)
@@ -7858,5 +7913,151 @@ extension ComputerUseHostTestRunner {
             guard case .axOutcomeUnknown = error else { throw error }
         }
         assertEqual(mutations, 1, "An uncertain mutation must never repeat")
+    }
+}
+
+extension ComputerUseHostTestRunner {
+    public static func run45_ScopedLeaseTable() async throws {
+        try AXWindowSheetGuard.requireNone(status: .success, roles: [])
+        try AXWindowSheetGuard.requireNone(status: .success, roles: ["AXTextField", "AXGroup"])
+        for (status, roles): (AXError, [String]?) in [(.success, ["AXSheet"]), (.success, nil),
+            (.cannotComplete, nil), (.invalidUIElement, nil), (.attributeUnsupported, nil), (.noValue, nil),
+            (.success, Array(repeating: "AXGroup", count: 501))] {
+            do { try AXWindowSheetGuard.requireNone(status: status, roles: roles); assertTrue(false, "Attached or unreadable sheets must fail closed") }
+            catch let error as ComputerUseError { assertEqual(error.errorCode, "STALE_OPERATION") }
+        }
+        // The production route must return fresh bound state, and revoke its
+        // candidate on capture, identity, timing and AX-continuation failures.
+        for mode in ["ok", "capture-error", "image-mismatch", "finish-error", "identity-mismatch", "old-timestamp"] {
+            let fixture = try WindowObservationFixtureEngine(mode: mode)
+            let server = HostServer(topologyProvider: FakeDisplayTopologyProvider(topology: fixture.topology),
+                windowCaptureEngine: fixture, axEngine: fixture)
+            let response = await server.handleRequest(IPCRequest(id: mode, method: "window_observe", params: [
+                "app_id": .string("4242"), "window_ref": .string("ax-window-fixture"), "session_id": .string("owner")]))
+            assertEqual(response.success, mode == "ok", "Window route must discriminate \(mode)")
+            assertEqual(fixture.invalidations, mode == "ok" ? 0 : 1)
+            assertEqual(fixture.captures, 1)
+            if mode == "ok" {
+                let dto = try JSONDecoder().decode(WindowObservationDTO.self, from: JSONEncoder().encode(response.data!))
+                assertEqual(dto.state.axSnapshotId, "window-snapshot-new")
+                assertEqual(dto.screenPointsPerPixelX, 0.5)
+                assertEqual(dto.displayNormalizedOffsetX, 900)
+                assertEqual(dto.timing.atomic, false)
+            } else { assertTrue(response.data == nil, "Failed bracket must return neither pixels nor authority") }
+            let missingSession = await server.handleRequest(IPCRequest(id: "missing", method: "window_observe", params: ["app_id": .string("4242")]))
+            assertEqual(missingSession.success, false)
+            assertEqual(fixture.captures, 1, "Invalid scope must fail before capture")
+            let closed = await server.handleRequest(IPCRequest(id: "close", method: "ax_session_close", params: ["session_id": .string("owner")]))
+            assertTrue(closed.success)
+            assertEqual(fixture.closedSession, "owner")
+        }
+
+        // Exercise the actual host-used geometry boundary with negative origins,
+        // two displays, movement, empty/off-display and invalid pixel rejection.
+        let primary = DisplayInfo(id: 1, widthPoints: 1000, heightPoints: 800, scaleFactor: 2)
+        let secondary = DisplayInfo(id: 2, widthPoints: 800, heightPoints: 600, scaleFactor: 1,
+            originX: -800, originY: -600)
+        let topology = DisplayTopology(version: "fixture", primaryDisplayId: 1, displays: [primary, secondary])
+        let rect = AXRect(x: -700, y: -500, width: 300, height: 200)
+        assertEqual(try WindowGeometry.display(for: rect, topology: topology).id, 2)
+        assertEqual(try WindowGeometry.display(for: AXRect(x: 200, y: 100, width: 300, height: 200), topology: topology).id, 1)
+        assertEqual(try WindowGeometry.pixelToScreen(x: 0, y: 0, bounds: rect, pixelWidth: 600, pixelHeight: 400), Point2D(x: -700, y: -500))
+        assertEqual(try WindowGeometry.pixelToScreen(x: 100, y: 100, bounds: rect, pixelWidth: 600, pixelHeight: 400), Point2D(x: -650, y: -450))
+        do { _ = try WindowGeometry.pixelToScreen(x: 600, y: 0, bounds: rect, pixelWidth: 600, pixelHeight: 400); assertTrue(false) }
+        catch let error as ComputerUseError { assertEqual(error.errorCode, "TARGET_UNREACHABLE") }
+        for rect in [AXRect(x: 2000, y: 2000, width: 20, height: 20), AXRect(x: 0, y: 0, width: 0, height: 20)] {
+            do { _ = try WindowGeometry.display(for: rect, topology: topology); assertTrue(false) }
+            catch let error as ComputerUseError { assertEqual(error.errorCode, "TARGET_UNREACHABLE") }
+        }
+        let start = ContinuousClock().now
+        let a = AXLeaseTarget(pid: 101, windowID: 1)
+        let b = AXLeaseTarget(pid: 102, windowID: 2)
+        let a2 = AXLeaseTarget(pid: 101, windowID: 3)
+        var store = AXLeaseTable<String>(capacity: 3)
+        func put(_ id: String, _ session: String, _ target: AXLeaseTarget) throws {
+            try store.insert(id: id, sessionID: session, target: target,
+                deadline: start + .seconds(30), value: id, now: start)
+        }
+        try put("a", "one", a)
+        try put("b", "two", b)
+        assertEqual(store.value(id: "a", sessionID: "one", now: start), "a", "Unrelated inspection must preserve authority")
+        assertEqual(store.value(id: "a", sessionID: "two", now: start), nil, "Session cannot consume another owner's lease")
+        try put("a-other-owner", "two", a)
+        do { try put("over-capacity", "three", a2); assertTrue(false, "Capacity must fail closed") }
+        catch let error as ComputerUseError { assertEqual(error.errorCode, "TARGET_UNREACHABLE") }
+        store.consume(target: a)
+        assertEqual(store.value(id: "a", sessionID: "one", now: start), nil)
+        assertEqual(store.value(id: "a-other-owner", sessionID: "two", now: start), nil, "First writer fences competing target authority")
+        assertEqual(store.value(id: "b", sessionID: "two", now: start), "b")
+        try put("a-new", "one", a)
+        try put("second-window", "one", a2)
+        store.consume(target: a)
+        assertEqual(store.value(id: "second-window", sessionID: "one", now: start), "second-window")
+        store.consume(target: AXLeaseTarget(pid: 101, windowID: nil))
+        assertEqual(store.value(id: "second-window", sessionID: "one", now: start), nil, "Legacy app authority conflicts with every window in that app")
+        try put("replace", "two", b)
+        assertEqual(store.value(id: "b", sessionID: "two", now: start), nil)
+        store.remove(sessionID: "one")
+        assertEqual(store.value(id: "replace", sessionID: "two", now: start), "replace")
+        assertEqual(store.value(id: "replace", sessionID: "two", now: start + .seconds(30)), nil)
+        assertEqual(store.count, 0, "Expiry must release stored values and monitors")
+        try put("closed", "one", a)
+        store.remove(sessionID: "one")
+        assertEqual(store.count, 0)
+    }
+}
+
+private final class WindowObservationFixtureEngine: AXWindowInspectionEngine, WindowCaptureEngine, @unchecked Sendable {
+    let dto: WindowObservationDTO
+    let mode: String
+    var invalidations = 0
+    var captures = 0
+    var closedSession = ""
+    var topology: DisplayTopology { DisplayTopology(version: dto.state.topologyVersion,
+        primaryDisplayId: dto.window.display.id, displays: [dto.window.display]) }
+    init(mode: String) throws {
+        self.mode = mode
+        var root = URL(fileURLWithPath: #file)
+        for _ in 0..<5 { root.deleteLastPathComponent() }
+        let raw = try Data(contentsOf: root.appendingPathComponent("docs/fixtures/window_observe_response.json"))
+        let envelope = try JSONDecoder().decode(IPCResponse.self, from: raw)
+        dto = try JSONDecoder().decode(WindowObservationDTO.self, from: JSONEncoder().encode(envelope.data!))
+    }
+    var isAvailable: Bool { true }
+    func isAccessibilityTrusted() -> Bool { true }
+    func inspectTree(maxDepth: Int, appId: String, topologyVersion: String) throws -> AXTreeResultDTO { dto.state }
+    func inspectTree(maxDepth: Int, appId: String, topologyVersion: String, sessionID: String) throws -> AXTreeResultDTO { dto.state }
+    func closeSession(_ sessionID: String) { closedSession = sessionID }
+    func discoverTargets(appID: String?, sessionID: String, topology: DisplayTopology) throws -> AXTargetDiscovery {
+        throw ComputerUseError.targetUnreachable(reason: "Not a discovery fixture")
+    }
+    func inspectWindow(appID: String, windowRef: String?, sessionID: String, maxDepth: Int,
+        topology: DisplayTopology) throws -> (AXWindowDescriptor, AXTreeResultDTO, WindowCaptureRequest) {
+        assertEqual(sessionID, "owner")
+        var object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(dto.state)) as! [String: Any]
+        object["ax_snapshot_id"] = "window-snapshot-before"; object["app_instance_ref"] = "window-app-before"
+        let before = try JSONDecoder().decode(AXTreeResultDTO.self, from: JSONSerialization.data(withJSONObject: object))
+        let request = WindowCaptureRequest(windowID: 7, pid: 4242, bounds: dto.window.bounds, display: dto.window.display, topologyVersion: topology.version)
+        return (dto.window, before, request)
+    }
+    func finishWindowObservation(windowRef: String, sessionID: String, before: AXTreeResultDTO,
+        bounds: AXRect, maxDepth: Int, topology: DisplayTopology) throws -> AXTreeResultDTO {
+        if mode == "finish-error" { throw ComputerUseError.userIntervened(reason: "Fixture takeover during capture") }
+        var after = dto.state
+        if mode == "identity-mismatch" { after.windowRef = "other-window" }
+        return after
+    }
+    func invalidateWindowObservation(windowRef: String, sessionID: String) { invalidations += 1 }
+    func captureWindow(_ request: WindowCaptureRequest) async throws -> CaptureFrameDTO {
+        captures += 1
+        assertEqual(request.pid, 4242)
+        if mode == "capture-error" { throw ComputerUseError.targetUnreachable(reason: "Fixture capture failure") }
+        let image = dto.image
+        return CaptureFrameDTO(captureId: image.captureId,
+            timestamp: mode == "old-timestamp" ? image.timestamp : Int64(Date().timeIntervalSince1970 * 1000),
+            topologyVersion: image.topologyVersion, displayId: mode == "image-mismatch" ? 2 : image.displayId,
+            widthPoints: image.widthPoints, heightPoints: image.heightPoints, scaleFactor: image.scaleFactor,
+            pixelWidth: image.pixelWidth, pixelHeight: image.pixelHeight, imageFormat: image.imageFormat,
+            imageDataBase64: image.imageDataBase64, imageByteLength: image.imageByteLength, imageSha256: image.imageSha256)
     }
 }

@@ -3,23 +3,29 @@
   "title": "ComputerUseIPCProtocol",
   "description": "IPC request and response schemas for display observation, explicit AX inspection, operator-safe semantic AX action, and exclusive global-HID actions",
   "oneOf": [
-    { "$ref": "#/definitions/StatusRequest" },
-    { "$ref": "#/definitions/ObserveRequest" },
-    { "$ref": "#/definitions/AxTreeRequest" },
-    { "$ref": "#/definitions/AxActionRequest" },
-    { "$ref": "#/definitions/AxActionObserveRequest" },
-    { "$ref": "#/definitions/ClickRequest" },
-    { "$ref": "#/definitions/MoveRequest" },
-    { "$ref": "#/definitions/TypeRequest" },
-    { "$ref": "#/definitions/ShortcutRequest" },
-    { "$ref": "#/definitions/ScrollRequest" },
-    { "$ref": "#/definitions/DragRequest" },
-    { "$ref": "#/definitions/StatusResponse" },
-    { "$ref": "#/definitions/ObserveResponse" },
-    { "$ref": "#/definitions/AxTreeResponse" },
-    { "$ref": "#/definitions/AxActionResponse" },
-    { "$ref": "#/definitions/ActionResultResponse" },
-    { "$ref": "#/definitions/ErrorResponse" }
+    {"$ref": "#/definitions/StatusRequest"},
+    {"$ref": "#/definitions/ObserveRequest"},
+    {"$ref": "#/definitions/AxTreeRequest"},
+    {"$ref": "#/definitions/AxActionRequest"},
+    {"$ref": "#/definitions/AxActionObserveRequest"},
+    {"$ref": "#/definitions/ClickRequest"},
+    {"$ref": "#/definitions/MoveRequest"},
+    {"$ref": "#/definitions/TypeRequest"},
+    {"$ref": "#/definitions/ShortcutRequest"},
+    {"$ref": "#/definitions/ScrollRequest"},
+    {"$ref": "#/definitions/DragRequest"},
+    {"$ref": "#/definitions/StatusResponse"},
+    {"$ref": "#/definitions/ObserveResponse"},
+    {"$ref": "#/definitions/AxTreeResponse"},
+    {"$ref": "#/definitions/AxActionResponse"},
+    {"$ref": "#/definitions/ActionResultResponse"},
+    {"$ref": "#/definitions/ErrorResponse"},
+    {"$ref": "#/definitions/TargetsRequest"},
+    {"$ref": "#/definitions/WindowObserveRequest"},
+    {"$ref": "#/definitions/AXSessionCloseRequest"},
+    {"$ref": "#/definitions/TargetsResponse"},
+    {"$ref": "#/definitions/WindowObserveResponse"},
+    {"$ref": "#/definitions/AXSessionCloseResponse"}
   ],
   "definitions": {
     "AxActionObserveRequest": {
@@ -87,6 +93,12 @@
             },
             "observe": {
               "$ref": "#/definitions/AxObservationOptions"
+            },
+            "session_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_-]+$"
             }
           },
           "allOf": [
@@ -342,18 +354,42 @@
     },
     "AxTreeRequest": {
       "type": "object",
-      "required": ["id", "method", "params"],
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
       "additionalProperties": false,
       "properties": {
-        "id": { "type": "string", "minLength": 1 },
-        "method": { "const": "ax_tree" },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "method": {
+          "const": "ax_tree"
+        },
         "params": {
           "type": "object",
-          "required": ["app_id"],
+          "required": [
+            "app_id"
+          ],
           "additionalProperties": false,
           "properties": {
-            "app_id": { "type": "string", "minLength": 1 },
-            "max_depth": { "type": "integer", "minimum": 1, "maximum": 10 }
+            "app_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "max_depth": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10
+            },
+            "session_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_-]+$"
+            }
           }
         }
       }
@@ -622,71 +658,194 @@
     },
     "AxTreeResponse": {
       "type": "object",
-      "required": ["id", "success", "data"],
+      "required": [
+        "id",
+        "success",
+        "data"
+      ],
       "additionalProperties": false,
       "properties": {
-        "id": { "type": "string", "minLength": 1 },
-        "success": { "const": true },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "success": {
+          "const": true
+        },
         "data": {
           "type": "object",
-          "required": ["target_app", "ax_snapshot_id", "app_instance_ref", "expires_at_ms", "topology_version", "node_count", "max_depth_reached", "truncated", "tree"],
+          "required": [
+            "target_app",
+            "ax_snapshot_id",
+            "app_instance_ref",
+            "expires_at_ms",
+            "topology_version",
+            "node_count",
+            "max_depth_reached",
+            "truncated",
+            "tree"
+          ],
           "additionalProperties": false,
           "properties": {
             "target_app": {
               "type": "object",
-              "required": ["pid"],
+              "required": [
+                "pid"
+              ],
               "additionalProperties": false,
               "properties": {
-                "pid": { "type": "integer", "minimum": 1 },
-                "bundle_id": { "type": "string" },
-                "name": { "type": "string" }
+                "pid": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "bundle_id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
               }
             },
-            "intervention_scope": { "enum": ["app", "global"] },
-            "ax_snapshot_id": { "type": "string", "minLength": 1, "maxLength": 256 },
-            "app_instance_ref": { "type": "string", "minLength": 1, "maxLength": 256 },
-            "expires_at_ms": { "type": "integer", "minimum": 1 },
-            "topology_version": { "type": "string", "pattern": "^top-sha256-[0-9a-f]{64}$" },
-            "node_count": { "type": "integer", "minimum": 0 },
-            "max_depth_reached": { "type": "integer", "minimum": 0 },
-            "truncated": { "type": "boolean" },
-            "tree": { "$ref": "#/definitions/AxNode" }
+            "intervention_scope": {
+              "enum": [
+                "app",
+                "global"
+              ]
+            },
+            "ax_snapshot_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "app_instance_ref": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "expires_at_ms": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "topology_version": {
+              "type": "string",
+              "pattern": "^top-sha256-[0-9a-f]{64}$"
+            },
+            "node_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "max_depth_reached": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "truncated": {
+              "type": "boolean"
+            },
+            "tree": {
+              "$ref": "#/definitions/AxNode"
+            },
+            "window_ref": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
           }
         }
       }
     },
     "AxActionRequest": {
       "type": "object",
-      "required": ["id", "method", "params"],
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
       "additionalProperties": false,
       "properties": {
-        "id": { "type": "string", "minLength": 1 },
-        "method": { "const": "ax_action" },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "method": {
+          "const": "ax_action"
+        },
         "params": {
           "type": "object",
-          "required": ["ax_snapshot_id", "app_instance_ref", "element_ref", "topology_version", "action", "intent"],
+          "required": [
+            "ax_snapshot_id",
+            "app_instance_ref",
+            "element_ref",
+            "topology_version",
+            "action",
+            "intent"
+          ],
           "additionalProperties": false,
           "properties": {
-            "ax_snapshot_id": { "type": "string", "minLength": 1, "maxLength": 256 },
-            "app_instance_ref": { "type": "string", "minLength": 1, "maxLength": 256 },
-            "element_ref": { "type": "string", "minLength": 1, "maxLength": 256 },
-            "topology_version": { "type": "string", "pattern": "^top-sha256-[0-9a-f]{64}$" },
-            "action": { "enum": ["press", "set_value"] },
+            "ax_snapshot_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "app_instance_ref": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "element_ref": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "topology_version": {
+              "type": "string",
+              "pattern": "^top-sha256-[0-9a-f]{64}$"
+            },
+            "action": {
+              "enum": [
+                "press",
+                "set_value"
+              ]
+            },
             "value": {
               "type": "string",
               "maxLength": 4096,
               "description": "Required only for set_value; runtime validation enforces well-formed UTF-8 of at most 4096 bytes"
             },
-            "intent": { "type": "string", "minLength": 1 }
+            "intent": {
+              "type": "string",
+              "minLength": 1
+            },
+            "session_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_-]+$"
+            }
           },
           "allOf": [
             {
               "if": {
-                "properties": { "action": { "const": "set_value" } },
-                "required": ["action"]
+                "properties": {
+                  "action": {
+                    "const": "set_value"
+                  }
+                },
+                "required": [
+                  "action"
+                ]
               },
-              "then": { "required": ["value"] },
-              "else": { "not": { "required": ["value"] } }
+              "then": {
+                "required": [
+                  "value"
+                ]
+              },
+              "else": {
+                "not": {
+                  "required": [
+                    "value"
+                  ]
+                }
+              }
             }
           ]
         }
@@ -917,6 +1076,497 @@
           }
         }
       }
+    },
+    "WindowRect": {
+      "type": "object",
+      "properties": {
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        },
+        "width": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "height": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "width",
+        "height"
+      ],
+      "additionalProperties": false
+    },
+    "WindowDescriptor": {
+      "type": "object",
+      "properties": {
+        "window_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "target_app": {
+          "type": "object",
+          "required": [
+            "pid"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "pid": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "bundle_id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          }
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "bounds": {
+          "$ref": "#/definitions/WindowRect"
+        },
+        "display": {
+          "$ref": "#/definitions/DisplayInfo"
+        },
+        "expires_at_ms": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "window_ref",
+        "target_app",
+        "title",
+        "bounds",
+        "display",
+        "expires_at_ms"
+      ],
+      "additionalProperties": false
+    },
+    "TargetsData": {
+      "type": "object",
+      "properties": {
+        "apps": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "type": "object",
+            "required": [
+              "pid"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "pid": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "bundle_id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "windows": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/definitions/WindowDescriptor"
+          }
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "topology_version": {
+          "type": "string",
+          "pattern": "^top-sha256-[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "apps",
+        "windows",
+        "truncated",
+        "topology_version"
+      ],
+      "additionalProperties": false
+    },
+    "WindowImage": {
+      "type": "object",
+      "required": [
+        "capture_id",
+        "timestamp",
+        "topology_version",
+        "display_id",
+        "width_points",
+        "height_points",
+        "scale_factor",
+        "pixel_width",
+        "pixel_height",
+        "image_format",
+        "image_data_base64",
+        "image_byte_length",
+        "image_sha256"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "capture_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "timestamp": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "topology_version": {
+          "type": "string",
+          "pattern": "^top-sha256-[0-9a-f]{64}$"
+        },
+        "display_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "width_points": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "height_points": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "scale_factor": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "pixel_width": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "pixel_height": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "image_format": {
+          "const": "jpeg"
+        },
+        "image_data_base64": {
+          "type": "string",
+          "minLength": 1
+        },
+        "image_byte_length": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10485760
+        },
+        "image_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "WindowObserveData": {
+      "type": "object",
+      "properties": {
+        "window": {
+          "$ref": "#/definitions/WindowDescriptor"
+        },
+        "state": {
+          "$ref": "#/definitions/AxTreeResponse/properties/data"
+        },
+        "image": {
+          "$ref": "#/definitions/WindowImage"
+        },
+        "timing": {
+          "type": "object",
+          "properties": {
+            "ax_before_ms": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "image_started_ms": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "image_completed_ms": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "ax_after_ms": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "atomic": {
+              "const": false
+            }
+          },
+          "required": [
+            "ax_before_ms",
+            "image_started_ms",
+            "image_completed_ms",
+            "ax_after_ms",
+            "atomic"
+          ],
+          "additionalProperties": false
+        },
+        "consistency": {
+          "const": "stable_bracket"
+        },
+        "image_redaction": {
+          "const": "none"
+        },
+        "ax_redaction": {
+          "const": "secure_values"
+        },
+        "screen_points_per_pixel_x": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "screen_points_per_pixel_y": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "display_normalized_scale_x": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "display_normalized_scale_y": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "display_normalized_offset_x": {
+          "type": "number"
+        },
+        "display_normalized_offset_y": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "window",
+        "state",
+        "image",
+        "timing",
+        "consistency",
+        "image_redaction",
+        "ax_redaction",
+        "screen_points_per_pixel_x",
+        "screen_points_per_pixel_y",
+        "display_normalized_scale_x",
+        "display_normalized_scale_y",
+        "display_normalized_offset_x",
+        "display_normalized_offset_y"
+      ],
+      "additionalProperties": false
+    },
+    "TargetsRequest": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "method": {
+          "const": "targets"
+        },
+        "params": {
+          "type": "object",
+          "properties": {
+            "app_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "session_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_-]+$"
+            }
+          },
+          "required": [
+            "session_id"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "additionalProperties": false
+    },
+    "WindowObserveRequest": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "method": {
+          "const": "window_observe"
+        },
+        "params": {
+          "type": "object",
+          "properties": {
+            "app_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "window_ref": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "session_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_-]+$"
+            },
+            "max_depth": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10
+            }
+          },
+          "required": [
+            "app_id",
+            "session_id"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "additionalProperties": false
+    },
+    "AXSessionCloseRequest": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "method": {
+          "const": "ax_session_close"
+        },
+        "params": {
+          "type": "object",
+          "properties": {
+            "session_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_-]+$"
+            }
+          },
+          "required": [
+            "session_id"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "additionalProperties": false
+    },
+    "TargetsResponse": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "success": {
+          "const": true
+        },
+        "data": {
+          "$ref": "#/definitions/TargetsData"
+        }
+      },
+      "required": [
+        "id",
+        "success",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "WindowObserveResponse": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "success": {
+          "const": true
+        },
+        "data": {
+          "$ref": "#/definitions/WindowObserveData"
+        }
+      },
+      "required": [
+        "id",
+        "success",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "AXSessionCloseResponse": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "success": {
+          "const": true
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "closed": {
+              "const": true
+            }
+          },
+          "required": [
+            "closed"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "id",
+        "success",
+        "data"
+      ],
+      "additionalProperties": false
     }
   }
 }

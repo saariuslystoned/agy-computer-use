@@ -1,0 +1,16 @@
+{"tool": "computer_use_status", "elapsed_ms": 20.56, "response_bytes": 1779, "error": null, "observation_status": null, "observation_error": null, "attempts": null, "node_count": null}
+{"tool": "computer_use_ax_tree", "elapsed_ms": 41.2, "response_bytes": 8755, "error": null, "observation_status": null, "observation_error": null, "attempts": null, "node_count": 18}
+{"tool": "computer_use_ax_action", "elapsed_ms": 109.67, "response_bytes": 654, "error": null, "observation_status": null, "observation_error": null, "attempts": null, "node_count": null}
+{"tool": "computer_use_ax_tree", "elapsed_ms": 49.37, "response_bytes": 8755, "error": null, "observation_status": null, "observation_error": null, "attempts": null, "node_count": 18}
+{"tool": "computer_use_ax_action", "elapsed_ms": 111.74, "response_bytes": 654, "error": null, "observation_status": null, "observation_error": null, "attempts": null, "node_count": null}
+{"tool": "computer_use_ax_tree", "elapsed_ms": 40.38, "response_bytes": 8755, "error": null, "observation_status": null, "observation_error": null, "attempts": null, "node_count": 18}
+{"tool": "computer_use_ax_action", "elapsed_ms": 106.84, "response_bytes": 654, "error": null, "observation_status": null, "observation_error": null, "attempts": null, "node_count": null}
+{"tool": "computer_use_ax_tree", "elapsed_ms": 41.64, "response_bytes": 8757, "error": null, "observation_status": null, "observation_error": null, "attempts": null, "node_count": 18}
+{"tool": "computer_use_ax_action", "elapsed_ms": 110.55, "response_bytes": 655, "error": null, "observation_status": null, "observation_error": null, "attempts": null, "node_count": null}
+{"tool": "computer_use_ax_tree", "elapsed_ms": 40.48, "response_bytes": 8758, "error": null, "observation_status": null, "observation_error": null, "attempts": null, "node_count": 18}
+{"tool": "computer_use_ax_action", "elapsed_ms": 105.99, "response_bytes": 655, "error": null, "observation_status": null, "observation_error": null, "attempts": null, "node_count": null}
+{"tool": "computer_use_ax_tree", "elapsed_ms": 39.57, "response_bytes": 8756, "error": null, "observation_status": null, "observation_error": null, "attempts": null, "node_count": 18}
+{"tool": "computer_use_ax_action", "elapsed_ms": 5.98, "response_bytes": 657, "error": null, "observation_status": null, "observation_error": null, "attempts": null, "node_count": null}
+{"tool": "computer_use_ax_tree", "elapsed_ms": 42.28, "response_bytes": 8761, "error": null, "observation_status": null, "observation_error": null, "attempts": null, "node_count": 18}
+{"tool": "computer_use_ax_action", "elapsed_ms": 12.05, "response_bytes": 657, "error": null, "observation_status": null, "observation_error": null, "attempts": null, "node_count": null}
+{"tool": "computer_use_ax_tree", "elapsed_ms": 55.91, "response_bytes": 8761, "error": null, "observation_status": null, "observation_error": null, "attempts": null, "node_count": 18}

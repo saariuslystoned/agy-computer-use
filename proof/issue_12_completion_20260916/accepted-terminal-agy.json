@@ -1,0 +1,11 @@
+{
+  "model": "gemini-3.8-flash-high",
+  "effort": "high",
+  "elapsed_s": 113.86,
+  "exit_code": 0,
+  "result": {
+    "window_observation_ok": true,
+    "observation_failure_ok": true,
+    "action_count": 1
+  }
+}

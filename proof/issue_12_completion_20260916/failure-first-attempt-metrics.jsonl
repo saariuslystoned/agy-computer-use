@@ -1,0 +1,2 @@
+{"tool": "computer_use_ax_tree", "elapsed_ms": 65.07, "response_bytes": 7964, "error": null, "observation_status": null, "observation_error": null, "attempts": null, "node_count": 16}
+{"tool": "computer_use_ax_action", "elapsed_ms": 294.89, "response_bytes": 850, "error": null, "observation_status": "failed", "observation_error": "USER_INTERVENED", "attempts": 3, "node_count": null}

@@ -1,0 +1,13 @@
+{"tool": "computer_use_status", "elapsed_ms": 21.8, "response_bytes": 1779, "error": null, "observation_status": null, "observation_error": null, "attempts": null, "node_count": null}
+{"tool": "computer_use_ax_tree", "elapsed_ms": 82.75, "response_bytes": 8760, "error": null, "observation_status": null, "observation_error": null, "attempts": null, "node_count": 18}
+{"tool": "computer_use_ax_action", "elapsed_ms": 51.18, "response_bytes": 10811, "error": null, "observation_status": "unchanged", "observation_error": null, "attempts": 1, "node_count": 18}
+{"tool": "computer_use_ax_action", "elapsed_ms": 513.26, "response_bytes": 845, "error": null, "observation_status": "timed_out", "observation_error": "TIMEOUT", "attempts": 4, "node_count": null}
+{"tool": "computer_use_ax_tree", "elapsed_ms": 55.86, "response_bytes": 8760, "error": null, "observation_status": null, "observation_error": null, "attempts": null, "node_count": 18}
+{"tool": "computer_use_ax_action", "elapsed_ms": 4.27, "response_bytes": 283, "error": "STALE_AX_SNAPSHOT", "observation_status": null, "observation_error": null, "attempts": null, "node_count": null}
+{"tool": "computer_use_ax_tree", "elapsed_ms": 45.56, "response_bytes": 8761, "error": null, "observation_status": null, "observation_error": null, "attempts": null, "node_count": 18}
+{"tool": "computer_use_ax_action", "elapsed_ms": 56.89, "response_bytes": 10848, "error": null, "observation_status": "changed", "observation_error": null, "attempts": 1, "node_count": 18}
+{"tool": "computer_use_ax_tree", "elapsed_ms": 11.69, "response_bytes": 302, "error": "STALE_OPERATION", "observation_status": null, "observation_error": null, "attempts": null, "node_count": null}
+{"tool": "computer_use_targets", "elapsed_ms": 38.63, "response_bytes": 11061, "error": null, "observation_status": null, "observation_error": null, "attempts": null, "node_count": null}
+{"tool": "computer_use_targets", "elapsed_ms": 6.49, "response_bytes": 280, "error": "STALE_OPERATION", "observation_status": null, "observation_error": null, "attempts": null, "node_count": null}
+{"tool": "computer_use_targets", "elapsed_ms": 26.7, "response_bytes": 280, "error": "STALE_OPERATION", "observation_status": null, "observation_error": null, "attempts": null, "node_count": null}
+{"tool": "computer_use_targets", "elapsed_ms": 9.6, "response_bytes": 267, "error": "TARGET_UNREACHABLE", "observation_status": null, "observation_error": null, "attempts": null, "node_count": null}

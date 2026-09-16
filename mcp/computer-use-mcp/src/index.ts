@@ -8,6 +8,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { HostClient, UnixSocketHostClient, getDefaultSocketPath } from "./host-client.js";
 import {
+  TargetsInputSchema, TargetsDataSchema, WindowObserveInputSchema, WindowObserveDataSchema,
   StatusDataSchema,
   ObserveDataSchema,
   StatusInputSchema,
@@ -364,6 +365,22 @@ function formatToolResponse(ipcResp: any, toolName: string) {
     };
   }
 
+  if (toolName === "computer_use_targets") {
+    const parsed = TargetsDataSchema.safeParse(ipcResp.data);
+    if (!parsed.success) return { isError: true, content: [{ type: "text", text: JSON.stringify({ error: { code: "INVALID_RESPONSE_DATA", message: "Invalid target discovery" } }) }] };
+    return { content: [{ type: "text", text: JSON.stringify(parsed.data) }] };
+  }
+  if (toolName === "computer_use_window_observe") {
+    const parsed = WindowObserveDataSchema.safeParse(ipcResp.data);
+    if (!parsed.success) return { isError: true, content: [{ type: "text", text: JSON.stringify({ error: { code: "INVALID_RESPONSE_DATA", message: "Invalid window observation" } }) }] };
+    const { image_data_base64, ...imageMetadata } = parsed.data.image;
+    try { validateAndDecodeBase64JPEG(image_data_base64, imageMetadata.pixel_width, imageMetadata.pixel_height,
+      imageMetadata.image_byte_length, imageMetadata.image_sha256); }
+    catch { return { isError: true, content: [{ type: "text", text: JSON.stringify({ error: { code: "INVALID_IMAGE_PAYLOAD", message: "Invalid exact-window JPEG" } }) }] }; }
+    return { content: [{ type: "text", text: JSON.stringify({ ...parsed.data, image: imageMetadata }) },
+      { type: "image", data: image_data_base64, mimeType: "image/jpeg" }] };
+  }
+
   if (toolName === "computer_use_ax_tree") {
     const parsedData = AXTreeDataSchema.safeParse(ipcResp.data);
     if (!parsedData.success) {
@@ -465,7 +482,7 @@ function formatToolResponse(ipcResp: any, toolName: string) {
   };
 }
 
-export function createComputerUseServer(hostClient: HostClient): Server {
+export function createComputerUseServer(hostClient: HostClient, sessionId: string = crypto.randomUUID()): Server {
   const server = new Server(
     {
       name: "computer-use-mcp",
@@ -477,6 +494,23 @@ export function createComputerUseServer(hostClient: HostClient): Server {
       }
     }
   );
+
+  let sessionUsed = false;
+  const TARGETS_TOOL: Tool = {
+    name: "computer_use_targets",
+    description: "Discover running apps, or exact windows for an explicit app. Window references belong to this MCP session and expire in five minutes. Never guess among multiple windows.",
+    inputSchema: { type: "object", properties: { app_id: { type: "string", minLength: 1, maxLength: 256 } }, additionalProperties: false }
+  };
+  const WINDOW_TOOL: Tool = {
+    name: "computer_use_window_observe",
+    description: "Observe one exact app/window: window-only JPEG plus bounded AX state, fresh semantic-action authority, display geometry and non-atomic timing bracket. An app with multiple windows requires a discovered window_ref. No global-input authority is issued. AX redaction does not redact image pixels.",
+    inputSchema: { type: "object", properties: {
+      app_id: { type: "string", minLength: 1, maxLength: 256 },
+      window_ref: { type: "string", minLength: 1, maxLength: 256 },
+      max_depth: { type: "integer", minimum: 1, maximum: 10 }
+    }, required: ["app_id"], additionalProperties: false }
+  };
+  server.onclose = () => { if (!sessionUsed) return; void hostClient.request("ax_session_close", { session_id: sessionId }).catch(() => {}); };
 
   const STATUS_TOOL: Tool = {
     name: "computer_use_status",
@@ -681,6 +715,8 @@ export function createComputerUseServer(hostClient: HostClient): Server {
     return {
       tools: [
         STATUS_TOOL,
+        TARGETS_TOOL,
+        WINDOW_TOOL,
         OBSERVE_TOOL,
         AX_TREE_TOOL,
         AX_ACTION_TOOL,
@@ -697,6 +733,25 @@ export function createComputerUseServer(hostClient: HostClient): Server {
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const { name, arguments: rawArgs } = request.params;
     const args = rawArgs || {};
+
+    if (name === "computer_use_targets" || name === "computer_use_window_observe") {
+      const parsed = (name === "computer_use_targets" ? TargetsInputSchema : WindowObserveInputSchema).safeParse(args);
+      if (!parsed.success) return formatToolResponse({ id: "invalid", success: false,
+        error: { code: "INVALID_ARGUMENT", message: "Invalid explicit-target observation arguments" } }, name);
+      sessionUsed = true;
+      const result = await hostClient.request(name === "computer_use_targets" ? "targets" : "window_observe",
+        { ...parsed.data, session_id: sessionId }, extra?.signal);
+      if (result.success && name === "computer_use_window_observe") {
+        const checked = WindowObserveDataSchema.safeParse(result.data);
+        const request = parsed.data as { app_id: string; window_ref?: string };
+        if (!checked.success || (request.window_ref !== undefined && checked.data.window.window_ref !== request.window_ref) ||
+            ![String(checked.data.window.target_app.pid), checked.data.window.target_app.bundle_id, checked.data.window.target_app.name].includes(request.app_id)) {
+          return formatToolResponse({ id: result.id, success: false,
+            error: { code: "INVALID_RESPONSE_DATA", message: "Window observation does not match the explicit requested reference" } }, name);
+        }
+      }
+      return formatToolResponse(result, name);
+    }
 
     if (name === "computer_use_status") {
       const parseRes = StatusInputSchema.safeParse(args);
@@ -762,7 +817,8 @@ export function createComputerUseServer(hostClient: HostClient): Server {
           ]
         };
       }
-      const ipcResp = await hostClient.request("ax_tree", parseRes.data, extra?.signal);
+      sessionUsed = true;
+      const ipcResp = await hostClient.request("ax_tree", { ...parseRes.data, session_id: sessionId }, extra?.signal);
       return formatToolResponse(ipcResp, name);
     }
 
@@ -785,7 +841,8 @@ export function createComputerUseServer(hostClient: HostClient): Server {
         };
       }
       const compound = parseRes.data.observe !== undefined;
-      const ipcResp = await hostClient.request(compound ? "ax_action_observe" : "ax_action", parseRes.data, extra?.signal);
+      sessionUsed = true;
+      const ipcResp = await hostClient.request(compound ? "ax_action_observe" : "ax_action", { ...parseRes.data, session_id: sessionId }, extra?.signal);
       if (ipcResp.success && compound) {
         const result = AXActionResultDataSchema.safeParse(ipcResp.data);
         if (!result.success || !result.data.observation ||

@@ -1,0 +1,28 @@
+{
+  "at": "2026-09-16T13:58:58.203841+00:00",
+  "repository": "saariuslystoned/agy-computer-use",
+  "branch": "codex/issue-12-completion",
+  "source_sha": "979f973f7a54cd14810bf2808493ded234615037",
+  "base_sha": "95165752e0d4f0f16c7d4ef5df8fefdd5654817f",
+  "source_ci": [
+    {
+      "conclusion": "success",
+      "databaseId": 35104583736,
+      "event": "pull_request",
+      "headSha": "979f973f7a54cd14810bf2808493ded234615037",
+      "status": "completed",
+      "url": "https://github.com/saariuslystoned/agy-computer-use/actions/runs/35104583736"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 35104580052,
+      "event": "push",
+      "headSha": "979f973f7a54cd14810bf2808493ded234615037",
+      "status": "completed",
+      "url": "https://github.com/saariuslystoned/agy-computer-use/actions/runs/35104580052"
+    }
+  ],
+  "proof_child_contract": "Direct child of source; only README, proof and dated run records may change. Exact proof-child identity, clean worktree, push and PR CI are bound externally in PR #14 closeout.",
+  "merge_status": "not merged",
+  "canonical_host_replaced": false
+}

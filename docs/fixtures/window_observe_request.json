@@ -1,0 +1,9 @@
+{
+  "id": "window-observe",
+  "method": "window_observe",
+  "params": {
+    "app_id": "4242",
+    "window_ref": "ax-window-fixture",
+    "session_id": "fixture-session"
+  }
+}

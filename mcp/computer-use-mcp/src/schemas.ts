@@ -237,6 +237,7 @@ export const AXTreeDataSchema = z.object({
   target_app: AXTargetAppSchema,
   ax_snapshot_id: z.string().min(1).max(256),
   intervention_scope: z.enum(["app", "global"]).optional(),
+  window_ref: z.string().min(1).max(256).optional(),
   app_instance_ref: z.string().min(1).max(256),
   expires_at_ms: z.number().int().positive().finite(),
   topology_version: TopologyVersionSchema,
@@ -415,3 +416,51 @@ export const ActionResultDataSchema = z.object({
   capture_id: z.string().min(1),
   duration_ms: z.number().nonnegative().finite()
 }).strict();
+
+
+export const TargetsInputSchema = z.object({ app_id: z.string().trim().min(1).max(256).optional() }).strict();
+export const WindowObserveInputSchema = z.object({
+  app_id: z.string().trim().min(1).max(256),
+  window_ref: z.string().min(1).max(256).optional(),
+  max_depth: z.number().int().min(1).max(10).optional()
+}).strict();
+const WindowRectSchema = z.object({ x: z.number().finite(), y: z.number().finite(),
+  width: z.number().positive().finite(), height: z.number().positive().finite() }).strict();
+export const WindowDescriptorSchema = z.object({
+  window_ref: z.string().min(1).max(256), target_app: AXTargetAppSchema,
+  title: z.string().max(256), bounds: WindowRectSchema, display: DisplayInfoSchema,
+  expires_at_ms: z.number().int().positive()
+}).strict();
+export const TargetsDataSchema = z.object({
+  apps: z.array(AXTargetAppSchema).max(128), windows: z.array(WindowDescriptorSchema).max(16),
+  truncated: z.boolean(), topology_version: TopologyVersionSchema
+}).strict();
+export const WindowObserveDataSchema = z.object({
+  window: WindowDescriptorSchema, state: AXTreeDataSchema,
+  image: ObserveDataSchema.omit({ normalized_bounds: true }),
+  timing: z.object({ ax_before_ms: z.number().int().positive(), image_started_ms: z.number().int().positive(),
+    image_completed_ms: z.number().int().positive(), ax_after_ms: z.number().int().positive(), atomic: z.literal(false) }).strict(),
+  consistency: z.literal("stable_bracket"), image_redaction: z.literal("none"), ax_redaction: z.literal("secure_values"),
+  screen_points_per_pixel_x: z.number().positive().finite(), screen_points_per_pixel_y: z.number().positive().finite(),
+  display_normalized_scale_x: z.number().positive().finite(), display_normalized_scale_y: z.number().positive().finite(),
+  display_normalized_offset_x: z.number().finite(), display_normalized_offset_y: z.number().finite()
+}).strict().superRefine((d, ctx) => {
+  const w = d.window, i = d.image, t = d.timing;
+  const eq = (a: number, b: number) => Math.abs(a - b) < 1e-8;
+  const bindings = w.window_ref === d.state.window_ref && w.target_app.pid === d.state.target_app.pid &&
+    w.target_app.bundle_id === d.state.target_app.bundle_id && d.state.topology_version === i.topology_version &&
+    i.display_id === w.display.id && i.capture_id.startsWith("window-image-") &&
+    i.width_points === w.bounds.width && i.height_points === w.bounds.height &&
+    d.state.tree.bounds.x === w.bounds.x && d.state.tree.bounds.y === w.bounds.y &&
+    d.state.tree.bounds.width === w.bounds.width && d.state.tree.bounds.height === w.bounds.height;
+  const times = t.ax_before_ms <= t.image_started_ms && t.image_started_ms <= i.timestamp &&
+    i.timestamp <= t.image_completed_ms && t.image_completed_ms <= t.ax_after_ms &&
+    t.ax_after_ms < d.state.expires_at_ms;
+  const transforms = eq(d.screen_points_per_pixel_x, w.bounds.width / i.pixel_width) &&
+    eq(d.screen_points_per_pixel_y, w.bounds.height / i.pixel_height) &&
+    eq(d.display_normalized_scale_x, d.screen_points_per_pixel_x * 1000 / w.display.width_points) &&
+    eq(d.display_normalized_scale_y, d.screen_points_per_pixel_y * 1000 / w.display.height_points) &&
+    eq(d.display_normalized_offset_x, (w.bounds.x - w.display.origin_x) * 1000 / w.display.width_points) &&
+    eq(d.display_normalized_offset_y, (w.bounds.y - w.display.origin_y) * 1000 / w.display.height_points);
+  if (!bindings || !times || !transforms) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Window image/AX identity, timing or geometry mismatch" });
+});

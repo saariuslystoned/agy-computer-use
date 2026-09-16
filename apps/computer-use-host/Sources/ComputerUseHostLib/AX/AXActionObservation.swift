@@ -127,11 +127,21 @@ package enum AXActionObservationRunner {
                     receipt.observation = observation("timed_out", error: "TIMEOUT")
                     return receipt
                 }
-                lastState = state
-                lastChanges = AXChangeSummary.compare(baseline, state)
-                if lastChanges!.hasChanges || options.condition == "snapshot" {
-                    receipt.observation = observation(lastChanges!.hasChanges ? "changed" : "unchanged")
-                    return receipt
+                // AppKit can temporarily expose only the application root after
+                // a setter. Losing an entire previously visible hierarchy is
+                // not a usable post-action snapshot, even if it looks changed.
+                // Read again within the original budget; never repeat dispatch.
+                // An intentionally shallow inspection remains a valid snapshot.
+                let missingHierarchy = ["AXApplication", "AXWindow"].contains(baseline.tree.role)
+                    && !(baseline.tree.children ?? []).isEmpty
+                    && (state.tree.children ?? []).isEmpty
+                if !missingHierarchy {
+                    lastState = state
+                    lastChanges = AXChangeSummary.compare(baseline, state)
+                    if lastChanges!.hasChanges || options.condition == "snapshot" {
+                        receipt.observation = observation(lastChanges!.hasChanges ? "changed" : "unchanged")
+                        return receipt
+                    }
                 }
             } catch {
                 invalidate()

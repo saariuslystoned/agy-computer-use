@@ -5,7 +5,7 @@
 [![Antigravity](https://img.shields.io/badge/Platform-Google%20Antigravity-green.svg)](https://antigravity.google)
 [![Build Status](https://img.shields.io/badge/v0.1-M10%2FD3%20Dogfood-blue.svg)](#)
 
-> Architecture specification and production-bounded ten-tool computer-use surface for Google Antigravity & Gemini 3.7 Flash on macOS.
+> Architecture specification and production-bounded twelve-tool computer-use surface for Google Antigravity & Gemini 3.7 Flash on macOS.
 
 ---
 
@@ -13,7 +13,7 @@
 
 `agy-computer-use` defines an enterprise-grade Computer Use platform for macOS. It combines native macOS screen perception, display topology management, bounded input synthesis, and Unix domain socket IPC via a native host application and an MCP server bridge.
 
-Building on the completed **Milestone D2 & M9 foundations**, the active surface adds `computer_use_ax_action` to the prior nine tools. It is the operator-safe action path: one exact, retained AX element may receive one semantic `press` or, for an enabled non-secure text field/area whose `AXValue` is explicitly settable, one bounded `set_value`. Neither action moves the physical pointer, changes focus through global input, or falls back to HID synthesis. The one-shot lease also binds process birth, window/ancestry and semantic fingerprints, topology, and macOS session input counters.
+Building on the completed **Milestone D2 & M9 foundations**, the active surface includes semantic actions, exact-window observations, and bounded session/target leases. It is the operator-safe action path: one exact, retained AX element may receive one semantic `press` or, for an enabled non-secure text field/area whose `AXValue` is explicitly settable, one bounded `set_value`. Neither action moves the physical pointer, changes focus through global input, or falls back to HID synthesis. The one-shot lease binds process birth, window/ancestry and semantic fingerprints, topology, and qualified app-scoped intervention monitoring with conservative global guarding when qualification is unavailable. Independent app/window sessions preserve unrelated authority; first-writer conflicts require fresh inspection. See [window/session contracts](docs/window-observations-and-sessions.md) and [Issue 12 qualification](proof/issue_12_completion_20260916.md).
 
 Local ad-hoc staged-app/TCC operation is proven via `ComputerUseHost.app`. Stable team code signing, distribution, and notarization remain human-gated future work.
 
@@ -53,14 +53,16 @@ flowchart TD
 
 ## Tool API Specifications
 
-The MCP server exposes the following ten active tools to Gemini 3.7 Flash / Antigravity:
+The MCP server exposes the following twelve active tools to Antigravity:
 
 | Tool Name | Required Parameters | Description |
 |---|---|---|
 | `computer_use_status` | None | Returns host connectivity, active display topology, TCC permission state, and mutation lockout state. |
 | `computer_use_observe` | `display_id?` | Captures primary or target display screenshot, returning `capture_id`, `topology_version` (`top-sha256-...`), and JPEG image payload. |
+| `computer_use_targets` | `app_id?` | Discovers bounded app metadata and exact opaque window references. Incomplete inventories require explicit window selection. |
+| `computer_use_window_observe` | `app_id`, `window_ref?`, `max_depth?` | Returns a selected window image, bounded AX state, host-selected display transforms and non-atomic bracket timing. Rejects replacement, dialogs and observed drift. |
 | `computer_use_ax_tree` | `app_id`, `max_depth?` | Inspects one explicit app and returns a short-lived opaque snapshot/app lease plus opaque refs only for retained controls advertising `press`, `set_value`, or both. Secure text controls receive no actionable ref. |
-| `computer_use_ax_action` | `ax_snapshot_id`, `app_instance_ref`, `element_ref`, `topology_version`, `action`, `intent`, `value` (only for `set_value`) | Consumes one lease and dispatches exact-element AX `press` or bounded `AXValue` mutation. `set_value` accepts empty text and at most 4096 well-formed UTF-8 bytes. Receipts never contain the submitted value; stale/replay/secure/disabled/non-settable/intervened/uncertain outcomes fail closed; global-HID posts are always zero; fresh inspection is required. |
+| `computer_use_ax_action` | `ax_snapshot_id`, `app_instance_ref`, `element_ref`, `topology_version`, `action`, `intent`, `value` (only for `set_value`), `observe?` | Consumes one lease and dispatches exact-element AX `press` or bounded `AXValue` mutation. `set_value` accepts empty text and at most 4096 well-formed UTF-8 bytes. Receipts never contain the submitted value; stale/replay/secure/disabled/non-settable/intervened/uncertain outcomes fail closed; global-HID posts are always zero; optional bounded compound observation returns fresh state separately from dispatch. |
 | `computer_use_click` | `x`, `y`, `intent`, `capture_id`, `topology_version`, `button?`, `click_count?` | Dispatches single mouse click at normalized (0..999) coordinates on active display topology. |
 | `computer_use_move` | `x`, `y`, `intent`, `capture_id`, `topology_version` | Dispatches single mouse movement to normalized (0..999) coordinates without clicking. |
 | `computer_use_type` | `text`, `intent`, `capture_id`, `topology_version`, `press_enter?` | Synthesizes Unicode text entry into focused window/element. |

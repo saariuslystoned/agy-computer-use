@@ -1,0 +1,17 @@
+{
+  "mode": "baseline",
+  "model": "gemini-3.8-flash-high",
+  "effort": "high",
+  "exit_code": 0,
+  "elapsed_s": 115.16,
+  "result": {
+    "completed": true,
+    "calculator_ok": true,
+    "form_ok": true,
+    "action_count": 7,
+    "stale_errors": 0,
+    "intervention_errors": 0,
+    "corrections": 0,
+    "blocker_code": ""
+  }
+}

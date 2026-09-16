@@ -1,0 +1,9 @@
+{
+  "unchanged_live": true,
+  "timeout_no_state": true,
+  "real_stale_rejection": true,
+  "fresh_distinct_write_verified": true,
+  "failed_observation_no_state": true,
+  "failure_dispatched_once": true,
+  "agy_exact_window_verified": true
+}

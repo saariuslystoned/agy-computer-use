@@ -1,0 +1,24 @@
+[
+  {
+    "mode": "baseline",
+    "elapsed_s": 115.16,
+    "tool_exchanges": 16,
+    "action_count": 7,
+    "observation_bytes": 70058,
+    "total_response_bytes": 76423,
+    "stale_errors": 0,
+    "intervention_errors": 0,
+    "corrections": 0
+  },
+  {
+    "mode": "compound",
+    "elapsed_s": 99.6,
+    "tool_exchanges": 9,
+    "action_count": 7,
+    "observation_bytes": 84625,
+    "total_response_bytes": 86404,
+    "stale_errors": 0,
+    "intervention_errors": 0,
+    "corrections": 0
+  }
+]

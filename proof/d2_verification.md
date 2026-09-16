@@ -62,3 +62,11 @@ Local first-slice candidate: 43 native cases, 66 MCP tests, TypeScript check, co
 ## September 16, 2026 — Issue 12 follow-up
 
 The original D2 evidence above remains historical. Current source `eb7968b90d3065b2961756f086c88c1457a6d5f7` passes 44 native cases, 66 MCP tests, TypeScript, strict native build, and production readiness. See [background coexistence proof](issue_12_background_20260916.md) for the frozen-build AGY calculator result, intervention checks, and the remaining compound-form qualification limit.
+
+## September 16, 2026 — Issue 12 completion candidate
+
+Production source `979f973f7a54cd14810bf2808493ded234615037` passes 45 native cases, 70 MCP tests, TypeScript, strict native build and twelve-tool production readiness. Its [push workflow](https://github.com/saariuslystoned/agy-computer-use/actions/runs/35104580052) and [PR workflow](https://github.com/saariuslystoned/agy-computer-use/actions/runs/35104583736) both passed.
+
+The [complete source/build-bound report](issue_12_completion_20260916.md) records matched calculator/form AGY runs (16 vs 9 exchanges), physical keyboard and mouse coexistence, human target takeover rejection, final 26-case three-display/window/session proof, and honest unchanged/timeout/failure/stale-recovery outcomes. Earlier incomplete attempts and build differences are retained explicitly. Task-owned test processes and MCP registration were removed; the canonical host remains unchanged.
+
+[PR #14](https://github.com/saariuslystoned/agy-computer-use/pull/14) contains the completed implementation/qualification candidate. Exact proof-child CI and issue disposition are bound in its final external receipt. Merge/release, native exclusive-global-input enforcement (#7), live HUD (#8), and TCC onboarding (#2) remain separate. Historical D2 and PR #13 evidence above is preserved.
