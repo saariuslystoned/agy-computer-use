@@ -58,3 +58,7 @@
 ## Issue 12 compound AX observation candidate — 2026-09-16
 
 Local first-slice candidate: 43 native cases, 66 MCP tests, TypeScript check, configured production readiness, and strict native host build pass. See [candidate proof and live gate](issue_12_action_observation_20260916.md). Live Gemini/AX qualification is pending; Issue 12 remains open.
+
+## September 16, 2026 — Issue 12 follow-up
+
+The original D2 evidence above remains historical. Current source `eb7968b90d3065b2961756f086c88c1457a6d5f7` passes 44 native cases, 66 MCP tests, TypeScript, strict native build, and production readiness. See [background coexistence proof](issue_12_background_20260916.md) for the frozen-build AGY calculator result, intervention checks, and the remaining compound-form qualification limit.

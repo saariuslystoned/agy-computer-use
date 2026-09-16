@@ -1,0 +1,26 @@
+{
+  "transition": {
+    "activate_returned": true,
+    "after_pid": 49786,
+    "at_ms": 1789562281305,
+    "before_pid": 49786,
+    "during_pid": 72583,
+    "restore_returned": true,
+    "target_pid": 72583
+  },
+  "result": {
+    "id": "req-1789562282199-jwbi4",
+    "success": false,
+    "error": {
+      "code": "USER_INTERVENED",
+      "message": "Operator or system input changed during the action lease: Operator intervention (target activation notification); the one-shot lease was consumed"
+    }
+  },
+  "state": {
+    "display": "5",
+    "expression": "2+3",
+    "field": "issue12-ok",
+    "pid": 72583,
+    "window_id": 152264
+  }
+}
