@@ -239,8 +239,9 @@ public actor HostServer {
     ) {
         self.authorizer = authorizer
         self.topologyProvider = topologyProvider
-        self.captureEngine = captureEngine ?? SCScreenshotCaptureEngine(authorizer: authorizer)
-        self.windowCaptureEngine = windowCaptureEngine ?? (self.captureEngine as? any WindowCaptureEngine)
+        let resolvedCaptureEngine = captureEngine ?? SCScreenshotCaptureEngine(authorizer: authorizer)
+        self.captureEngine = resolvedCaptureEngine
+        self.windowCaptureEngine = windowCaptureEngine ?? (resolvedCaptureEngine as? any WindowCaptureEngine)
         self.axEngine = axEngine
         self.axActionEngine = axActionEngine
         self.inputEngine = inputEngine
