@@ -1,0 +1,216 @@
+[
+  {
+    "case": "multiple_windows_require_selection",
+    "passed": true,
+    "error_code": "TARGET_UNREACHABLE"
+  },
+  {
+    "case": "foreign_session_reference",
+    "passed": true,
+    "error_code": "STALE_OPERATION"
+  },
+  {
+    "case": "wrong_app_reference",
+    "passed": true,
+    "error_code": "STALE_OPERATION"
+  },
+  {
+    "case": "independent_app_and_session_lease",
+    "passed": true
+  },
+  {
+    "case": "read_only_bracket_reobservation",
+    "passed": true,
+    "attempt": 1,
+    "error_code": "STALE_OPERATION"
+  },
+  {
+    "case": "independent_windows_same_session",
+    "passed": true
+  },
+  {
+    "case": "same_window_first_writer_fences_second",
+    "passed": true,
+    "error_code": "STALE_AX_SNAPSHOT"
+  },
+  {
+    "case": "old_lease_after_move_built-in",
+    "passed": true,
+    "error_code": "STALE_OPERATION"
+  },
+  {
+    "case": "display_built-in",
+    "passed": true,
+    "display": {
+      "rotation": 0,
+      "width_points": 1728,
+      "id": 1,
+      "origin_y": 0,
+      "pixel_width": 3456,
+      "scale_factor": 2,
+      "pixel_height": 2234,
+      "origin_x": 0,
+      "height_points": 1117
+    },
+    "bounds": {
+      "width": 350,
+      "height": 202,
+      "x": 180,
+      "y": 250
+    },
+    "pixels": [
+      700,
+      404
+    ],
+    "scale": 2,
+    "image_sha256": "1037e137d305812d46ae694400f7367a754d1cc1b06bfa4384a1d66de6f183f4",
+    "node_count": 9,
+    "timing": {
+      "ax_before_ms": 1789566736586,
+      "image_started_ms": 1789566736586,
+      "atomic": false,
+      "ax_after_ms": 1789566736770,
+      "image_completed_ms": 1789566736722
+    }
+  },
+  {
+    "case": "old_lease_after_move_portrait-negative",
+    "passed": true,
+    "error_code": "STALE_OPERATION"
+  },
+  {
+    "case": "display_portrait-negative",
+    "passed": true,
+    "display": {
+      "rotation": 270,
+      "width_points": 1440,
+      "id": 2,
+      "origin_y": -1443,
+      "pixel_width": 1440,
+      "scale_factor": 1,
+      "pixel_height": 2560,
+      "origin_x": -1440,
+      "height_points": 2560
+    },
+    "bounds": {
+      "width": 350,
+      "height": 202,
+      "x": -1300,
+      "y": -1100
+    },
+    "pixels": [
+      350,
+      202
+    ],
+    "scale": 1,
+    "image_sha256": "863ceb5ee21fff98c6ab755af53108995d944beb9c0b8480e448372e8daee622",
+    "node_count": 9,
+    "timing": {
+      "ax_after_ms": 1789566737528,
+      "image_started_ms": 1789566737372,
+      "atomic": false,
+      "ax_before_ms": 1789566737372,
+      "image_completed_ms": 1789566737488
+    }
+  },
+  {
+    "case": "old_lease_after_move_upper-retina",
+    "passed": true,
+    "error_code": "STALE_OPERATION"
+  },
+  {
+    "case": "display_upper-retina",
+    "passed": true,
+    "display": {
+      "rotation": 0,
+      "width_points": 1920,
+      "id": 4,
+      "origin_y": -1080,
+      "pixel_width": 3840,
+      "scale_factor": 2,
+      "pixel_height": 2160,
+      "origin_x": 0,
+      "height_points": 1080
+    },
+    "bounds": {
+      "width": 350,
+      "height": 202,
+      "x": 250,
+      "y": -850
+    },
+    "pixels": [
+      700,
+      404
+    ],
+    "scale": 2,
+    "image_sha256": "9c755c438c322bf900d438c752fe644d50a12911d291342ce63ab13e6841fe71",
+    "node_count": 9,
+    "timing": {
+      "ax_before_ms": 1789566738137,
+      "image_started_ms": 1789566738137,
+      "atomic": false,
+      "ax_after_ms": 1789566738293,
+      "image_completed_ms": 1789566738249
+    }
+  },
+  {
+    "case": "incomplete_inventory_requires_explicit_selection",
+    "passed": true,
+    "error_code": "TARGET_UNREACHABLE"
+  },
+  {
+    "case": "off_display_auxiliary_preserves_explicit_sibling",
+    "passed": true
+  },
+  {
+    "case": "closed_session_reference",
+    "passed": true,
+    "error_code": "STALE_OPERATION"
+  },
+  {
+    "case": "closing_one_session_preserves_another",
+    "passed": true
+  },
+  {
+    "case": "replacement_rejects_old_reference",
+    "passed": true,
+    "error_code": "STALE_OPERATION"
+  },
+  {
+    "case": "replacement_rejects_old_authority",
+    "passed": true,
+    "error_code": "STALE_OPERATION"
+  },
+  {
+    "case": "new_dialog_requires_rediscovery",
+    "passed": true,
+    "error_code": "STALE_OPERATION"
+  },
+  {
+    "case": "dialog_discovered_explicitly",
+    "passed": true
+  },
+  {
+    "case": "attached_sheet_rejects_parent_image",
+    "passed": true,
+    "error_code": "STALE_OPERATION"
+  },
+  {
+    "case": "attached_sheet_rejects_parent_authority",
+    "passed": true,
+    "error_code": "STALE_OPERATION"
+  },
+  {
+    "case": "modal_sheet_visible_and_explicit_app_ax_available",
+    "passed": true
+  },
+  {
+    "case": "real_30_second_expiry",
+    "passed": true,
+    "error_code": "STALE_AX_SNAPSHOT"
+  },
+  {
+    "case": "rejected_writes_never_applied",
+    "passed": true
+  }
+]

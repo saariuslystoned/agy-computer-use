@@ -77,6 +77,7 @@ def save_image(label,data):
         scale=encoded['scale_factor'],image_sha256=encoded['image_sha256'],node_count=data['state']['node_count'],timing=timing)
 try:
     command('close-sheet');command('close-dialog');time.sleep(.5)
+    command('move','A',x=100,y=520);command('move','B',x=520,y=520);time.sleep(.3)
     status=ok(call('status'));assert status['display_count']==3
     (out/'topology.json').write_text(json.dumps(status['topology'],indent=2)+'\n')
     refs=discover('window-one');refs2=discover('window-two')

@@ -1,0 +1,39 @@
+{
+  "primary_display_id": 1,
+  "version": "top-sha256-bc5e20f3f988e9bec11e08919449f336f798e8c75b1be83651891304a4420188",
+  "displays": [
+    {
+      "scale_factor": 2,
+      "origin_x": 0,
+      "width_points": 1728,
+      "height_points": 1117,
+      "rotation": 0,
+      "pixel_height": 2234,
+      "origin_y": 0,
+      "pixel_width": 3456,
+      "id": 1
+    },
+    {
+      "scale_factor": 1,
+      "origin_x": -1440,
+      "width_points": 1440,
+      "rotation": 270,
+      "pixel_height": 2560,
+      "height_points": 2560,
+      "pixel_width": 1440,
+      "origin_y": -1443,
+      "id": 2
+    },
+    {
+      "scale_factor": 2,
+      "origin_x": 0,
+      "width_points": 1920,
+      "height_points": 1080,
+      "pixel_height": 2160,
+      "rotation": 0,
+      "origin_y": -1080,
+      "pixel_width": 3840,
+      "id": 4
+    }
+  ]
+}

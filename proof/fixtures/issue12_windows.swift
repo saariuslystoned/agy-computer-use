@@ -1,5 +1,9 @@
 import AppKit
 
+final class ProofWindow: NSWindow {
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
+}
+
 // Disposable proof app. The controller file is a fixture stimulus, not an input
 // route in ComputerUseHost. It never operates another application's windows.
 final class WindowsLab: NSObject, NSApplicationDelegate {
@@ -11,7 +15,7 @@ final class WindowsLab: NSObject, NSApplicationDelegate {
     let statePath = CommandLine.arguments[1]
     let commandPath = CommandLine.arguments[2]
     func make(_ key: String, origin: NSPoint) {
-        let window = NSWindow(contentRect: NSRect(origin: origin, size: NSSize(width: 350, height: 170)),
+        let window = ProofWindow(contentRect: NSRect(origin: origin, size: NSSize(width: 350, height: 170)),
             styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.title = "Issue 12 — Window " + key

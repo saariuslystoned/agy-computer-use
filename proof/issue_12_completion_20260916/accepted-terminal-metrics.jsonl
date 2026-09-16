@@ -1,0 +1,4 @@
+{"tool": "computer_use_targets", "elapsed_ms": 28.91, "response_bytes": 807, "error": null, "observation_status": null, "observation_error": null, "attempts": null, "node_count": null}
+{"tool": "computer_use_window_observe", "elapsed_ms": 265.32, "response_bytes": 29569, "error": null, "observation_status": null, "observation_error": null, "attempts": null, "node_count": null}
+{"tool": "computer_use_ax_tree", "elapsed_ms": 76.67, "response_bytes": 7964, "error": null, "observation_status": null, "observation_error": null, "attempts": null, "node_count": 16}
+{"tool": "computer_use_ax_action", "elapsed_ms": 305.94, "response_bytes": 850, "error": null, "observation_status": "failed", "observation_error": "USER_INTERVENED", "attempts": 3, "node_count": null}

@@ -1,0 +1,13 @@
+{
+  "model": "gemini-3.8-flash-high",
+  "effort": "high",
+  "elapsed_s": 252.75,
+  "exit_code": 0,
+  "result": {
+    "error": "TARGET_UNREACHABLE",
+    "message": "Target element or coordinate unreachable: Window center has no unambiguous active display.",
+    "window_observation_ok": false,
+    "observation_failure_ok": false,
+    "action_count": 0
+  }
+}

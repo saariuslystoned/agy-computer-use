@@ -1,0 +1,12 @@
+{
+  "proof/fixtures/issue12_ax_lab.swift": "eb54d34e9d103daf37e034d12ed4716c1c37272c0cc553f7cabf537cc26db4b9",
+  "proof/fixtures/issue12_isolation_summary.swift": "f4292b45a23a493df864bd50d5a8b19ca0d3d5bbd729bd6bc846da20fcb1bd10",
+  "proof/fixtures/issue12_live_windows.py": "5e96eebea991164cd50ef01f8a3c5b507fde3c72ef835d89ee624813f9d008c2",
+  "proof/fixtures/issue12_mcp_metrics.py": "67d48973a0c5854cda5cb020e9039272c7ad6e2436f2ccf52438bc34afc4c455",
+  "proof/fixtures/issue12_observation_lab.swift": "e4fff16817544c2d7e3681dab7f9f270346e0090aad067c8bd301bdd2dac3e95",
+  "proof/fixtures/issue12_observer.swift": "d5023aea189028fbaa56298061c70f7447b78fd23e8dbd37710c025d9a1a469f",
+  "proof/fixtures/issue12_sentinel.swift": "1e79948eadf672bf4980c797686c294c9c965c8bfdd50a05f8ecb64edde86718",
+  "proof/fixtures/issue12_takeover.swift": "d264e6f7aa6ce7da4391d27517415d6ac73c7b0ffe0f23228a3976a06ad9bd0b",
+  "proof/fixtures/issue12_target_key.swift": "d664dd5ae67f16130596a75ea6984c4d0ed52f2c767578ee226dafc378510427",
+  "proof/fixtures/issue12_windows.swift": "4aeeaf30cdfff9561779581c820dec0fa440630d8c60b8c4e56452eee4bd7089"
+}

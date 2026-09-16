@@ -1,0 +1,5 @@
+{"at": "2026-09-16T12:58:23.398065+00:00", "phase": "baseline", "base": "95165752e0d4f0f16c7d4ef5df8fefdd5654817f", "result": "clean"}
+{"at": "2026-09-16T13:06:04.427483+00:00", "phase": "compound-proof", "native": "44_pass", "mcp": "66_pass", "physical_keyboard": "385_hid_events_no_focus_or_pointer_change"}
+{"at": "2026-09-16T13:30:37.683113+00:00", "event": "source_frozen", "source": "53fd863318461735c3b6740ef8b41d738027e19b", "native_tests": 45, "mcp_tests": 70, "displays": 3, "window_movement": "passed", "live_suite": "in_progress"}
+{"at": "2026-09-16T13:42:08.445286+00:00", "event": "live_checkpoint", "matched_agy": [99.6, 115.16], "keyboard_keys": 439, "mouse_actions": 25, "takeover": "USER_INTERVENED", "window_assertions": 21, "source_ci": "manifest_format_failed", "modal_sheet": "stable parent image accepted before fix; fail-closed guard added"}
+{"at": "2026-09-16T13:58:58.203841+00:00", "event": "qualification_complete", "source": "979f973f7a54cd14810bf2808493ded234615037", "native": 45, "mcp": 70, "window_assertions": 26, "source_ci": "push_and_pr_success", "runtime": "cleaned", "next": "proof_child_ci_and_issue_closeout"}

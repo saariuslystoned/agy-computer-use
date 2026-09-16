@@ -1,0 +1,24 @@
+{
+  "at": "2026-09-16T13:58:06.462188+00:00",
+  "stopped_task_pids": [
+    80193,
+    80784,
+    81572,
+    92894,
+    87056,
+    92461
+  ],
+  "ownership_checked": true,
+  "task_sockets_removed": [
+    "/tmp/agy12-4b04/host.sock",
+    "/tmp/agy12-4b04/final/host.sock"
+  ],
+  "temporary_mcp_registration_removed": "issue12-completion",
+  "protected_pids_unchanged": [
+    58198,
+    80401,
+    65563
+  ],
+  "canonical_socket_exists": true,
+  "proof_files_preserved": true
+}
