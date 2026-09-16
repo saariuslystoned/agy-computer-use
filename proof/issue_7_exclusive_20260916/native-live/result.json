@@ -1,0 +1,6 @@
+{
+  "exit_code": 1,
+  "elapsed_s": 0.48,
+  "stdout": "",
+  "stderr": "Traceback (most recent call last):\n  File \"/Users/bobbybones/.codex/worktrees/1d35/agy-computer-use/proof/fixtures/issue7_shared_proof.py\", line 55, in <module>\n    initial=image('before')\n  File \"/Users/bobbybones/.codex/worktrees/1d35/agy-computer-use/proof/fixtures/issue7_shared_proof.py\", line 46, in image\n    data=ok(call('window_observe',app_id=app,session_id=session,window_ref=targets['windows'][0]['window_ref'],max_depth=8))\n  File \"/Users/bobbybones/.codex/worktrees/1d35/agy-computer-use/proof/fixtures/issue7_shared_proof.py\", line 23, in ok\n    assert r['success'], r.get('error'); return r['data']\n           ~^^^^^^^^^^^\nAssertionError: {'code': 'STALE_OPERATION', 'message': 'Operation discarded due to newer state generation or stale completion: AX semantics or geometry changed during image capture; reobserve.'}\n"
+}

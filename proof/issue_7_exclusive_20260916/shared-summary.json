@@ -1,0 +1,18 @@
+{
+  "source": "526fc8a8ec8188a769b740c68b3c6c13bd9d1da1",
+  "app_scoped_semantic_actions": 20,
+  "rejected_global_attempts": 12,
+  "unprovisioned_admission_rejected": true,
+  "host_input_events": 0,
+  "event_tap_coverage": true,
+  "sentinel_all_samples_frontmost": true,
+  "stable_focus_samples": 460,
+  "hardware_key_downs": 115,
+  "sentinel_key_downs": 115,
+  "hardware_mouse_moves": 126,
+  "pointer_position_changes": 22,
+  "typed_content_recorded": false,
+  "keystream_content_equivalence_claimed": false,
+  "global_positive_live_proof": false,
+  "discarded_attempt": "native-live: initial image observation returned STALE_OPERATION before any action; partial assertions empty"
+}

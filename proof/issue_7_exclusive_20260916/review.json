@@ -1,0 +1,42 @@
+{
+  "source": "526fc8a8ec8188a769b740c68b3c6c13bd9d1da1",
+  "review_kind": "primary-agent integrated-source review, not independent helper review",
+  "accepted_findings": [
+    {
+      "finding": "Shared global posting was authorized by AX trust/capture alone",
+      "resolution": "Native server admission plus unforgeable one-use engine permits guard all six global paths; production default denies."
+    },
+    {
+      "finding": "Scroll event allocation preceded anchor movement",
+      "resolution": "Wheel event location is bound explicitly to the intended point; production event-plan assertion checks coordinates."
+    },
+    {
+      "finding": "Focus checks may block beyond admission expiry",
+      "resolution": "Wall/monotonic admission is checked again after focus validation before every event."
+    },
+    {
+      "finding": "Revocation after a posted down must not leave held input",
+      "resolution": "Only this engine\u2019s held downs get cleanup releases, counted in uncertain receipts; zero-held cleanup posts nothing."
+    }
+  ],
+  "rejected_findings": [
+    {
+      "finding": "A fresh display selection authorizes keyboard recipient",
+      "reason": "Display is geometry only; explicit focused app/window/element is a separate mandatory authority."
+    },
+    {
+      "finding": "Any hardware input must revoke background AX authority",
+      "reason": "That would weaken the accepted app-scoped coexistence contract. The exclusive monitor exists only for admitted global control; AX implementation hashes match the merged baseline."
+    },
+    {
+      "finding": "Recording-sink tests establish isolated live coordinate fidelity",
+      "reason": "They exercise authority and event construction, not real system delivery. Positive live qualification remains open."
+    }
+  ],
+  "remaining_limits": [
+    "Root policy and focused-system-AX positive path require live isolated qualification.",
+    "A last-check/event-post race is not atomic with macOS input or other applications.",
+    "No coordinate-only shared fallback or targeted synthetic strategy is claimed.",
+    "No hostile same-user/root security claim; root policy asserts ownership, not hypervisor attestation."
+  ]
+}

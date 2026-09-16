@@ -1,0 +1,36 @@
+{
+  "source": "526fc8a8ec8188a769b740c68b3c6c13bd9d1da1",
+  "checks": [
+    {
+      "name": "native",
+      "log": "runs/issue-7-runs/20260916/native.log",
+      "sha256": "7e6dbce139dadb4ff3dc67799341a6df7298d5673f38d1ef5e11d9169c965d84",
+      "verified_completion_marker": "Executed 48 native test cases successfully. ALL PASSED."
+    },
+    {
+      "name": "mcp",
+      "log": "runs/issue-7-runs/20260916/final-mcp.log",
+      "sha256": "40fed4c571b65fd5ba2ef986f870f797ea52f7537b79df5743f188930ef27518",
+      "verified_completion_marker": "# pass 75"
+    },
+    {
+      "name": "typescript",
+      "log": "runs/issue-7-runs/20260916/final-check.log",
+      "sha256": "7047fb8256544d78c19dddacf0f349c3b10697f27b29cabffb6c127f92ba6425",
+      "verified_completion_marker": "tsc --noEmit"
+    },
+    {
+      "name": "readiness",
+      "log": "runs/issue-7-runs/20260916/final-readiness.log",
+      "sha256": "9a9a7f10d0a71b44b65e1cd00613b620b3e5adb44408523b7e65d85c586c3956",
+      "verified_completion_marker": "ALL PRODUCTION CONFIGURED STDIO READINESS CHECKS PASSED!"
+    },
+    {
+      "name": "strict_release",
+      "log": "runs/issue-7-runs/20260916/frozen-build.log",
+      "sha256": "8ee8242ad6a3c58c1a3aa9c37e6c9bec3ee9e33ae20ae31b2d4b644085c72bb5",
+      "verified_completion_marker": "Build of product 'ComputerUseHost' complete!"
+    }
+  ],
+  "excluded": "Optional canonical-runtime lifecycle/app test invocation was stopped; not accepted validation. See report and cleanup evidence."
+}

@@ -1,0 +1,6 @@
+{
+  "exit_code": 0,
+  "elapsed_s": 2.53,
+  "stdout": "{\"passed\": true, \"assertions\": 34, \"semantic_actions\": 20, \"global_attempts\": 12}\n",
+  "stderr": ""
+}

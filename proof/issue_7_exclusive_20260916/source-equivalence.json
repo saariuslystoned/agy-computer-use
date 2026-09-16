@@ -1,0 +1,14 @@
+{
+  "source": "526fc8a8ec8188a769b740c68b3c6c13bd9d1da1",
+  "base": "2baef89f8937e64922dc9c4f58ef862040095d11",
+  "all_manifest_files_match": true,
+  "running_binary_hash_matches": true,
+  "unchanged_ax_files": [
+    "apps/computer-use-host/Sources/ComputerUseHostLib/AX/AXActionObservation.swift",
+    "apps/computer-use-host/Sources/ComputerUseHostLib/AX/AXApplicationChildren.swift",
+    "apps/computer-use-host/Sources/ComputerUseHostLib/AX/AXInspectionEngine.swift",
+    "apps/computer-use-host/Sources/ComputerUseHostLib/AX/AXLeaseTable.swift",
+    "apps/computer-use-host/Sources/ComputerUseHostLib/AX/AXTargetInputMonitor.swift",
+    "apps/computer-use-host/Sources/ComputerUseHostLib/AX/AXWindowBinding.swift"
+  ]
+}

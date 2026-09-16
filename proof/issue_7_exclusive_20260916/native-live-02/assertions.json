@@ -1,0 +1,222 @@
+[
+  {
+    "case": "click",
+    "forged_boolean": false,
+    "error": "OPERATOR_EXCLUSIVE_REQUIRED",
+    "global_hid_posts": 0
+  },
+  {
+    "case": "click",
+    "forged_boolean": true,
+    "error": "OPERATOR_EXCLUSIVE_REQUIRED",
+    "global_hid_posts": 0
+  },
+  {
+    "case": "move",
+    "forged_boolean": false,
+    "error": "OPERATOR_EXCLUSIVE_REQUIRED",
+    "global_hid_posts": 0
+  },
+  {
+    "case": "move",
+    "forged_boolean": true,
+    "error": "OPERATOR_EXCLUSIVE_REQUIRED",
+    "global_hid_posts": 0
+  },
+  {
+    "case": "type",
+    "forged_boolean": false,
+    "error": "OPERATOR_EXCLUSIVE_REQUIRED",
+    "global_hid_posts": 0
+  },
+  {
+    "case": "type",
+    "forged_boolean": true,
+    "error": "OPERATOR_EXCLUSIVE_REQUIRED",
+    "global_hid_posts": 0
+  },
+  {
+    "case": "shortcut",
+    "forged_boolean": false,
+    "error": "OPERATOR_EXCLUSIVE_REQUIRED",
+    "global_hid_posts": 0
+  },
+  {
+    "case": "shortcut",
+    "forged_boolean": true,
+    "error": "OPERATOR_EXCLUSIVE_REQUIRED",
+    "global_hid_posts": 0
+  },
+  {
+    "case": "scroll",
+    "forged_boolean": false,
+    "error": "OPERATOR_EXCLUSIVE_REQUIRED",
+    "global_hid_posts": 0
+  },
+  {
+    "case": "scroll",
+    "forged_boolean": true,
+    "error": "OPERATOR_EXCLUSIVE_REQUIRED",
+    "global_hid_posts": 0
+  },
+  {
+    "case": "drag",
+    "forged_boolean": false,
+    "error": "OPERATOR_EXCLUSIVE_REQUIRED",
+    "global_hid_posts": 0
+  },
+  {
+    "case": "drag",
+    "forged_boolean": true,
+    "error": "OPERATOR_EXCLUSIVE_REQUIRED",
+    "global_hid_posts": 0
+  },
+  {
+    "case": "unprovisioned_admission",
+    "error": "OPERATOR_EXCLUSIVE_REQUIRED"
+  },
+  {
+    "case": "press",
+    "identifier": "issue12-Clear",
+    "strategy": "ax_semantic",
+    "global_hid_posts": 0,
+    "intervention_scope": "app"
+  },
+  {
+    "case": "press",
+    "identifier": "issue12-2",
+    "strategy": "ax_semantic",
+    "global_hid_posts": 0,
+    "intervention_scope": "app"
+  },
+  {
+    "case": "press",
+    "identifier": "issue12-+",
+    "strategy": "ax_semantic",
+    "global_hid_posts": 0,
+    "intervention_scope": "app"
+  },
+  {
+    "case": "press",
+    "identifier": "issue12-3",
+    "strategy": "ax_semantic",
+    "global_hid_posts": 0,
+    "intervention_scope": "app"
+  },
+  {
+    "case": "press",
+    "identifier": "issue12-=",
+    "strategy": "ax_semantic",
+    "global_hid_posts": 0,
+    "intervention_scope": "app"
+  },
+  {
+    "case": "set_value",
+    "identifier": "issue12-input",
+    "strategy": "ax_semantic",
+    "global_hid_posts": 0,
+    "intervention_scope": "app"
+  },
+  {
+    "case": "set_value",
+    "identifier": "issue12-input",
+    "strategy": "ax_semantic",
+    "global_hid_posts": 0,
+    "intervention_scope": "app"
+  },
+  {
+    "case": "set_value",
+    "identifier": "issue12-input",
+    "strategy": "ax_semantic",
+    "global_hid_posts": 0,
+    "intervention_scope": "app"
+  },
+  {
+    "case": "set_value",
+    "identifier": "issue12-input",
+    "strategy": "ax_semantic",
+    "global_hid_posts": 0,
+    "intervention_scope": "app"
+  },
+  {
+    "case": "set_value",
+    "identifier": "issue12-input",
+    "strategy": "ax_semantic",
+    "global_hid_posts": 0,
+    "intervention_scope": "app"
+  },
+  {
+    "case": "set_value",
+    "identifier": "issue12-input",
+    "strategy": "ax_semantic",
+    "global_hid_posts": 0,
+    "intervention_scope": "app"
+  },
+  {
+    "case": "set_value",
+    "identifier": "issue12-input",
+    "strategy": "ax_semantic",
+    "global_hid_posts": 0,
+    "intervention_scope": "app"
+  },
+  {
+    "case": "set_value",
+    "identifier": "issue12-input",
+    "strategy": "ax_semantic",
+    "global_hid_posts": 0,
+    "intervention_scope": "app"
+  },
+  {
+    "case": "set_value",
+    "identifier": "issue12-input",
+    "strategy": "ax_semantic",
+    "global_hid_posts": 0,
+    "intervention_scope": "app"
+  },
+  {
+    "case": "set_value",
+    "identifier": "issue12-input",
+    "strategy": "ax_semantic",
+    "global_hid_posts": 0,
+    "intervention_scope": "app"
+  },
+  {
+    "case": "set_value",
+    "identifier": "issue12-input",
+    "strategy": "ax_semantic",
+    "global_hid_posts": 0,
+    "intervention_scope": "app"
+  },
+  {
+    "case": "set_value",
+    "identifier": "issue12-input",
+    "strategy": "ax_semantic",
+    "global_hid_posts": 0,
+    "intervention_scope": "app"
+  },
+  {
+    "case": "set_value",
+    "identifier": "issue12-input",
+    "strategy": "ax_semantic",
+    "global_hid_posts": 0,
+    "intervention_scope": "app"
+  },
+  {
+    "case": "set_value",
+    "identifier": "issue12-input",
+    "strategy": "ax_semantic",
+    "global_hid_posts": 0,
+    "intervention_scope": "app"
+  },
+  {
+    "case": "set_value",
+    "identifier": "issue12-input",
+    "strategy": "ax_semantic",
+    "global_hid_posts": 0,
+    "intervention_scope": "app"
+  },
+  {
+    "case": "verified_final_calculator_and_form",
+    "passed": true
+  }
+]

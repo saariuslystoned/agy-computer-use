@@ -1,0 +1,6 @@
+{
+  "exit_code": 0,
+  "elapsed_s": 24.33,
+  "stdout": "{\"passed\": true, \"semantic_actions\": 20, \"elapsed_s\": 24.283, \"iterations_with_human_keys\": 20}\n",
+  "stderr": ""
+}

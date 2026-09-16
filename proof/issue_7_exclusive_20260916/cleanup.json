@@ -1,0 +1,37 @@
+{
+  "stopped_task_processes": [
+    {
+      "pid": 8627,
+      "executable": "/Users/bobbybones/.codex/worktrees/1d35/agy-computer-use/runs/issue-7-runs/20260916/Issue7Host.app/Contents/MacOS/ComputerUseHost"
+    },
+    {
+      "pid": 8189,
+      "executable": "/Users/bobbybones/.codex/worktrees/1d35/agy-computer-use/runs/issue-7-runs/20260916/Issue7Target.app/Contents/MacOS/Issue7Target"
+    },
+    {
+      "pid": 8191,
+      "executable": "/Users/bobbybones/.codex/worktrees/1d35/agy-computer-use/runs/issue-7-runs/20260916/Issue7Sentinel.app/Contents/MacOS/Issue7Sentinel"
+    }
+  ],
+  "task_socket_exists": false,
+  "canonical_host_pid": 58198,
+  "canonical_executable": "/Users/bobbybones/Developer/worktrees/agy-computer-use-operator-safe-ax-phase1-20260726/apps/computer-use-host/.build/staged/ComputerUseHost.app/Contents/MacOS/ComputerUseHost",
+  "canonical_same_pid_and_path": true,
+  "unrelated_agy_pid": 80401,
+  "unrelated_agy_preserved": true,
+  "unique_mcp_registration_removed": true,
+  "recorded_agy_task_processes_exited": true,
+  "optional_test_stop": {
+    "stopped_test_roots": [
+      5511
+    ],
+    "task_descendants": [
+      5511,
+      5516,
+      7522,
+      7634,
+      7635
+    ],
+    "canonical_pid_excluded": 58198
+  }
+}

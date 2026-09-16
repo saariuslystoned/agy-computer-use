@@ -1,0 +1,26 @@
+{
+  "mode": "ordinary AGY CLI",
+  "model": "gemini-3.8-flash-high",
+  "effort": "high",
+  "exit_code": 0,
+  "envelope_keys": [
+    "conversation_id",
+    "duration_seconds",
+    "json_schema",
+    "num_turns",
+    "response",
+    "status",
+    "structured_output",
+    "usage"
+  ],
+  "result": {
+    "blocker_code": "",
+    "denied_actions": 0,
+    "form_verified": false,
+    "result_five": false,
+    "semantic_actions": 0,
+    "shared_status_ok": true
+  },
+  "structured_result_parsed": true,
+  "elapsed_s": 69.04
+}

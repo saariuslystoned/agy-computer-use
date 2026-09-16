@@ -1,0 +1,12 @@
+{
+  "mode": "ordinary AGY CLI",
+  "model": "gemini-3.8-flash-high",
+  "effort": "high",
+  "exit_code": 0,
+  "result": {},
+  "structured_result_parsed": false,
+  "elapsed_s": 184.17,
+  "qualified": false,
+  "metadata_tool_calls": 0,
+  "failure_class": "no_qualifying_result_or_tool_metrics"
+}
