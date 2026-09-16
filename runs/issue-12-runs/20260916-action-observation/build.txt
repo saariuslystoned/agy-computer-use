@@ -1,0 +1,8 @@
+[0/1] Planning build
+Building for debugging...
+[0/4] Write swift-version--1AB21518FC5DEDBE.txt
+[2/6] Emitting module ComputerUseHost
+[3/6] Compiling ComputerUseHost main.swift
+[3/5] Linking ComputerUseHost
+[4/5] Applying ComputerUseHost
+Build of product 'ComputerUseHost' complete! (0.75s)
