@@ -64,7 +64,7 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
 
     const toolsResult = await client.listTools();
     assert.ok(toolsResult.tools);
-    assert.equal(toolsResult.tools.length, 12);
+    assert.equal(toolsResult.tools.length, 13);
 
     const toolNames = toolsResult.tools.map(t => t.name).sort();
     assert.deepEqual(toolNames, [
@@ -72,6 +72,7 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
       "computer_use_ax_tree",
       "computer_use_click",
       "computer_use_drag",
+      "computer_use_exclusive_control",
       "computer_use_move",
       "computer_use_observe",
       "computer_use_scroll",
@@ -356,6 +357,8 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
                 accessibility_available: false,
                 accessibility_trusted: false,
                 input_mutation_state: "disabled",
+                input_isolation_mode: "operator_safe_ax",
+                host_instance_id: "host-test", controller_id: "controller-test", exclusive_admission_required: true,
                 topology_version: VALID_SHA256_TOPOLOGY_TOKEN,
                 primary_display_id: 1,
                 display_count: 1,
@@ -952,13 +955,14 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
 
     const toolsResult = await client.listTools();
     assert.ok(toolsResult.tools);
-    assert.equal(toolsResult.tools.length, 12);
+    assert.equal(toolsResult.tools.length, 13);
     const toolNames = toolsResult.tools.map(t => t.name).sort();
     assert.deepEqual(toolNames, [
       "computer_use_ax_action",
       "computer_use_ax_tree",
       "computer_use_click",
       "computer_use_drag",
+      "computer_use_exclusive_control",
       "computer_use_move",
       "computer_use_observe",
       "computer_use_scroll",

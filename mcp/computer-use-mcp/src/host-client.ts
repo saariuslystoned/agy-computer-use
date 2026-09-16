@@ -64,6 +64,10 @@ export class MockHostClient implements HostClient {
           ],
           global_hid_may_affect_pointer_or_focus: true,
           input_mutation_state: this.inputMutationState,
+          input_isolation_mode: this.inputMutationState === "enabled" ? "exclusive_global_hid" : "operator_safe_ax",
+          host_instance_id: "mock-instance",
+          controller_id: params?.session_id ?? "mock-controller",
+          exclusive_admission_required: true,
           topology_version: topVer,
           primary_display_id: this.mockDisplayId,
           display_count: 1,
@@ -140,7 +144,9 @@ export class MockHostClient implements HostClient {
           action_id: `act-${method}-001`,
           status: "dispatched",
           capture_id: (params?.capture_id as string) || "cap-mock-001",
-          duration_ms: 12.34
+          duration_ms: 12.34,
+          strategy: "exclusive_global_hid",
+          global_hid_posts: 1
         }
       };
     }

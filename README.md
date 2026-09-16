@@ -5,7 +5,7 @@
 [![Antigravity](https://img.shields.io/badge/Platform-Google%20Antigravity-green.svg)](https://antigravity.google)
 [![Build Status](https://img.shields.io/badge/v0.1-M10%2FD3%20Dogfood-blue.svg)](#)
 
-> Architecture specification and production-bounded twelve-tool computer-use surface for Google Antigravity & Gemini 3.7 Flash on macOS.
+> Architecture specification and production-bounded thirteen-tool computer-use surface for Google Antigravity & Gemini 3.7 Flash on macOS.
 
 ---
 
@@ -53,7 +53,9 @@ flowchart TD
 
 ## Tool API Specifications
 
-The MCP server exposes the following twelve active tools to Antigravity:
+The MCP server exposes the following thirteen active tools to Antigravity:
+
+`computer_use_exclusive_control` adds native bounded acquire/release for administrator-admitted isolated GUI environments. See [native admission and limits](docs/exclusive-input.md).
 
 | Tool Name | Required Parameters | Description |
 |---|---|---|
@@ -73,7 +75,7 @@ The MCP server exposes the following twelve active tools to Antigravity:
 `computer_use_ax_action` is the default shared-workstation mutation path. The
 coordinate, move, type, shortcut, scroll, and drag tools use the global macOS
 input stream and can move the operator's pointer or affect focus. Use those
-only in an explicitly exclusive GUI session, VM, or dedicated worker Mac.
+only after native admission in an explicitly owned isolated GUI session, VM, or dedicated worker Mac. Shared mode rejects all six with zero event posts.
 There is no fallback from the AX action tool to global HID.
 
 The native host and MCP bridge accept three canonical operator-safe capability

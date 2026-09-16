@@ -1586,6 +1586,7 @@ public struct ComputerUseHostTestRunner {
             ])
         ]
 
+        let input = DisabledInputInjector()
         let expectedDataDict: [String: AnyCodable] = [
             "connected": .bool(true),
             "pid": .int(Int(ProcessInfo.processInfo.processIdentifier)),
@@ -1598,6 +1599,10 @@ public struct ComputerUseHostTestRunner {
             "supported_action_strategies": .array([]),
             "global_hid_may_affect_pointer_or_focus": .bool(true),
             "input_mutation_state": .string("disabled"),
+            "input_isolation_mode": .string("operator_safe_ax"),
+            "host_instance_id": .string(input.exclusiveAuthority.hostInstance),
+            "controller_id": .string("native-unscoped"),
+            "exclusive_admission_required": .bool(true),
             "topology_version": .string(fakeTopo.version),
             "primary_display_id": .int(1),
             "display_count": .int(1),
@@ -1652,7 +1657,7 @@ public struct ComputerUseHostTestRunner {
                     topologyProvider: FakeDisplayTopologyProvider(),
                     captureEngine: FakeCaptureEngine(),
                     axEngine: DisabledAXInspector(),
-                    inputEngine: DisabledInputInjector()
+                    inputEngine: input
                 ),
                 syscalls: scripted10
             )
@@ -1686,7 +1691,7 @@ public struct ComputerUseHostTestRunner {
                 let resp10a = try readIPCResponse(from: rawFd)
                 assertEqual(resp10a.id, "eintr-req-10")
                 assertTrue(resp10a.success)
-                assertEqual(resp10a.data?.count, 15, "Top-level response data dictionary must contain exactly 15 keys")
+                assertEqual(resp10a.data?.count, 19, "Top-level response data dictionary must contain exactly 19 keys")
                 assertEqual(resp10a.data, expectedDataDict, "Response data dictionary must match full expected status payload exactly")
             }()
 
@@ -1723,7 +1728,7 @@ public struct ComputerUseHostTestRunner {
                 let resp10b = try readIPCResponse(from: clientFd10b)
                 assertEqual(resp10b.id, "eintr-req-10-recovery")
                 assertTrue(resp10b.success)
-                assertEqual(resp10b.data?.count, 15, "Recovery response data dictionary must contain exactly 15 keys")
+                assertEqual(resp10b.data?.count, 19, "Recovery response data dictionary must contain exactly 19 keys")
                 assertEqual(resp10b.data, expectedDataDict, "Recovery response data dictionary must match full expected status payload exactly")
             }()
 
@@ -1756,7 +1761,7 @@ public struct ComputerUseHostTestRunner {
                     topologyProvider: FakeDisplayTopologyProvider(),
                     captureEngine: FakeCaptureEngine(),
                     axEngine: DisabledAXInspector(),
-                    inputEngine: DisabledInputInjector()
+                    inputEngine: input
                 ),
                 syscalls: scripted10_eio
             )
@@ -2818,7 +2823,7 @@ public struct ComputerUseHostTestRunner {
 
         let clickResp = await server.handleRequest(IPCRequest(id: "click-req", method: "click"))
         assertTrue(!clickResp.success)
-        assertEqual(clickResp.error?.code, "MUTATION_DISABLED")
+        assertEqual(clickResp.error?.code, "OPERATOR_EXCLUSIVE_REQUIRED")
     }
 
     public static func run28_DisplayIdParameterValidation() async throws {
@@ -3868,6 +3873,9 @@ public struct ComputerUseHostTestRunner {
         try await runWithWatchdog(name: "test42_MoveScrollDragPointerValidationStaleCaptureSingleUseLeaseAndUnconditionalRelease") { try await run42_MoveScrollDragPointerValidationStaleCaptureSingleUseLeaseAndUnconditionalRelease() }
         try await runWithWatchdog(name: "test44_TargetScopedIntervention") { try await run44_TargetScopedIntervention() }
         try await runWithWatchdog(name: "test45_ScopedLeaseTable") { try await run45_ScopedLeaseTable() }
+        try await runWithWatchdog(name: "test46_SharedModeNativeZeroPosts") { try await run46_SharedModeNativeZeroPosts() }
+        try await runWithWatchdog(name: "test47_ExclusiveDispatchAndRevocation") { try await run47_ExclusiveDispatchAndRevocation() }
+        try await runWithWatchdog(name: "test48_ExclusiveAdmissionOwnershipAndErrors") { try await run48_ExclusiveAdmissionOwnershipAndErrors() }
         try await runWithWatchdog(name: "test43_CompoundAXActionObservation") { try await run43_CompoundAXActionObservation() }
         fputs("[ComputerUseHostTestRunner] Executed \(completedTests.value) native test cases successfully. ALL PASSED.\n", stderr)
     }
@@ -5429,6 +5437,8 @@ public struct ComputerUseHostTestRunner {
 
     public static func run40_ActionRoutingFreshnessLeaseAndInputSynthesis() async throws {
         final class TestTrackInputSynthesisEngine: InputSynthesisEngine, @unchecked Sendable {
+            let exclusive = TestExclusiveHarness()
+            var exclusiveAuthority: ExclusiveInputAuthority { exclusive.authority }
             let enabled: Bool
             let lock = NSLock()
             var clickCalls: [(x: Int, y: Int, button: MouseButton, clickCount: Int)] = []
@@ -5446,7 +5456,7 @@ public struct ComputerUseHostTestRunner {
                 lock.unlock()
             }
 
-            func performClick(gridX: Int, gridY: Int, button: MouseButton, clickCount: Int, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO {
+            func performClick(gridX: Int, gridY: Int, button: MouseButton, clickCount: Int, captureId: String, currentCaptureId: String, display: DisplayInfo, permit: ExclusiveInputPermit?) throws -> ActionResultDTO {
                 defer { releaseHeldInputs() }
                 guard isMutationEnabled else { throw ComputerUseError.mutationDisabled }
                 guard captureId == currentCaptureId && !captureId.isEmpty else {
@@ -5458,7 +5468,7 @@ public struct ComputerUseHostTestRunner {
                 return ActionResultDTO(actionId: "act-click-1", status: "dispatched", captureId: captureId, durationMs: 5.0)
             }
 
-            func performType(text: String, pressEnter: Bool, captureId: String, currentCaptureId: String) throws -> ActionResultDTO {
+            func performType(text: String, pressEnter: Bool, captureId: String, currentCaptureId: String, permit: ExclusiveInputPermit?) throws -> ActionResultDTO {
                 defer { releaseHeldInputs() }
                 guard isMutationEnabled else { throw ComputerUseError.mutationDisabled }
                 guard captureId == currentCaptureId && !captureId.isEmpty else {
@@ -5470,7 +5480,7 @@ public struct ComputerUseHostTestRunner {
                 return ActionResultDTO(actionId: "act-type-1", status: "dispatched", captureId: captureId, durationMs: 3.0)
             }
 
-            func performShortcut(keys: [String], captureId: String, currentCaptureId: String) throws -> ActionResultDTO {
+            func performShortcut(keys: [String], captureId: String, currentCaptureId: String, permit: ExclusiveInputPermit?) throws -> ActionResultDTO {
                 defer { releaseHeldInputs() }
                 guard isMutationEnabled else { throw ComputerUseError.mutationDisabled }
                 guard captureId == currentCaptureId && !captureId.isEmpty else {
@@ -5482,19 +5492,20 @@ public struct ComputerUseHostTestRunner {
                 return ActionResultDTO(actionId: "act-shortcut-1", status: "dispatched", captureId: captureId, durationMs: 2.0)
             }
 
-            func performMove(gridX: Int, gridY: Int, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO {
+            func performMove(gridX: Int, gridY: Int, captureId: String, currentCaptureId: String, display: DisplayInfo, permit: ExclusiveInputPermit?) throws -> ActionResultDTO {
                 throw ComputerUseError.mutationDisabled
             }
-            func performDrag(startX: Int, startY: Int, endX: Int, endY: Int, button: MouseButton, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO {
+            func performDrag(startX: Int, startY: Int, endX: Int, endY: Int, button: MouseButton, captureId: String, currentCaptureId: String, display: DisplayInfo, permit: ExclusiveInputPermit?) throws -> ActionResultDTO {
                 throw ComputerUseError.mutationDisabled
             }
-            func performScroll(gridX: Int, gridY: Int, deltaX: Int, deltaY: Int, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO {
+            func performScroll(gridX: Int, gridY: Int, deltaX: Int, deltaY: Int, captureId: String, currentCaptureId: String, display: DisplayInfo, permit: ExclusiveInputPermit?) throws -> ActionResultDTO {
                 throw ComputerUseError.mutationDisabled
             }
         }
 
         // 1. Untrusted / Disabled State Dispatches Nothing
         let disabledEngine = TestTrackInputSynthesisEngine(enabled: false)
+        var harness = disabledEngine.exclusive
         let serverDisabled = HostServer(
             authorizer: FakeScreenRecordingAuthorizer(granted: true),
             topologyProvider: FakeDisplayTopologyProvider(),
@@ -5502,12 +5513,12 @@ public struct ComputerUseHostTestRunner {
             axEngine: DisabledAXInspector(),
             inputEngine: disabledEngine
         )
-        let obsDisabled = await serverDisabled.handleRequest(IPCRequest(id: "obs-0", method: "observe"))
+        let obsDisabled = await serverDisabled.handleRequest(harness.request(id: "obs-0", method: "observe"))
         assertTrue(obsDisabled.success)
         let capId0 = obsDisabled.data?["capture_id"]?.rawValue as? String ?? ""
         let topVer0 = obsDisabled.data?["topology_version"]?.rawValue as? String ?? ""
 
-        let clickDis = await serverDisabled.handleRequest(IPCRequest(id: "dis-1", method: "click", params: [
+        let clickDis = await serverDisabled.handleRequest(harness.request(id: "dis-1", method: "click", params: [
             "capture_id": .string(capId0),
             "topology_version": .string(topVer0),
             "intent": .string("test"),
@@ -5520,6 +5531,7 @@ public struct ComputerUseHostTestRunner {
 
         // 2. Freshness, Atomic Lease Consumption, and Replay Rejection
         let activeEngine = TestTrackInputSynthesisEngine(enabled: true)
+        harness = activeEngine.exclusive
         let serverActive = HostServer(
             authorizer: FakeScreenRecordingAuthorizer(granted: true),
             topologyProvider: FakeDisplayTopologyProvider(),
@@ -5529,13 +5541,13 @@ public struct ComputerUseHostTestRunner {
         )
 
         // Observe 1
-        let obs1 = await serverActive.handleRequest(IPCRequest(id: "obs-1", method: "observe"))
+        let obs1 = await serverActive.handleRequest(harness.request(id: "obs-1", method: "observe"))
         assertTrue(obs1.success)
         let capId1 = obs1.data?["capture_id"]?.rawValue as? String ?? ""
         let topVer1 = obs1.data?["topology_version"]?.rawValue as? String ?? ""
 
         // Malformed intent (blank) -> fails IPC_ERROR
-        let badIntent = await serverActive.handleRequest(IPCRequest(id: "bad-intent", method: "click", params: [
+        let badIntent = await serverActive.handleRequest(harness.request(id: "bad-intent", method: "click", params: [
             "capture_id": .string(capId1),
             "topology_version": .string(topVer1),
             "intent": .string("   "),
@@ -5546,7 +5558,7 @@ public struct ComputerUseHostTestRunner {
         assertEqual(badIntent.error?.code, "IPC_ERROR")
 
         // Stale topology -> fails STALE_TOPOLOGY
-        let badTop = await serverActive.handleRequest(IPCRequest(id: "bad-top", method: "click", params: [
+        let badTop = await serverActive.handleRequest(harness.request(id: "bad-top", method: "click", params: [
             "capture_id": .string(capId1),
             "topology_version": .string("top-sha256-0000000000000000000000000000000000000000000000000000000000000000"),
             "intent": .string("test click"),
@@ -5557,7 +5569,7 @@ public struct ComputerUseHostTestRunner {
         assertEqual(badTop.error?.code, "STALE_TOPOLOGY")
 
         // Valid click with capId1 -> succeeds
-        let validClick = await serverActive.handleRequest(IPCRequest(id: "valid-click", method: "click", params: [
+        let validClick = await serverActive.handleRequest(harness.request(id: "valid-click", method: "click", params: [
             "capture_id": .string(capId1),
             "topology_version": .string(topVer1),
             "intent": .string("click target button"),
@@ -5574,7 +5586,7 @@ public struct ComputerUseHostTestRunner {
         assertEqual(activeEngine.clickCalls[0].y, 300)
 
         // Replay attempt with same capId1 -> FAILS STALE_CAPTURE (lease consumed!)
-        let replayClick = await serverActive.handleRequest(IPCRequest(id: "replay-click", method: "click", params: [
+        let replayClick = await serverActive.handleRequest(harness.request(id: "replay-click", method: "click", params: [
             "capture_id": .string(capId1),
             "topology_version": .string(topVer1),
             "intent": .string("replay click"),
@@ -5585,12 +5597,12 @@ public struct ComputerUseHostTestRunner {
         assertEqual(replayClick.error?.code, "STALE_CAPTURE")
 
         // Observe 2 -> new lease capId2
-        let obs2 = await serverActive.handleRequest(IPCRequest(id: "obs-2", method: "observe"))
+        let obs2 = await serverActive.handleRequest(harness.request(id: "obs-2", method: "observe"))
         assertTrue(obs2.success)
         let capId2 = obs2.data?["capture_id"]?.rawValue as? String ?? ""
 
         // Perform type action
-        let typeAction = await serverActive.handleRequest(IPCRequest(id: "type-1", method: "type", params: [
+        let typeAction = await serverActive.handleRequest(harness.request(id: "type-1", method: "type", params: [
             "capture_id": .string(capId2),
             "topology_version": .string(topVer1),
             "intent": .string("type hello"),
@@ -5604,12 +5616,12 @@ public struct ComputerUseHostTestRunner {
         assertTrue(activeEngine.typeCalls[0].pressEnter)
 
         // Observe 3 -> new lease capId3
-        let obs3 = await serverActive.handleRequest(IPCRequest(id: "obs-3", method: "observe"))
+        let obs3 = await serverActive.handleRequest(harness.request(id: "obs-3", method: "observe"))
         assertTrue(obs3.success)
         let capId3 = obs3.data?["capture_id"]?.rawValue as? String ?? ""
 
         // Perform shortcut action
-        let shortcutAction = await serverActive.handleRequest(IPCRequest(id: "sc-1", method: "shortcut", params: [
+        let shortcutAction = await serverActive.handleRequest(harness.request(id: "sc-1", method: "shortcut", params: [
             "capture_id": .string(capId3),
             "topology_version": .string(topVer1),
             "intent": .string("navigate tab"),
@@ -5623,12 +5635,12 @@ public struct ComputerUseHostTestRunner {
         assertTrue(activeEngine.releaseCount >= 3, "releaseHeldInputs must be called on every completed action")
 
         // 3. Captured Topology Version Mismatch Rejection
-        let obs4 = await serverActive.handleRequest(IPCRequest(id: "obs-4", method: "observe"))
+        let obs4 = await serverActive.handleRequest(harness.request(id: "obs-4", method: "observe"))
         assertTrue(obs4.success)
         let capId4 = obs4.data?["capture_id"]?.rawValue as? String ?? ""
 
         // Sending a topology_version that matches current topology ("top-sha256-..."), but differs from activeCap.topologyVersion
-        let capMismatch = await serverActive.handleRequest(IPCRequest(id: "cap-mismatch", method: "click", params: [
+        let capMismatch = await serverActive.handleRequest(harness.request(id: "cap-mismatch", method: "click", params: [
             "capture_id": .string(capId4),
             "topology_version": .string("top-sha256-different0000000000000000000000000000000000000000000000"),
             "intent": .string("click with topology mismatch"),
@@ -5638,14 +5650,15 @@ public struct ComputerUseHostTestRunner {
         assertTrue(!capMismatch.success, "Action must fail when requested topology_version does not match current topology")
 
         // 4. CGEventInputSynthesisEngine shortcut validation & release checks
-        let cgeEngine = CGEventInputSynthesisEngine()
+        let direct = TestExclusiveHarness()
+        let cgeEngine = CGEventInputSynthesisEngine(authority: direct.authority, poster: TestGlobalPoster(), trusted: { true })
         cgeEngine.releaseHeldInputs()
 
         // Shortcut validation: 0 base keys -> throws ipcError
         var zeroBaseThrew = false
         do {
-            _ = try cgeEngine.performShortcut(keys: ["cmd", "shift"], captureId: "c1", currentCaptureId: "c1")
-        } catch ComputerUseError.ipcError {
+            _ = try cgeEngine.performShortcut(keys: ["cmd", "shift"], captureId: "c1", currentCaptureId: "c1", permit: try direct.authority.permit(controller: direct.controller, leaseID: direct.leaseID, action: "shortcut", captureID: "c1"))
+        } catch let error as GlobalInputFailure where error.underlying.errorCode == "IPC_ERROR" {
             zeroBaseThrew = true
         } catch ComputerUseError.mutationDisabled {
             // Expected if process is untrusted
@@ -5656,8 +5669,8 @@ public struct ComputerUseHostTestRunner {
         // Shortcut validation: >1 base keys -> throws ipcError
         var multiBaseThrew = false
         do {
-            _ = try cgeEngine.performShortcut(keys: ["tab", "enter"], captureId: "c1", currentCaptureId: "c1")
-        } catch ComputerUseError.ipcError {
+            _ = try cgeEngine.performShortcut(keys: ["tab", "enter"], captureId: "c1", currentCaptureId: "c1", permit: try direct.authority.permit(controller: direct.controller, leaseID: direct.leaseID, action: "shortcut", captureID: "c1"))
+        } catch let error as GlobalInputFailure where error.underlying.errorCode == "IPC_ERROR" {
             multiBaseThrew = true
         } catch ComputerUseError.mutationDisabled {
             // Expected if process is untrusted
@@ -6707,6 +6720,7 @@ public struct ComputerUseHostTestRunner {
         }
 
         final class ZeroGlobalInputEngine: InputSynthesisEngine, @unchecked Sendable {
+            let exclusiveAuthority = ExclusiveInputAuthority()
             let lock = NSLock()
             var touches: [String] = []
 
@@ -6721,32 +6735,32 @@ public struct ComputerUseHostTestRunner {
                 return true
             }
 
-            func performClick(gridX: Int, gridY: Int, button: MouseButton, clickCount: Int, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO {
+            func performClick(gridX: Int, gridY: Int, button: MouseButton, clickCount: Int, captureId: String, currentCaptureId: String, display: DisplayInfo, permit: ExclusiveInputPermit?) throws -> ActionResultDTO {
                 record("performClick")
                 throw ComputerUseError.operatorExclusiveRequired(action: "click")
             }
 
-            func performMove(gridX: Int, gridY: Int, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO {
+            func performMove(gridX: Int, gridY: Int, captureId: String, currentCaptureId: String, display: DisplayInfo, permit: ExclusiveInputPermit?) throws -> ActionResultDTO {
                 record("performMove")
                 throw ComputerUseError.operatorExclusiveRequired(action: "move")
             }
 
-            func performDrag(startX: Int, startY: Int, endX: Int, endY: Int, button: MouseButton, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO {
+            func performDrag(startX: Int, startY: Int, endX: Int, endY: Int, button: MouseButton, captureId: String, currentCaptureId: String, display: DisplayInfo, permit: ExclusiveInputPermit?) throws -> ActionResultDTO {
                 record("performDrag")
                 throw ComputerUseError.operatorExclusiveRequired(action: "drag")
             }
 
-            func performType(text: String, pressEnter: Bool, captureId: String, currentCaptureId: String) throws -> ActionResultDTO {
+            func performType(text: String, pressEnter: Bool, captureId: String, currentCaptureId: String, permit: ExclusiveInputPermit?) throws -> ActionResultDTO {
                 record("performType")
                 throw ComputerUseError.operatorExclusiveRequired(action: "type")
             }
 
-            func performShortcut(keys: [String], captureId: String, currentCaptureId: String) throws -> ActionResultDTO {
+            func performShortcut(keys: [String], captureId: String, currentCaptureId: String, permit: ExclusiveInputPermit?) throws -> ActionResultDTO {
                 record("performShortcut")
                 throw ComputerUseError.operatorExclusiveRequired(action: "shortcut")
             }
 
-            func performScroll(gridX: Int, gridY: Int, deltaX: Int, deltaY: Int, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO {
+            func performScroll(gridX: Int, gridY: Int, deltaX: Int, deltaY: Int, captureId: String, currentCaptureId: String, display: DisplayInfo, permit: ExclusiveInputPermit?) throws -> ActionResultDTO {
                 record("performScroll")
                 throw ComputerUseError.operatorExclusiveRequired(action: "scroll")
             }
@@ -6792,7 +6806,7 @@ public struct ComputerUseHostTestRunner {
         )
         assertEqual(
             semanticStatus.data?["supported_action_strategies"],
-            .array([.string("ax_semantic"), .string("exclusive_global_hid")])
+            .array([.string("ax_semantic")])
         )
         assertEqual(
             semanticStatus.data?["global_hid_may_affect_pointer_or_focus"],
@@ -7366,6 +7380,8 @@ public struct ComputerUseHostTestRunner {
         }
 
         final class TrackPointerInputEngine: InputSynthesisEngine, @unchecked Sendable {
+            let exclusive = TestExclusiveHarness()
+            var exclusiveAuthority: ExclusiveInputAuthority { exclusive.authority }
             let enabled: Bool
             let lock = NSLock()
             var moveCalls: [(x: Int, y: Int)] = []
@@ -7380,12 +7396,12 @@ public struct ComputerUseHostTestRunner {
                 lock.lock(); releaseCount += 1; lock.unlock()
             }
 
-            func performClick(gridX: Int, gridY: Int, button: MouseButton, clickCount: Int, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO {
+            func performClick(gridX: Int, gridY: Int, button: MouseButton, clickCount: Int, captureId: String, currentCaptureId: String, display: DisplayInfo, permit: ExclusiveInputPermit?) throws -> ActionResultDTO {
                 defer { releaseHeldInputs() }
                 return ActionResultDTO(actionId: "act-click", status: "dispatched", captureId: captureId, durationMs: 1.0)
             }
 
-            func performMove(gridX: Int, gridY: Int, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO {
+            func performMove(gridX: Int, gridY: Int, captureId: String, currentCaptureId: String, display: DisplayInfo, permit: ExclusiveInputPermit?) throws -> ActionResultDTO {
                 defer { releaseHeldInputs() }
                 guard isMutationEnabled else { throw ComputerUseError.mutationDisabled }
                 guard captureId == currentCaptureId && !captureId.isEmpty else {
@@ -7395,7 +7411,7 @@ public struct ComputerUseHostTestRunner {
                 return ActionResultDTO(actionId: "act-move-1", status: "dispatched", captureId: captureId, durationMs: 2.0)
             }
 
-            func performScroll(gridX: Int, gridY: Int, deltaX: Int, deltaY: Int, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO {
+            func performScroll(gridX: Int, gridY: Int, deltaX: Int, deltaY: Int, captureId: String, currentCaptureId: String, display: DisplayInfo, permit: ExclusiveInputPermit?) throws -> ActionResultDTO {
                 defer { releaseHeldInputs() }
                 guard isMutationEnabled else { throw ComputerUseError.mutationDisabled }
                 guard captureId == currentCaptureId && !captureId.isEmpty else {
@@ -7408,7 +7424,7 @@ public struct ComputerUseHostTestRunner {
                 return ActionResultDTO(actionId: "act-scroll-1", status: "dispatched", captureId: captureId, durationMs: 3.0)
             }
 
-            func performDrag(startX: Int, startY: Int, endX: Int, endY: Int, button: MouseButton, captureId: String, currentCaptureId: String, display: DisplayInfo) throws -> ActionResultDTO {
+            func performDrag(startX: Int, startY: Int, endX: Int, endY: Int, button: MouseButton, captureId: String, currentCaptureId: String, display: DisplayInfo, permit: ExclusiveInputPermit?) throws -> ActionResultDTO {
                 defer { releaseHeldInputs() }
                 guard isMutationEnabled else { throw ComputerUseError.mutationDisabled }
                 guard captureId == currentCaptureId && !captureId.isEmpty else {
@@ -7418,12 +7434,12 @@ public struct ComputerUseHostTestRunner {
                 return ActionResultDTO(actionId: "act-drag-1", status: "dispatched", captureId: captureId, durationMs: 4.0)
             }
 
-            func performType(text: String, pressEnter: Bool, captureId: String, currentCaptureId: String) throws -> ActionResultDTO {
+            func performType(text: String, pressEnter: Bool, captureId: String, currentCaptureId: String, permit: ExclusiveInputPermit?) throws -> ActionResultDTO {
                 defer { releaseHeldInputs() }
                 return ActionResultDTO(actionId: "act-type", status: "dispatched", captureId: captureId, durationMs: 1.0)
             }
 
-            func performShortcut(keys: [String], captureId: String, currentCaptureId: String) throws -> ActionResultDTO {
+            func performShortcut(keys: [String], captureId: String, currentCaptureId: String, permit: ExclusiveInputPermit?) throws -> ActionResultDTO {
                 defer { releaseHeldInputs() }
                 return ActionResultDTO(actionId: "act-shortcut", status: "dispatched", captureId: captureId, durationMs: 1.0)
             }
@@ -7438,6 +7454,7 @@ public struct ComputerUseHostTestRunner {
         )
 
         let trackEngine = TrackPointerInputEngine(enabled: true)
+        let harness = trackEngine.exclusive
         let server = HostServer(
             authorizer: FakeScreenRecordingAuthorizer(granted: true),
             topologyProvider: FakeDisplayTopologyProvider(topology: topo),
@@ -7446,12 +7463,12 @@ public struct ComputerUseHostTestRunner {
         )
 
         // 1. Observe to get capture lease
-        let obsResp = await server.handleRequest(IPCRequest(id: "req-1", method: "observe"))
+        let obsResp = await server.handleRequest(harness.request(id: "req-1", method: "observe"))
         assertTrue(obsResp.success, "Observe request must succeed")
         let capId = obsResp.data?["capture_id"]?.rawValue as? String ?? ""
 
         // 2. Perform Move -> succeeds, consumes lease, calls releaseHeldInputs
-        let moveResp = await server.handleRequest(IPCRequest(
+        let moveResp = await server.handleRequest(harness.request(
             id: "req-2",
             method: "move",
             params: [
@@ -7467,7 +7484,7 @@ public struct ComputerUseHostTestRunner {
         assertEqual(trackEngine.releaseCount, 1)
 
         // 3. Stale Move -> repeat call without observe fails with STALE_CAPTURE
-        let staleMoveResp = await server.handleRequest(IPCRequest(
+        let staleMoveResp = await server.handleRequest(harness.request(
             id: "req-3",
             method: "move",
             params: [
@@ -7482,9 +7499,9 @@ public struct ComputerUseHostTestRunner {
         assertEqual(staleMoveResp.error?.code, "STALE_CAPTURE")
 
         // 4. Observe again for Scroll
-        let obsResp2 = await server.handleRequest(IPCRequest(id: "req-4", method: "observe"))
+        let obsResp2 = await server.handleRequest(harness.request(id: "req-4", method: "observe"))
         let capId2 = obsResp2.data?["capture_id"]?.rawValue as? String ?? ""
-        let scrollResp = await server.handleRequest(IPCRequest(
+        let scrollResp = await server.handleRequest(harness.request(
             id: "req-5",
             method: "scroll",
             params: [
@@ -7501,9 +7518,9 @@ public struct ComputerUseHostTestRunner {
         assertEqual(trackEngine.scrollCalls.count, 1)
 
         // 5. Observe again for Drag
-        let obsResp3 = await server.handleRequest(IPCRequest(id: "req-6", method: "observe"))
+        let obsResp3 = await server.handleRequest(harness.request(id: "req-6", method: "observe"))
         let capId3 = obsResp3.data?["capture_id"]?.rawValue as? String ?? ""
-        let dragResp = await server.handleRequest(IPCRequest(
+        let dragResp = await server.handleRequest(harness.request(
             id: "req-7",
             method: "drag",
             params: [
@@ -7528,9 +7545,9 @@ public struct ComputerUseHostTestRunner {
             captureEngine: TestCaptureEngine(),
             inputEngine: disabledTrackEngine
         )
-        let obsResp4 = await disabledServer.handleRequest(IPCRequest(id: "req-8", method: "observe"))
+        let obsResp4 = await disabledServer.handleRequest(disabledTrackEngine.exclusive.request(id: "req-8", method: "observe"))
         let capId4 = obsResp4.data?["capture_id"]?.rawValue as? String ?? ""
-        let disMoveResp = await disabledServer.handleRequest(IPCRequest(
+        let disMoveResp = await disabledServer.handleRequest(disabledTrackEngine.exclusive.request(
             id: "req-9",
             method: "move",
             params: [
@@ -7545,9 +7562,9 @@ public struct ComputerUseHostTestRunner {
         assertEqual(disMoveResp.error?.code, "MUTATION_DISABLED")
 
         // 7. Test scroll delta > 1000 rejection and drag right button rejection
-        let obsResp5 = await server.handleRequest(IPCRequest(id: "req-10", method: "observe"))
+        let obsResp5 = await server.handleRequest(harness.request(id: "req-10", method: "observe"))
         let capId5 = obsResp5.data?["capture_id"]?.rawValue as? String ?? ""
-        let oobScrollResp = await server.handleRequest(IPCRequest(
+        let oobScrollResp = await server.handleRequest(harness.request(
             id: "req-11",
             method: "scroll",
             params: [
@@ -7563,9 +7580,9 @@ public struct ComputerUseHostTestRunner {
         assertEqual(oobScrollResp.success, false)
         assertEqual(oobScrollResp.error?.code, "IPC_ERROR")
 
-        let obsResp6 = await server.handleRequest(IPCRequest(id: "req-12", method: "observe"))
+        let obsResp6 = await server.handleRequest(harness.request(id: "req-12", method: "observe"))
         let capId6 = obsResp6.data?["capture_id"]?.rawValue as? String ?? ""
-        let rightDragResp = await server.handleRequest(IPCRequest(
+        let rightDragResp = await server.handleRequest(harness.request(
             id: "req-13",
             method: "drag",
             params: [
@@ -8059,5 +8076,244 @@ private final class WindowObservationFixtureEngine: AXWindowInspectionEngine, Wi
             widthPoints: image.widthPoints, heightPoints: image.heightPoints, scaleFactor: image.scaleFactor,
             pixelWidth: image.pixelWidth, pixelHeight: image.pixelHeight, imageFormat: image.imageFormat,
             imageDataBase64: image.imageDataBase64, imageByteLength: image.imageByteLength, imageSha256: image.imageSha256)
+    }
+}
+
+
+final class TestExclusiveEnvironment: ExclusiveEnvironmentProviding, @unchecked Sendable {
+    var failure: ComputerUseError?
+    var now = 100_000
+    var uptime: TimeInterval = 100
+    var identity = "fixture-vm"
+    var expiry = 200_000
+    func admission(controller: String, hostInstance: String) throws -> ExclusiveEnvironmentAdmission {
+        if let failure { throw failure }
+        return ExclusiveEnvironmentAdmission(identity: identity, expiresAtMs: expiry)
+    }
+}
+final class TestExclusiveFocus: ExclusiveFocusProviding, ExclusiveFocusChecking, @unchecked Sendable {
+    var failure: ComputerUseError?
+    var keyboardFailure: ComputerUseError?
+    var points: [CGPoint] = []
+    var expectedApp = "fixture"
+    var bindings = 0
+    func bind(appID: String) throws -> any ExclusiveFocusChecking {
+        guard appID == expectedApp else { throw ComputerUseError.inputFocusChanged }
+        bindings += 1
+        if let failure { throw failure }
+        return self
+    }
+    func validate(point: CGPoint?, keyboard: Bool) throws {
+        if let failure { throw failure }
+        if keyboard, let keyboardFailure { throw keyboardFailure }
+        if let point { points.append(point) }
+    }
+}
+final class TestGlobalPoster: GlobalEventPosting, @unchecked Sendable {
+    var events: [CGEvent] = []
+    var afterPost: (() -> Void)?
+    func post(_ event: CGEvent) { events.append(event); afterPost?() }
+}
+final class TestExclusiveHarness {
+    let environment: TestExclusiveEnvironment
+    let focus: TestExclusiveFocus
+    let authority: ExclusiveInputAuthority
+    let controller = "test-controller"
+    var leaseID = ""
+    init(admit: Bool = true) {
+        let env = TestExclusiveEnvironment(), focus = TestExclusiveFocus()
+        self.environment = env; self.focus = focus
+        self.authority = ExclusiveInputAuthority(environment: env, focus: focus, now: { env.now }, monotonic: { env.uptime })
+        if admit {
+            let receipt = try! authority.acquire(controller: controller, appID: "fixture", durationMs: 60_000)
+            leaseID = receipt["lease_id"]!.rawValue as! String
+        }
+    }
+    func request(id: String, method: String, params: [String: AnyCodable]? = nil) -> IPCRequest {
+        var p = params ?? [:]
+        p["session_id"] = .string(controller); p["exclusive_lease_id"] = .string(leaseID)
+        return IPCRequest(id: id, method: method, params: p)
+    }
+    func permit(_ action: String, capture: String = "fresh") throws -> ExclusiveInputPermit {
+        try authority.permit(controller: controller, leaseID: leaseID, action: action, captureID: capture)
+    }
+}
+
+extension ComputerUseHostTestRunner {
+    private static let exclusiveActions = ["click", "move", "type", "shortcut", "scroll", "drag"]
+    private static func dispatchExclusive(_ action: String, _ engine: CGEventInputSynthesisEngine,
+        _ permit: ExclusiveInputPermit?, capture: String = "fresh") throws -> ActionResultDTO {
+        let display = DisplayInfo(id: 2, widthPoints: 1000, heightPoints: 800, scaleFactor: 2,
+            originX: -1000, originY: -800, pixelWidth: 2000, pixelHeight: 1600, rotation: 0)
+        switch action {
+        case "click": return try engine.performClick(gridX: 500, gridY: 250, button: .left, clickCount: 1,
+            captureId: capture, currentCaptureId: "fresh", display: display, permit: permit)
+        case "move": return try engine.performMove(gridX: 500, gridY: 250,
+            captureId: capture, currentCaptureId: "fresh", display: display, permit: permit)
+        case "type": return try engine.performType(text: "fixture", pressEnter: true,
+            captureId: capture, currentCaptureId: "fresh", permit: permit)
+        case "shortcut": return try engine.performShortcut(keys: ["shift", "tab"],
+            captureId: capture, currentCaptureId: "fresh", permit: permit)
+        case "scroll": return try engine.performScroll(gridX: 500, gridY: 250, deltaX: 0, deltaY: 50,
+            captureId: capture, currentCaptureId: "fresh", display: display, permit: permit)
+        default: return try engine.performDrag(startX: 500, startY: 250, endX: 700, endY: 600,
+            captureId: capture, currentCaptureId: "fresh", display: display, permit: permit)
+        }
+    }
+    private static func expectExclusiveError(_ code: String, _ body: () throws -> Void) {
+        do { try body(); fail("Expected exclusive rejection \(code)") }
+        catch let error as GlobalInputFailure { assertEqual(error.code, code) }
+        catch let error as ComputerUseError { assertEqual(error.errorCode, code) }
+        catch { fail("Unexpected exclusive failure \(error)") }
+    }
+    public static func run46_SharedModeNativeZeroPosts() async throws {
+        // Both the production dispatch methods and native IPC reject without
+        // authority even when AX trust is injected as granted.
+        let poster = TestGlobalPoster(), shared = ExclusiveInputAuthority()
+        let engine = CGEventInputSynthesisEngine(authority: shared, poster: poster, trusted: { true })
+        let server = HostServer(authorizer: FakeScreenRecordingAuthorizer(granted: true),
+            topologyProvider: FakeDisplayTopologyProvider(), captureEngine: FakeCaptureEngine(), inputEngine: engine)
+        for action in exclusiveActions {
+            expectExclusiveError("OPERATOR_EXCLUSIVE_REQUIRED") { _ = try dispatchExclusive(action, engine, nil) }
+            let response = await server.handleRequest(IPCRequest(id: action, method: action,
+                params: ["exclusive": .bool(true), "exclusive_lease_id": .string("invented"), "session_id": .string("invented")]))
+            assertEqual(response.error?.code, "OPERATOR_EXCLUSIVE_REQUIRED")
+            assertEqual(response.error?.details?["strategy"], "rejected")
+            assertEqual(response.error?.details?["global_hid_posts"], "0")
+        }
+        engine.releaseHeldInputs()
+        assertTrue(poster.events.isEmpty, "Every shared-mode path, including release with no downs, must post zero events")
+        let status = await server.handleRequest(IPCRequest(id: "status", method: "status"))
+        assertEqual(status.data?["input_isolation_mode"], .string("operator_safe_ax"))
+        assertEqual(status.data?["accessibility_trusted"], .bool(true))
+        assertEqual(status.data?["input_mutation_state"], .string("disabled"))
+        assertEqual(status.data?["supported_action_strategies"], .array([]))
+        // A boolean, a default missing dependency and a permit minted by a
+        // different authority cannot turn the native engine into a global sink.
+        let foreign = TestExclusiveHarness()
+        expectExclusiveError("OPERATOR_EXCLUSIVE_REQUIRED") {
+            _ = try dispatchExclusive("move", engine, foreign.permit("move"))
+        }
+        assertTrue(poster.events.isEmpty)
+        let admitted = TestExclusiveHarness(), admittedPoster = TestGlobalPoster(), clock = TestManualClock()
+        let admittedEngine = CGEventInputSynthesisEngine(authority: admitted.authority, poster: admittedPoster, trusted: { true })
+        let routed = HostServer(authorizer: FakeScreenRecordingAuthorizer(granted: true), topologyProvider: FakeDisplayTopologyProvider(),
+            captureEngine: FakeCaptureEngine(), inputEngine: admittedEngine, clock: clock)
+        let frame = await routed.handleRequest(admitted.request(id: "observe", method: "observe"))
+        let params: [String: AnyCodable] = ["capture_id": frame.data!["capture_id"]!, "topology_version": frame.data!["topology_version"]!,
+            "x": .int(10), "y": .int(20), "intent": .string("disposable native authority")]
+        let moved = await routed.handleRequest(admitted.request(id: "move", method: "move", params: params))
+        assertTrue(moved.success); assertEqual(moved.data?["strategy"], .string("exclusive_global_hid"))
+        assertEqual(admittedPoster.events.count, 1)
+        let replay = await routed.handleRequest(admitted.request(id: "replay", method: "move", params: params))
+        assertEqual(replay.error?.code, "STALE_CAPTURE"); assertEqual(admittedPoster.events.count, 1)
+        let aged = await routed.handleRequest(admitted.request(id: "aged", method: "observe"))
+        var old = params; old["capture_id"] = aged.data!["capture_id"]!
+        clock.advance(by: .seconds(31))
+        let stale = await routed.handleRequest(admitted.request(id: "stale", method: "move", params: old))
+        assertEqual(stale.error?.code, "STALE_CAPTURE"); assertEqual(admittedPoster.events.count, 1)
+        _ = await routed.handleRequest(admitted.request(id: "close", method: "ax_session_close"))
+        assertTrue(!admitted.authority.isAdmitted)
+    }
+    public static func run47_ExclusiveDispatchAndRevocation() async throws {
+        for action in exclusiveActions {
+            let h = TestExclusiveHarness(), poster = TestGlobalPoster()
+            let engine = CGEventInputSynthesisEngine(authority: h.authority, poster: poster, trusted: { true })
+            let permit = try h.permit(action)
+            let receipt = try dispatchExclusive(action, engine, permit)
+            let expected = ["click": 3, "move": 1, "type": 4, "shortcut": 4, "scroll": 2, "drag": 8][action]!
+            assertEqual(poster.events.count, expected, "Production event sequence must execute")
+            assertEqual(receipt.strategy, "exclusive_global_hid")
+            assertEqual(receipt.globalHIDPosts, poster.events.count)
+            if !["type", "shortcut"].contains(action) {
+                let p = poster.events[0].location
+                assertTrue(abs(p.x - (-500)) < 0.001)
+                assertTrue(abs(p.y - (-600)) < 0.001)
+                assertTrue(!h.focus.points.isEmpty, "Coordinate target validation must execute")
+            }
+            if action == "scroll" { assertEqual(poster.events[1].type, .scrollWheel); assertEqual(poster.events[1].location, poster.events[0].location) }
+            if action == "shortcut" { assertTrue(poster.events[1].flags.contains(.maskShift)) }
+            if action == "drag" { assertEqual(poster.events.last?.type, .leftMouseUp) }
+            expectExclusiveError("OPERATOR_EXCLUSIVE_REQUIRED") { _ = try dispatchExclusive(action, engine, permit) }
+            assertEqual(poster.events.count, expected, "Permit replay must post zero additional events")
+            engine.releaseHeldInputs(); assertEqual(poster.events.count, expected)
+        }
+        // Expiry, revocation, focus loss, missing coverage and target failure
+        // all discriminate before dispatch; each action class is exercised.
+        let failures: [(String, (TestExclusiveHarness) -> Void)] = [
+            ("EXCLUSIVE_CONTROL_EXPIRED", { $0.environment.uptime += 61 }),
+            ("EXCLUSIVE_CONTROL_EXPIRED", { $0.environment.now += 61_000 }),
+            ("EXCLUSIVE_CONTROL_REVOKED", { $0.environment.failure = .inputGuardUnavailable }),
+            ("EXCLUSIVE_CONTROL_REVOKED", { $0.environment.identity = "replacement" }),
+            ("INPUT_FOCUS_CHANGED", { $0.focus.failure = .inputFocusChanged }),
+            ("INPUT_GUARD_UNAVAILABLE", { $0.focus.failure = .inputGuardUnavailable }),
+            ("USER_INTERVENED", { $0.focus.failure = .userIntervened(reason: "physical takeover") })
+        ]
+        for action in exclusiveActions {
+            for (code, invalidate) in failures {
+                let h = TestExclusiveHarness(), poster = TestGlobalPoster()
+                let engine = CGEventInputSynthesisEngine(authority: h.authority, poster: poster, trusted: { true })
+                let permit = try h.permit(action); invalidate(h)
+                expectExclusiveError(code) { _ = try dispatchExclusive(action, engine, permit) }
+                assertTrue(poster.events.isEmpty)
+                assertTrue(!h.authority.isAdmitted, "Failure must poison the grant")
+            }
+        }
+        for action in ["type", "shortcut"] {
+            let h = TestExclusiveHarness(), poster = TestGlobalPoster()
+            let engine = CGEventInputSynthesisEngine(authority: h.authority, poster: poster, trusted: { true })
+            h.focus.keyboardFailure = .inputFocusChanged
+            expectExclusiveError("INPUT_FOCUS_CHANGED") { _ = try dispatchExclusive(action, engine, h.permit(action)) }
+            assertTrue(poster.events.isEmpty, "Display/coordinate authorization cannot substitute for keyboard focus")
+        }
+        // After a posted down, intervention permits only the preallocated up.
+        for action in ["click", "type", "shortcut", "drag"] {
+            let h = TestExclusiveHarness(), poster = TestGlobalPoster()
+            let engine = CGEventInputSynthesisEngine(authority: h.authority, poster: poster, trusted: { true })
+            let downCount = ["click", "drag"].contains(action) ? 2 : 1
+            poster.afterPost = { if poster.events.count == downCount { h.environment.failure = .exclusiveControlRevoked } }
+            expectExclusiveError("OUTCOME_UNKNOWN") { _ = try dispatchExclusive(action, engine, h.permit(action)) }
+            assertEqual(poster.events.count, downCount + 1)
+            if action == "shortcut" {
+                assertEqual(poster.events.last!.type, .flagsChanged)
+                assertTrue(poster.events.last!.flags.isEmpty, "Modifier cleanup must release the flag")
+            } else { assertTrue([CGEventType.keyUp, .leftMouseUp].contains(poster.events.last!.type)) }
+            engine.releaseHeldInputs(); assertEqual(poster.events.count, downCount + 1, "Cleanup must not replay releases")
+        }
+    }
+    public static func run48_ExclusiveAdmissionOwnershipAndErrors() async throws {
+        let h = TestExclusiveHarness()
+        expectExclusiveError("EXCLUSIVE_CONTROL_BUSY") { _ = try h.authority.acquire(controller: "other", appID: "fixture", durationMs: 1000) }
+        expectExclusiveError("OPERATOR_EXCLUSIVE_REQUIRED") { try h.authority.requireOwner(controller: "other", leaseID: h.leaseID, action: "move") }
+        h.authority.revoke(controller: "other"); assertTrue(h.authority.isAdmitted)
+        h.authority.revoke(controller: h.controller); assertTrue(!h.authority.isAdmitted)
+        expectExclusiveError("OPERATOR_EXCLUSIVE_REQUIRED") { _ = try h.permit("type") }
+        let missing = TestExclusiveHarness(admit: false)
+        missing.environment.failure = .operatorExclusiveRequired(action: "admit")
+        expectExclusiveError("OPERATOR_EXCLUSIVE_REQUIRED") { _ = try missing.authority.acquire(controller: "x", appID: "fixture", durationMs: 1000) }
+        assertEqual(missing.focus.bindings, 0, "No focus binding before environment admission")
+        missing.environment.failure = nil; missing.focus.failure = .inputGuardUnavailable
+        expectExclusiveError("INPUT_GUARD_UNAVAILABLE") { _ = try missing.authority.acquire(controller: "x", appID: "fixture", durationMs: 1000) }
+        assertTrue(!missing.authority.isAdmitted)
+        for duration in [0, 999, 60_001, Int.max] {
+            expectExclusiveError("IPC_ERROR") { _ = try missing.authority.acquire(controller: "x", appID: "fixture", durationMs: duration) }
+        }
+        let direct = TestExclusiveHarness(), poster = TestGlobalPoster()
+        let engine = CGEventInputSynthesisEngine(authority: direct.authority, poster: poster, trusted: { true })
+        expectExclusiveError("STALE_CAPTURE") { _ = try dispatchExclusive("move", engine, direct.permit("move", capture: "stale"), capture: "stale") }
+        expectExclusiveError("OPERATOR_EXCLUSIVE_REQUIRED") { _ = try dispatchExclusive("type", engine, direct.permit("move")) }
+        assertTrue(poster.events.isEmpty)
+        let base: [String: Any] = ["environment_id": "vm-proof", "environment_kind": "isolated_vm", "host_instance_id": "host",
+            "controller_id": "controller", "uid": 501, "gui_session_id": 2, "expires_at_ms": 150_000]
+        func record(_ changes: [String: Any] = [:]) throws -> SystemExclusiveEnvironment.Record {
+            try JSONDecoder().decode(SystemExclusiveEnvironment.Record.self, from: JSONSerialization.data(withJSONObject: base.merging(changes) { _, new in new }))
+        }
+        _ = try SystemExclusiveEnvironment.validate(record(), controller: "controller", hostInstance: "host", uid: 501, sessionID: 2, nowMs: 100_000)
+        for change in [["uid": 502], ["gui_session_id": 3], ["host_instance_id": "previous-host"], ["controller_id": "other"], ["environment_kind": "shared_desktop"], ["environment_id": ""]] as [[String: Any]] {
+            expectExclusiveError("OPERATOR_EXCLUSIVE_REQUIRED") { _ = try SystemExclusiveEnvironment.validate(record(change), controller: "controller", hostInstance: "host", uid: 501, sessionID: 2, nowMs: 100_000) }
+        }
+        for expiry in [100_000, 400_001] {
+            expectExclusiveError("EXCLUSIVE_CONTROL_EXPIRED") { _ = try SystemExclusiveEnvironment.validate(record(["expires_at_ms": expiry]), controller: "controller", hostInstance: "host", uid: 501, sessionID: 2, nowMs: 100_000) }
+        }
     }
 }

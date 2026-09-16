@@ -19,6 +19,11 @@ public enum ComputerUseError: Error, Equatable, Codable, Sendable {
     case userIntervened(reason: String)
     case outcomeUnknown(reason: String)
     case axOutcomeUnknown(reason: String)
+    case exclusiveControlExpired
+    case exclusiveControlRevoked
+    case exclusiveControlBusy
+    case inputFocusChanged
+    case inputGuardUnavailable
     case mutationDisabled
     case timeout(operation: String, seconds: Double)
     case cancelled(reason: String)
@@ -43,6 +48,11 @@ public enum ComputerUseError: Error, Equatable, Codable, Sendable {
         case .operatorExclusiveRequired: return "OPERATOR_EXCLUSIVE_REQUIRED"
         case .userIntervened: return "USER_INTERVENED"
         case .outcomeUnknown, .axOutcomeUnknown: return "OUTCOME_UNKNOWN"
+        case .exclusiveControlExpired: return "EXCLUSIVE_CONTROL_EXPIRED"
+        case .exclusiveControlRevoked: return "EXCLUSIVE_CONTROL_REVOKED"
+        case .exclusiveControlBusy: return "EXCLUSIVE_CONTROL_BUSY"
+        case .inputFocusChanged: return "INPUT_FOCUS_CHANGED"
+        case .inputGuardUnavailable: return "INPUT_GUARD_UNAVAILABLE"
         case .mutationDisabled: return "MUTATION_DISABLED"
         case .timeout: return "TIMEOUT"
         case .cancelled: return "CANCELLED"
@@ -88,6 +98,11 @@ public enum ComputerUseError: Error, Equatable, Codable, Sendable {
             return "The action outcome is unknown and must not be retried without a fresh observation: \(reason)."
         case .axOutcomeUnknown(let reason):
             return "The AX semantic action outcome is unknown and must not be retried without a fresh computer_use_ax_tree inspection: \(reason)."
+        case .exclusiveControlExpired: return "Exclusive input authority expired; reacquire explicitly."
+        case .exclusiveControlRevoked: return "Exclusive environment admission was revoked or changed."
+        case .exclusiveControlBusy: return "An exclusive controller already owns this host."
+        case .inputFocusChanged: return "Deliberately selected app, window, focus or geometry changed; no automatic focus correction."
+        case .inputGuardUnavailable: return "A required native input guard is unavailable; input is denied."
         case .mutationDisabled:
             return "Input mutations are disabled in this build phase."
         case .timeout(let op, let sec):

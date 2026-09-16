@@ -1,11 +1,11 @@
 ---
 name: computer-use
-description: Provides explicit-app AX inspection, one-shot operator-safe AX press and set_value, desktop perception, and exclusive-session global input tools for macOS. Contract Version v0.4.0-operator-safe-ax-value.
+description: Provides explicit-app AX inspection, one-shot operator-safe AX press and set_value, desktop perception, and exclusive-session global input tools for macOS. Contract Version v0.5.0-native-exclusive-input.
 ---
 
-# Antigravity Computer Use Skill (`v0.4.0-operator-safe-ax-value`)
+# Antigravity Computer Use Skill (`v0.5.0-native-exclusive-input`)
 
-This skill teaches Google Antigravity agents and Gemini models how to interact with macOS through the twelve-tool `computer-use-mcp` suite.
+This skill teaches Google Antigravity agents and Gemini models how to interact with macOS through the thirteen-tool `computer-use-mcp` suite.
 
 ## Operational path
 
@@ -51,7 +51,11 @@ Gemini 3.8 qualification is bounded to recorded live trials. These are custom MC
 
 ### 4. Exclusive Global-HID Actions
 - `computer_use_click`, `computer_use_move`, `computer_use_type`, `computer_use_shortcut`, `computer_use_scroll`, and `computer_use_drag` use the shared macOS input stream. They can move the physical pointer, change focus, or collide with the operator.
-- Use them only when the route explicitly owns an exclusive GUI session, VM, or dedicated worker Mac. There is no silent fallback from `computer_use_ax_action`.
+- Default `input_isolation_mode: operator_safe_ax` rejects all six natively with `OPERATOR_EXCLUSIVE_REQUIRED` and zero posts, even with AX trust and a fresh capture. There is no AX-to-global fallback.
+- `computer_use_exclusive_control` can acquire/release at most 60 seconds for an explicit, already focused app in an administrator-provisioned isolated VM or dedicated GUI worker. A caller boolean, a second monitor or software cursor is insufficient. See [native admission](references/exclusive-input.md).
+- Pass `exclusive_lease_id` on every admitted global call. Observe after acquisition; each capture is one-shot and expires after 30 seconds. Keyboard operations verify the deliberately selected app/window/focused element; display_id never selects a keyboard recipient.
+- Native ownership, expiry, revocation, focus/geometry and intervention checks run before every post. External mouse/keyboard input cancels exclusive authority. This does not change app-scoped background AX coexistence.
+- Receipts report actual `exclusive_global_hid` strategy and event counts. Rejections have zero posts; partial dispatch is `OUTCOME_UNKNOWN`. Only releases of already-posted downs may occur after revocation. Never retry uncertain mutations. Release exclusive control when finished.
 - **Observe-Action-Observe Loop**: Input actions (`computer_use_click`, `computer_use_move`, `computer_use_type`, `computer_use_shortcut`, `computer_use_scroll`, `computer_use_drag`) atomically consume the observation lease token (`capture_id`).
 - Replay or sequential input actions without an intervening `computer_use_observe` fail closed with `STALE_CAPTURE`.
 - All input actions require a nonblank `intent` explaining the target purpose.
