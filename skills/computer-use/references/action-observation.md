@@ -2,7 +2,7 @@
 
 Add `observe: {"condition":"snapshot","timeout_ms":2000}` to the existing `computer_use_ax_action` arguments. The native host dispatches exactly one existing `press` or `set_value`, then reads the same process under the same operation gate. It uses the prior inspection's depth; the caller cannot retarget the post-action read.
 
-- `snapshot`: return the next usable tree, with `changed` or `unchanged` relative to the original bounded tree. If a previously populated application temporarily returns only its root, discard that candidate and re-read within the same deadline. Persistent loss of the hierarchy returns `timed_out` without state or authority; this can also happen when the last window closes. Intentionally shallow root-only baselines remain valid.
+- `snapshot`: return the next usable tree, with `changed` or `unchanged` relative to the original bounded tree. The explicit app may recover its live main/focused window when AppKit omits its child/window arrays; that bounded result is marked truncated. If a previously populated application or window still returns only its root, discard that candidate and re-read within the same deadline. Persistent loss of the hierarchy returns `timed_out` without state or authority; this can also happen when the last window closes. Intentionally shallow root-only baselines remain valid.
 - `semantic_change`: poll read-only snapshots at intervals up to 100 ms until a semantic change or the observation deadline.
 - `timeout_ms`: required integer, 100–2000; starts after dispatch. AX calls use bounded messaging timeouts and the traversal checks a monotonic deadline. This is a cooperative observation budget, not a hard end-to-end latency guarantee. Late trees are discarded.
 
@@ -23,4 +23,4 @@ A returned tree may contain non-secure text read from the app, including a value
 
 The MCP bridge sends a distinct native `ax_action_observe` request. Older hosts fail before dispatch rather than silently ignoring `observe`. The existing ten tools and unmodified `ax_action` route remain available.
 
-This path is app/process-scoped. Qualified background targets use app-scoped intervention monitoring; unqualified targets retain global guarding. Exact window discovery/images and independent session leases remain Issue #12 acceptance work.
+This path is app/process-scoped. Qualified background targets use app-scoped intervention monitoring; unqualified targets retain global guarding. Exact-window observations and scoped leases are described in [window observations](windows-and-sessions.md). A window-scoped compound action reinspects that same retained window.

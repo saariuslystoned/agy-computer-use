@@ -87,7 +87,7 @@ public protocol DisplayCaptureEngine: Sendable {
     func captureDisplay(displayId: Int?, topology: DisplayTopology) async throws -> CaptureFrameDTO
 }
 
-public actor SCScreenshotCaptureEngine: DisplayCaptureEngine {
+public actor SCScreenshotCaptureEngine: DisplayCaptureEngine, WindowCaptureEngine {
     public typealias ContentLoader = @Sendable () async throws -> SCShareableContent
     public typealias ImageCapturer = @Sendable (SCContentFilter, SCStreamConfiguration) async throws -> CGImage
     public typealias JPEGEncoder = @Sendable (CGImage, Double) throws -> Data
@@ -176,6 +176,45 @@ public actor SCScreenshotCaptureEngine: DisplayCaptureEngine {
             imageByteLength: byteLen,
             imageSha256: sha256Str
         )
+    }
+
+    public func captureWindow(_ request: WindowCaptureRequest) async throws -> CaptureFrameDTO {
+        guard authorizer.isScreenCaptureAccessGranted else {
+            throw ComputerUseError.permissionDenied(permission: "screen_recording")
+        }
+        let content = try await contentLoader()
+        let matches = content.windows.filter { $0.windowID == request.windowID && $0.owningApplication?.processID == request.pid }
+        guard matches.count == 1, let window = matches.first,
+              AXRect(x: window.frame.minX, y: window.frame.minY, width: window.frame.width, height: window.frame.height) == request.bounds else {
+            throw ComputerUseError.staleOperation(reason: "Selected window is unavailable or moved before image capture")
+        }
+        let filter = SCContentFilter(desktopIndependentWindow: window)
+        let scale = Double(filter.pointPixelScale)
+        guard scale.isFinite, scale > 0, request.bounds.width * scale <= 64_000_000,
+              request.bounds.height * scale <= 64_000_000 else {
+            throw ComputerUseError.targetUnreachable(reason: "Invalid window pixel geometry")
+        }
+        let width = Int((request.bounds.width * scale).rounded())
+        let height = Int((request.bounds.height * scale).rounded())
+        try validatePixelDimensions(width: width, height: height)
+        let config = SCStreamConfiguration()
+        config.width = width; config.height = height; config.showsCursor = false
+        config.ignoreShadowsSingleWindow = true
+        let image = try await imageCapturer(filter, config)
+        guard image.width == width, image.height == height else {
+            throw ComputerUseError.staleOperation(reason: "Window image dimensions changed during capture")
+        }
+        let encoded = try jpegEncoder(image, 0.9)
+        guard encoded.count <= 10 * 1024 * 1024,
+              Self.parseJPEGDimensions(data: encoded).map({ $0.width == width && $0.height == height }) == true else {
+            throw ComputerUseError.targetUnreachable(reason: "Window JPEG exceeds budget or has mismatched dimensions")
+        }
+        return CaptureFrameDTO(captureId: "window-image-\(UUID().uuidString.lowercased())",
+            timestamp: Int64(Date().timeIntervalSince1970 * 1000), topologyVersion: request.topologyVersion,
+            displayId: request.display.id, widthPoints: request.bounds.width, heightPoints: request.bounds.height,
+            scaleFactor: scale, pixelWidth: width, pixelHeight: height, imageFormat: "jpeg",
+            imageDataBase64: encoded.base64EncodedString(), imageByteLength: encoded.count,
+            imageSha256: SHA256.hash(data: encoded).map { String(format: "%02x", $0) }.joined())
     }
 
     public static func parseJPEGDimensions(data: Data) -> (width: Int, height: Int)? {

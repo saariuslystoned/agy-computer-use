@@ -201,6 +201,7 @@ public actor HostServer {
     private let authorizer: ScreenRecordingAuthorizing
     private let topologyProvider: DisplayTopologyProviding
     private let captureEngine: DisplayCaptureEngine
+    private let windowCaptureEngine: (any WindowCaptureEngine)?
     private let axEngine: AXInspectionEngine
     private let axActionEngine: AXSemanticActionEngine
     private let inputEngine: InputSynthesisEngine
@@ -226,6 +227,7 @@ public actor HostServer {
         authorizer: ScreenRecordingAuthorizing = CGScreenRecordingAuthorizer(),
         topologyProvider: DisplayTopologyProviding = SystemDisplayTopologyProvider(),
         captureEngine: DisplayCaptureEngine? = nil,
+        windowCaptureEngine: (any WindowCaptureEngine)? = nil,
         axEngine: AXInspectionEngine = DisabledAXInspector(),
         axActionEngine: AXSemanticActionEngine = DisabledAXSemanticActionEngine(),
         inputEngine: InputSynthesisEngine = CGEventInputSynthesisEngine(),
@@ -238,6 +240,7 @@ public actor HostServer {
         self.authorizer = authorizer
         self.topologyProvider = topologyProvider
         self.captureEngine = captureEngine ?? SCScreenshotCaptureEngine(authorizer: authorizer)
+        self.windowCaptureEngine = windowCaptureEngine ?? (self.captureEngine as? any WindowCaptureEngine)
         self.axEngine = axEngine
         self.axActionEngine = axActionEngine
         self.inputEngine = inputEngine
@@ -246,6 +249,15 @@ public actor HostServer {
         self.sleeper = sleeper
         self.clock = clock
         self.resolutionObserver = resolutionObserver
+    }
+
+    private static func sessionID(_ request: IPCRequest) throws -> String? {
+        guard let raw = request.params?["session_id"] else { return nil }
+        guard case .string(let id) = raw, !id.isEmpty, id.utf8.count <= 128,
+              id.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") }) else {
+            throw ComputerUseError.ipcError(reason: "session_id must be a bounded ASCII identifier")
+        }
+        return id
     }
 
     public func handleRequest(_ request: IPCRequest) async -> IPCResponse {
@@ -408,6 +420,107 @@ public actor HostServer {
                 ]
                 return IPCResponse(id: request.id, success: true, data: dataDict)
 
+            case "targets":
+                guard let sessionID = try Self.sessionID(request),
+                      let engine = axEngine as? any AXWindowInspectionEngine else {
+                    throw ComputerUseError.targetUnreachable(reason: "Window discovery requires scoped AX support")
+                }
+                let appID: String?
+                if let raw = request.params?["app_id"] {
+                    guard case .string(let value) = raw, !value.isEmpty, value.utf8.count <= 256 else {
+                        throw ComputerUseError.ipcError(reason: "app_id must be a bounded nonblank string")
+                    }
+                    appID = value
+                } else { appID = nil }
+                let result = try engine.discoverTargets(appID: appID, sessionID: sessionID, topology: topologyProvider.getTopology())
+                return IPCResponse(id: request.id, success: true,
+                    data: try JSONDecoder().decode([String: AnyCodable].self, from: JSONEncoder().encode(result)))
+
+            case "window_observe":
+                guard let sessionID = try Self.sessionID(request),
+                      let engine = axEngine as? any AXWindowInspectionEngine,
+                      let windowCaptureEngine else {
+                    throw ComputerUseError.targetUnreachable(reason: "Window observations require scoped AX and exact-window capture support")
+                }
+                guard case .string(let appID) = request.params?["app_id"], !appID.isEmpty, appID.utf8.count <= 256 else {
+                    throw ComputerUseError.ipcError(reason: "Explicit bounded app_id is required")
+                }
+                let windowRef: String?
+                if let raw = request.params?["window_ref"] {
+                    guard case .string(let value) = raw, !value.isEmpty, value.utf8.count <= 256 else {
+                        throw ComputerUseError.ipcError(reason: "window_ref must be a bounded string")
+                    }
+                    windowRef = value
+                } else { windowRef = nil }
+                var maxDepth = 10
+                if let raw = request.params?["max_depth"] {
+                    guard case .int(let depth) = raw, (1...10).contains(depth) else {
+                        throw ComputerUseError.ipcError(reason: "max_depth must be 1 through 10")
+                    }
+                    maxDepth = depth
+                }
+                let initialTopology = try topologyProvider.getTopology()
+                let (window, before, captureRequest) = try engine.inspectWindow(appID: appID,
+                    windowRef: windowRef, sessionID: sessionID, maxDepth: maxDepth, topology: initialTopology)
+                var completed = false
+                defer { if !completed { engine.invalidateWindowObservation(windowRef: window.windowRef, sessionID: sessionID) } }
+                func stamp() -> Int { Int(Date().timeIntervalSince1970 * 1000) }
+                let axBeforeMs = stamp()
+                guard budget.acquire() else { throw ComputerUseError.captureBusy(reason: "Window capture capacity exhausted") }
+                let imageStartedMs = stamp()
+                let image = try await Self.executeObservationWithDeadline(
+                    captureEngine: WindowCaptureAdapter(engine: windowCaptureEngine, request: captureRequest),
+                    targetDisplayId: window.display.id, initialTopology: initialTopology,
+                    timeoutSec: observationTimeoutSec, budget: budget, sleeper: sleeper, clock: clock,
+                    resolutionObserver: resolutionObserver)
+                let imageCompletedMs = stamp()
+                guard !Task.isCancelled else { throw ComputerUseError.cancelled(reason: "Window observation cancelled") }
+                let latestTopology = try topologyProvider.getTopology()
+                guard latestTopology.version == initialTopology.version else {
+                    throw ComputerUseError.staleTopology(current: latestTopology.version, received: initialTopology.version)
+                }
+                guard image.topologyVersion == initialTopology.version, image.displayId == window.display.id,
+                      image.widthPoints == window.bounds.width, image.heightPoints == window.bounds.height,
+                      image.pixelWidth > 0, image.pixelHeight > 0 else {
+                    throw ComputerUseError.staleOperation(reason: "Window image metadata does not match the selected target")
+                }
+                let after = try engine.finishWindowObservation(windowRef: window.windowRef, sessionID: sessionID,
+                    before: before, bounds: window.bounds, maxDepth: maxDepth, topology: latestTopology)
+                let axAfterMs = stamp()
+                guard after.targetApp == window.targetApp, after.windowRef == window.windowRef,
+                      after.topologyVersion == latestTopology.version, after.tree.bounds == window.bounds,
+                      after.axSnapshotId != before.axSnapshotId, after.appInstanceRef != before.appInstanceRef,
+                      axBeforeMs <= imageStartedMs, imageStartedMs <= image.timestamp,
+                      image.timestamp <= imageCompletedMs, imageCompletedMs <= axAfterMs else {
+                    throw ComputerUseError.staleOperation(reason: "Image/AX observation identity or timing mismatch")
+                }
+                let pixelOrigin = try WindowGeometry.pixelToScreen(x: 0, y: 0, bounds: window.bounds,
+                    pixelWidth: image.pixelWidth, pixelHeight: image.pixelHeight)
+                let perPixelX = window.bounds.width / Double(image.pixelWidth)
+                let perPixelY = window.bounds.height / Double(image.pixelHeight)
+                let result = WindowObservationDTO(window: window, state: after, image: image,
+                    timing: WindowObservationTiming(axBeforeMs: axBeforeMs, imageStartedMs: imageStartedMs,
+                        imageCompletedMs: imageCompletedMs, axAfterMs: axAfterMs, atomic: false),
+                    consistency: "stable_bracket", imageRedaction: "none", axRedaction: "secure_values",
+                    screenPointsPerPixelX: perPixelX, screenPointsPerPixelY: perPixelY,
+                    displayNormalizedScaleX: perPixelX * 1000 / window.display.widthPoints,
+                    displayNormalizedScaleY: perPixelY * 1000 / window.display.heightPoints,
+                    displayNormalizedOffsetX: (pixelOrigin.x - window.display.originX) * 1000 / window.display.widthPoints,
+                    displayNormalizedOffsetY: (pixelOrigin.y - window.display.originY) * 1000 / window.display.heightPoints)
+                completed = true
+                return IPCResponse(id: request.id, success: true,
+                    data: try JSONDecoder().decode([String: AnyCodable].self, from: JSONEncoder().encode(result)))
+
+            case "ax_session_close":
+                guard let sessionID = try Self.sessionID(request) else {
+                    throw ComputerUseError.ipcError(reason: "session_id is required")
+                }
+                guard let engine = axEngine as? any AXScopedInspectionEngine else {
+                    throw ComputerUseError.targetUnreachable(reason: "Scoped AX sessions unavailable")
+                }
+                engine.closeSession(sessionID)
+                return IPCResponse(id: request.id, success: true, data: ["closed": .bool(true)])
+
             case "ax_tree":
                 guard axEngine.isAvailable else {
                     throw ComputerUseError.targetUnreachable(reason: "AX tree inspection is unavailable or untrusted in this build phase")
@@ -426,7 +539,15 @@ public actor HostServer {
                     throw ComputerUseError.ipcError(reason: "app_id parameter is required and must be nonblank")
                 }
                 let currentTop = try topologyProvider.getTopology()
-                let treeResult = try axEngine.inspectTree(maxDepth: maxDepth, appId: appId, topologyVersion: currentTop.version)
+                let treeResult: AXTreeResultDTO
+                if let sessionID = try Self.sessionID(request) {
+                    guard let engine = axEngine as? any AXScopedInspectionEngine else {
+                        throw ComputerUseError.targetUnreachable(reason: "Scoped AX sessions unavailable")
+                    }
+                    treeResult = try engine.inspectTree(maxDepth: maxDepth, appId: appId, topologyVersion: currentTop.version, sessionID: sessionID)
+                } else {
+                    treeResult = try axEngine.inspectTree(maxDepth: maxDepth, appId: appId, topologyVersion: currentTop.version)
+                }
                 let encoder = JSONEncoder()
                 let treeData = try encoder.encode(treeResult)
                 let treeDict = try JSONDecoder().decode([String: AnyCodable].self, from: treeData)
@@ -497,6 +618,10 @@ public actor HostServer {
                     throw ComputerUseError.noninterferingActionUnsupported(action: action)
                 }
 
+                let sessionID = try Self.sessionID(request)
+                if sessionID != nil && !(axActionEngine is any AXScopedActionEngine) {
+                    throw ComputerUseError.noninterferingActionUnsupported(action: "scoped_ax_action")
+                }
                 var result: AXSemanticActionResultDTO
                 if request.method == "ax_action_observe" {
                     guard case .dictionary(let observe) = request.params?["observe"],
@@ -509,22 +634,28 @@ public actor HostServer {
                     guard let engine = axActionEngine as? any AXActionObservationEngine else {
                         throw ComputerUseError.noninterferingActionUnsupported(action: "ax_action_observe")
                     }
-                    result = try engine.performSemanticActionAndObserve(
-                        snapshotId: snapshotId, appInstanceRef: appInstanceRef, elementRef: elementRef,
-                        action: action, value: value, topologyVersion: requestedTopologyVersion, options: options
-                    )
+                    if let sessionID, let scoped = engine as? any AXScopedActionEngine {
+                        result = try scoped.performScopedSemanticAction(snapshotId: snapshotId,
+                            appInstanceRef: appInstanceRef, elementRef: elementRef, action: action, value: value,
+                            topologyVersion: requestedTopologyVersion, sessionID: sessionID, options: options)
+                    } else {
+                        result = try engine.performSemanticActionAndObserve(
+                            snapshotId: snapshotId, appInstanceRef: appInstanceRef, elementRef: elementRef,
+                            action: action, value: value, topologyVersion: requestedTopologyVersion, options: options)
+                    }
                 } else {
                     guard request.params?["observe"] == nil else {
                         throw ComputerUseError.ipcError(reason: "Compound observations require ax_action_observe")
                     }
-                    result = try axActionEngine.performSemanticAction(
-                        snapshotId: snapshotId,
-                        appInstanceRef: appInstanceRef,
-                        elementRef: elementRef,
-                        action: action,
-                        value: value,
-                        topologyVersion: requestedTopologyVersion
-                    )
+                    if let sessionID, let scoped = axActionEngine as? any AXScopedActionEngine {
+                        result = try scoped.performScopedSemanticAction(snapshotId: snapshotId,
+                            appInstanceRef: appInstanceRef, elementRef: elementRef, action: action, value: value,
+                            topologyVersion: requestedTopologyVersion, sessionID: sessionID, options: nil)
+                    } else {
+                        result = try axActionEngine.performSemanticAction(
+                            snapshotId: snapshotId, appInstanceRef: appInstanceRef, elementRef: elementRef,
+                            action: action, value: value, topologyVersion: requestedTopologyVersion)
+                    }
                 }
                 guard !result.actionId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                       result.status == "dispatched",

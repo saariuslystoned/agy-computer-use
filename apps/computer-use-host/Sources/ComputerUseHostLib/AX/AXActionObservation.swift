@@ -132,7 +132,7 @@ package enum AXActionObservationRunner {
                 // not a usable post-action snapshot, even if it looks changed.
                 // Read again within the original budget; never repeat dispatch.
                 // An intentionally shallow inspection remains a valid snapshot.
-                let missingHierarchy = baseline.tree.role == "AXApplication"
+                let missingHierarchy = ["AXApplication", "AXWindow"].contains(baseline.tree.role)
                     && !(baseline.tree.children ?? []).isEmpty
                     && (state.tree.children ?? []).isEmpty
                 if !missingHierarchy {

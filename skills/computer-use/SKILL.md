@@ -5,12 +5,12 @@ description: Provides explicit-app AX inspection, one-shot operator-safe AX pres
 
 # Antigravity Computer Use Skill (`v0.4.0-operator-safe-ax-value`)
 
-This skill teaches Google Antigravity agents and Gemini models how to interact with macOS through the ten-tool `computer-use-mcp` suite.
+This skill teaches Google Antigravity agents and Gemini models how to interact with macOS through the twelve-tool `computer-use-mcp` suite.
 
 ## Operational path
 
 1. Route browser DOM work through Antigravity's available browser/DevTools integration. Use this host for native macOS apps; browser DOM is outside this repository's scope.
-2. Call `computer_use_status`, then `computer_use_ax_tree` with an explicit app selector. Use only advertised element actions and fresh opaque references.
+2. Call `computer_use_status`, then `computer_use_targets` for app/window discovery. Prefer `computer_use_window_observe` with an explicit app and exact `window_ref` for combined image/AX state. Multiple windows require explicit selection. `computer_use_ax_tree` remains a bounded app-only read. See [window observations and sessions](references/windows-and-sessions.md). Use only advertised actions and fresh opaque references.
 3. For one semantic mutation and its next state, call `computer_use_ax_action` with `observe: {"condition":"snapshot","timeout_ms":2000}`. Use `semantic_change` when waiting for a visible semantic change is useful. See [compound observations](references/action-observation.md).
 4. Check `intervention_scope` in the tree: `app` allows unrelated input while the target remains in the background; `global` or an absent field retains the conservative session-wide guard. Target input/activation cancels app-scoped authority, even if the operator switches away. No background global-HID fallback is allowed.
 5. Check dispatch and observation separately. Verify the intended result in `observation.state` before using its fresh references. Never automatically repeat a mutation after an action error, transport uncertainty, or observation failure.
@@ -29,8 +29,7 @@ Gemini 3.8 qualification is bounded to recorded live trials. These are custom MC
 - **ALWAYS** call `computer_use_status` to verify host connection, TCC permission state, Accessibility trust, operator-safe AX availability, and display topology.
 - Treat `operator_safe_ax_actions` as capability truth: `[]`, `["press"]`, or `["press", "set_value"]` are valid; never send `set_value` to a press-only host.
 - Call `computer_use_observe` to capture current desktop screen state and receive a valid `capture_id` and `topology_version`.
-- **Multi-display routing**: when `display_count > 1`, never assume the primary display contains the target. Use `computer_use_ax_tree` for the explicit target application, compare its window bounds with the topology returned by `computer_use_status`, and call `computer_use_observe` with the matching `display_id`. If the target display remains uncertain, inspect candidate displays one at a time with explicit `display_id`; do not treat one primary-display frame as the whole desktop.
-- `computer_use_observe` is display-scoped, not window-cropped, in v0.2.0. Use the target application's AX tree to locate its window inside the selected display. Never reuse a capture lease after changing displays.
+- **Multi-display routing**: prefer `computer_use_window_observe` for an explicit discovered window; the host resolves its display and returns pixel/point/normalized transforms. If using the legacy display-scoped `computer_use_observe`, compare the target's AX bounds against the status topology and pass the matching `display_id`. Never assume the primary display contains the target or reuse a display capture lease after changing displays.
 - Dynamic topology versions (`topology_version`) are required tokens returned from observation.
 
 ### 2. Accessibility Tree Inspection (`computer_use_ax_tree`)
@@ -44,7 +43,7 @@ Gemini 3.8 qualification is bounded to recorded live trials. These are custom MC
 - Prefer this path on any shared operator workstation.
 - Pass the exact `ax_snapshot_id`, `app_instance_ref`, `element_ref`, `topology_version`, one advertised `action`, and a nonblank `intent`.
 - For `press`, omit `value`. For `set_value`, pass `value` explicitly; empty is allowed for clearing, and the payload must be well-formed UTF-8 no larger than 4096 bytes. Do not duplicate the submitted value in `intent` or expect it in any receipt or error.
-- The lease is short-lived and consumed once. Stale, replayed (`AX_ACTION_REPLAYED`), secure (`SECURE_AX_VALUE_UNSUPPORTED`), disabled (`AX_ELEMENT_DISABLED`), non-settable (`AX_VALUE_NOT_SETTABLE`), mismatched, relabeled/reparented, moved-to-another-window, terminated-process, unsupported, or intervened targets fail closed according to the reported app/global intervention scope.
+- Leases belong to this MCP connection and exact app/window. Inspecting another target preserves pending authority; the first same-target mutation invalidates competing leases. The lease is short-lived and consumed once. Stale, replayed (`AX_ACTION_REPLAYED`), secure (`SECURE_AX_VALUE_UNSUPPORTED`), disabled (`AX_ELEMENT_DISABLED`), non-settable (`AX_VALUE_NOT_SETTABLE`), mismatched, relabeled/reparented, moved-to-another-window, terminated-process, unsupported, or intervened targets fail closed according to the reported app/global intervention scope.
 - Secure, disabled, non-settable, and unsupported codes are preflight results. Once the AX setter is invoked, every non-success AX result is `OUTCOME_UNKNOWN`; never reinterpret a post-dispatch error as proof that no mutation occurred.
 - `status: "dispatched"` is not behavior proof. With `observe`, verify the intended result in the fresh `observation.state`; without it, call `computer_use_ax_tree` again for the same explicit app. An observed change alone does not prove the intended effect.
 - A `USER_INTERVENED` error from read-only `computer_use_ax_tree` means no action lease was issued and that inspection may be retried. Once `computer_use_ax_action` is called, any `USER_INTERVENED`, `OUTCOME_UNKNOWN`, transport uncertainty, or other error may follow an already-dispatched AX mutation: never automatically repeat the action or reuse the old value/ref.

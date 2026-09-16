@@ -12,9 +12,12 @@ final class ObservationApplication: NSApplication {
 }
 final class ObservationField: NSTextField {
     override func setAccessibilityValue(_ value: Any?) {
-        super.setAccessibilityValue(value)
+        if let text = value as? String { stringValue = text }
         if faultMode == "transient" { hiddenUntil = Date().addingTimeInterval(0.25) }
         if faultMode == "missing" { hiddenUntil = Date().addingTimeInterval(3) }
+        if faultMode == "exit-after-set" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { NSApp.terminate(nil) }
+        }
     }
 }
 

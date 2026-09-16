@@ -64,7 +64,7 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
 
     const toolsResult = await client.listTools();
     assert.ok(toolsResult.tools);
-    assert.equal(toolsResult.tools.length, 10);
+    assert.equal(toolsResult.tools.length, 12);
 
     const toolNames = toolsResult.tools.map(t => t.name).sort();
     assert.deepEqual(toolNames, [
@@ -77,7 +77,9 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
       "computer_use_scroll",
       "computer_use_shortcut",
       "computer_use_status",
-      "computer_use_type"
+      "computer_use_targets",
+      "computer_use_type",
+      "computer_use_window_observe"
     ]);
     const axActionTool = toolsResult.tools.find(
       (tool) => tool.name === "computer_use_ax_action"
@@ -482,6 +484,9 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
       "ax_tree_app_scope_response.json": { expectedValid: true, schemaTarget: "AxTreeResponse" },
       "invalid_ax_tree_intervention_scope.json": { expectedValid: false, schemaTarget: "AxTreeResponse" },
       "ax_action_observe_request.json": { expectedValid: true, schemaTarget: "AxActionObserveRequest" },
+      "window_observe_response.json": { expectedValid: true, schemaTarget: "WindowObserveResponse" },
+      "window_observe_request.json": { expectedValid: true, schemaTarget: "WindowObserveRequest" },
+      "targets_response.json": { expectedValid: true, schemaTarget: "TargetsResponse" },
       "ax_action_observe_response.json": { expectedValid: true, schemaTarget: "AxActionResponse" },
       "invalid_ax_action_observe_timeout.json": { expectedValid: false },
       "ax_action_request.json": { expectedValid: true, schemaTarget: "AxActionRequest" },
@@ -947,7 +952,7 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
 
     const toolsResult = await client.listTools();
     assert.ok(toolsResult.tools);
-    assert.equal(toolsResult.tools.length, 10);
+    assert.equal(toolsResult.tools.length, 12);
     const toolNames = toolsResult.tools.map(t => t.name).sort();
     assert.deepEqual(toolNames, [
       "computer_use_ax_action",
@@ -959,7 +964,9 @@ describe("Computer Use MCP Server & HostClient Test Suite (Milestone D2)", () =>
       "computer_use_scroll",
       "computer_use_shortcut",
       "computer_use_status",
-      "computer_use_type"
+      "computer_use_targets",
+      "computer_use_type",
+      "computer_use_window_observe"
     ]);
 
     await client.close();

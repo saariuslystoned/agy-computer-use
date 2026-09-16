@@ -112,6 +112,7 @@ public struct AXNodeDTO: Codable, Equatable, Sendable {
 
 public struct AXTreeResultDTO: Codable, Equatable, Sendable {
     public var interventionScope: String? = nil
+    public var windowRef: String? = nil
     public let targetApp: AXTargetAppDTO
     public let axSnapshotId: String
     public let appInstanceRef: String
@@ -124,6 +125,7 @@ public struct AXTreeResultDTO: Codable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case interventionScope = "intervention_scope"
+        case windowRef = "window_ref"
         case targetApp = "target_app"
         case axSnapshotId = "ax_snapshot_id"
         case appInstanceRef = "app_instance_ref"
@@ -395,6 +397,9 @@ private struct RetainedAXElement {
 
 private struct RetainedAXSnapshot {
     let snapshotId: String
+    let sessionID: String
+    let windowBinding: AXWindowBinding?
+    var target: AXLeaseTarget { AXLeaseTarget(pid: pid, windowID: windowBinding?.windowID) }
     let appInstanceRef: String
     let pid: pid_t
     let bundleId: String?
@@ -408,14 +413,16 @@ private struct RetainedAXSnapshot {
     let maxDepth: Int
 }
 
-public final class DefaultAXInspector: AXInspectionEngine, AXActionObservationEngine, @unchecked Sendable {
+public final class DefaultAXInspector: AXWindowInspectionEngine, AXScopedActionEngine, @unchecked Sendable {
     private static let actionLeaseLifetimeMs = 30_000
     package static let maxSetValueUTF8Bytes = 4_096
     private static let maxRememberedConsumedSnapshots = 64
 
     private let operationGate = AXSemanticOperationGate()
     private let makeInputMonitor: @Sendable (pid_t) -> any OperatorInputEpochProviding
-    private var activeSnapshot: RetainedAXSnapshot?
+    private var leases = AXLeaseTable<RetainedAXSnapshot>(capacity: 32)
+    private var windowBindings = AXWindowBindingStore()
+    private var cleanupTimer: DispatchSourceTimer?
     private var consumedSnapshots = AXConsumedSnapshotTombstones(
         capacity: maxRememberedConsumedSnapshots
     )
@@ -429,10 +436,35 @@ public final class DefaultAXInspector: AXInspectionEngine, AXActionObservationEn
 
     package init(operatorInputEpochProvider: any OperatorInputEpochProviding) {
         self.makeInputMonitor = { _ in operatorInputEpochProvider }
+        startCleanup()
     }
 
     private init(makeInputMonitor: @escaping @Sendable (pid_t) -> any OperatorInputEpochProviding) {
         self.makeInputMonitor = makeInputMonitor
+        startCleanup()
+    }
+
+    private func startCleanup() {
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "computer-use.ax-lease-cleanup"))
+        timer.schedule(deadline: .now() + 5, repeating: 5)
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            self.operationGate.lockOperation()
+            defer { self.operationGate.unlockOperation() }
+            self.leases.prune(now: ContinuousClock().now)
+            self.windowBindings.prune()
+        }
+        cleanupTimer = timer
+        timer.resume()
+    }
+
+    deinit { cleanupTimer?.cancel() }
+
+    public func closeSession(_ sessionID: String) {
+        operationGate.lockOperation()
+        defer { operationGate.unlockOperation() }
+        leases.remove(sessionID: sessionID)
+        windowBindings.close(sessionID: sessionID)
     }
 
     public var isAvailable: Bool {
@@ -452,14 +484,19 @@ public final class DefaultAXInspector: AXInspectionEngine, AXActionObservationEn
     }
 
     public func inspectTree(maxDepth requestedMaxDepth: Int, appId: String, topologyVersion: String) throws -> AXTreeResultDTO {
+        try inspectTree(maxDepth: requestedMaxDepth, appId: appId, topologyVersion: topologyVersion, sessionID: "legacy")
+    }
+
+    public func inspectTree(maxDepth: Int, appId: String, topologyVersion: String, sessionID: String) throws -> AXTreeResultDTO {
         operationGate.lockOperation()
         defer { operationGate.unlockOperation() }
-
-        return try inspectTreeLocked(maxDepth: requestedMaxDepth, appId: appId, topologyVersion: topologyVersion)
+        return try inspectTreeLocked(maxDepth: maxDepth, appId: appId, topologyVersion: topologyVersion, sessionID: sessionID)
     }
 
     private func inspectTreeLocked(
         maxDepth requestedMaxDepth: Int, appId: String, topologyVersion: String,
+        sessionID: String = "legacy",
+        selectedWindow: AXWindowBinding? = nil,
         observationDeadline: ContinuousClock.Instant? = nil,
         expectedProcess: RetainedAXSnapshot? = nil
     ) throws -> AXTreeResultDTO {
@@ -467,7 +504,7 @@ public final class DefaultAXInspector: AXInspectionEngine, AXActionObservationEn
             throw ComputerUseError.permissionDenied(permission: "accessibility")
         }
 
-        activeSnapshot = nil
+        leases.prune(now: ContinuousClock().now)
 
         let runningApps = NSWorkspace.shared.runningApplications
         var targetApp: NSRunningApplication? = nil
@@ -480,10 +517,14 @@ public final class DefaultAXInspector: AXInspectionEngine, AXActionObservationEn
             throw ComputerUseError.staleTopology(current: "", received: topologyVersion)
         }
 
-        let matches = runningApps.filter { app in
-            app.bundleIdentifier == explicitAppSelector ||
-            app.localizedName == explicitAppSelector ||
-            String(app.processIdentifier) == explicitAppSelector
+        // Resolve exact PID/bundle selectors afresh. NSWorkspace's cached list
+        // can miss an application launched after this background host started.
+        let matches: [NSRunningApplication]
+        if let pid = Int32(explicitAppSelector), pid > 0 {
+            matches = NSRunningApplication(processIdentifier: pid).map { [$0] } ?? []
+        } else {
+            let byBundle = NSRunningApplication.runningApplications(withBundleIdentifier: explicitAppSelector)
+            matches = byBundle.isEmpty ? runningApps.filter { $0.localizedName == explicitAppSelector } : byBundle
         }
         if matches.isEmpty {
             throw ComputerUseError.targetUnreachable(reason: "No running application matches identifier '\(explicitAppSelector)'")
@@ -498,8 +539,10 @@ public final class DefaultAXInspector: AXInspectionEngine, AXActionObservationEn
         }
 
         let pid = app.processIdentifier
+        leases.remove(sessionID: sessionID, target: AXLeaseTarget(pid: pid, windowID: selectedWindow?.windowID))
         let appDTO = AXTargetAppDTO(pid: Int(pid), bundleId: app.bundleIdentifier, name: app.localizedName)
         let axApp = AXUIElementCreateApplication(pid)
+        if let selectedWindow { _ = try selectedWindow.validate() }
 
         if let expectedProcess {
             guard pid == expectedProcess.pid,
@@ -534,7 +577,7 @@ public final class DefaultAXInspector: AXInspectionEngine, AXActionObservationEn
         var didTimeout = false
 
         guard let rootNode = DefaultAXInspector.buildNode(
-            axElement: axApp,
+            axElement: selectedWindow?.element ?? axApp,
             currentDepth: 1,
             maxDepth: maxDepth,
             nodeCount: &nodeCount,
@@ -579,6 +622,7 @@ public final class DefaultAXInspector: AXInspectionEngine, AXActionObservationEn
         )
 
         result.interventionScope = inputMonitor.interventionScope
+        result.windowRef = selectedWindow?.ref
 
         if let expectedProcess {
             guard let current = NSRunningApplication(processIdentifier: pid), !current.isTerminated,
@@ -588,8 +632,10 @@ public final class DefaultAXInspector: AXInspectionEngine, AXActionObservationEn
                 throw ComputerUseError.staleOperation(reason: "Compound observation process changed during inspection")
             }
         }
-        activeSnapshot = RetainedAXSnapshot(
+        let retained = RetainedAXSnapshot(
             snapshotId: snapshotId,
+            sessionID: sessionID,
+            windowBinding: selectedWindow,
             appInstanceRef: appInstanceRef,
             pid: pid,
             bundleId: app.bundleIdentifier,
@@ -602,62 +648,123 @@ public final class DefaultAXInspector: AXInspectionEngine, AXActionObservationEn
             treeResult: result,
             maxDepth: maxDepth
         )
+        try leases.insert(id: snapshotId, sessionID: sessionID, target: retained.target,
+            deadline: leaseDeadline, value: retained, now: ContinuousClock().now)
 
         return result
     }
 
-    public func performSemanticAction(
-        snapshotId: String,
-        appInstanceRef: String,
-        elementRef: String,
-        action: String,
-        value: String?,
-        topologyVersion: String
-    ) throws -> AXSemanticActionResultDTO {
+    public func discoverTargets(appID: String?, sessionID: String, topology: DisplayTopology) throws -> AXTargetDiscovery {
         operationGate.lockOperation()
         defer { operationGate.unlockOperation() }
+        guard isAccessibilityTrusted() else { throw ComputerUseError.permissionDenied(permission: "accessibility") }
+        return try windowBindings.discover(appID: appID, sessionID: sessionID, topology: topology)
+    }
 
-        return try performSemanticActionLocked(
-            snapshotId: snapshotId, appInstanceRef: appInstanceRef, elementRef: elementRef,
-            action: action, value: value, topologyVersion: topologyVersion
-        )
+    public func inspectWindow(appID: String, windowRef: String?, sessionID: String,
+        maxDepth: Int, topology: DisplayTopology) throws -> (AXWindowDescriptor, AXTreeResultDTO, WindowCaptureRequest) {
+        operationGate.lockOperation()
+        defer { operationGate.unlockOperation() }
+        let ref: String
+        if let windowRef { ref = windowRef }
+        else {
+            let discovered = try windowBindings.discover(appID: appID, sessionID: sessionID, topology: topology)
+            guard discovered.windows.count == 1, let only = discovered.windows.first else {
+                throw ComputerUseError.targetUnreachable(reason: "Explicit app has zero or multiple windows; discover and pass one exact window_ref")
+            }
+            ref = only.windowRef
+        }
+        let binding = try windowBindings.resolve(ref: ref, sessionID: sessionID)
+        let requestedApp = try AXWindowBindingStore.resolveApp(appID)
+        guard requestedApp.processIdentifier == binding.app.pid else {
+            throw ComputerUseError.staleOperation(reason: "Window reference belongs to another app")
+        }
+        let descriptor = try binding.descriptor(topology: topology)
+        let tree = try inspectTreeLocked(maxDepth: maxDepth, appId: String(binding.app.pid), topologyVersion: topology.version,
+            sessionID: sessionID, selectedWindow: binding)
+        return (descriptor, tree, WindowCaptureRequest(windowID: binding.windowID, pid: Int32(binding.app.pid),
+            bounds: descriptor.bounds, display: descriptor.display, topologyVersion: topology.version))
+    }
+
+    public func finishWindowObservation(windowRef: String, sessionID: String, before: AXTreeResultDTO,
+        bounds: AXRect, maxDepth: Int, topology: DisplayTopology) throws -> AXTreeResultDTO {
+        operationGate.lockOperation()
+        defer { operationGate.unlockOperation() }
+        let binding = try windowBindings.resolve(ref: windowRef, sessionID: sessionID)
+        guard let retained = leases.value(id: before.axSnapshotId, sessionID: sessionID, now: ContinuousClock().now),
+              retained.windowBinding?.ref == windowRef,
+              try binding.validate() == bounds else {
+            throw ComputerUseError.staleOperation(reason: "Selected target changed or another writer acted during image capture")
+        }
+        let after = try inspectTreeLocked(maxDepth: maxDepth, appId: String(binding.app.pid), topologyVersion: topology.version,
+            sessionID: sessionID, selectedWindow: binding, expectedProcess: retained)
+        guard !AXChangeSummary.compare(before, after).hasChanges, try binding.validate() == bounds else {
+            leases.remove(sessionID: sessionID, target: AXLeaseTarget(pid: Int32(binding.app.pid), windowID: binding.windowID))
+            throw ComputerUseError.staleOperation(reason: "AX semantics or geometry changed during image capture; reobserve")
+        }
+        return after
+    }
+
+    public func invalidateWindowObservation(windowRef: String, sessionID: String) {
+        operationGate.lockOperation()
+        defer { operationGate.unlockOperation() }
+        if let binding = windowBindings.lookup(ref: windowRef, sessionID: sessionID) {
+            leases.remove(sessionID: sessionID, target: AXLeaseTarget(pid: Int32(binding.app.pid), windowID: binding.windowID))
+        }
+    }
+
+    public func performSemanticAction(
+        snapshotId: String, appInstanceRef: String, elementRef: String,
+        action: String, value: String?, topologyVersion: String
+    ) throws -> AXSemanticActionResultDTO {
+        try performScopedSemanticAction(snapshotId: snapshotId, appInstanceRef: appInstanceRef,
+            elementRef: elementRef, action: action, value: value, topologyVersion: topologyVersion,
+            sessionID: "legacy", options: nil)
     }
 
     public func performSemanticActionAndObserve(
         snapshotId: String, appInstanceRef: String, elementRef: String,
-        action: String, value: String?, topologyVersion: String,
-        options: AXObservationOptions
+        action: String, value: String?, topologyVersion: String, options: AXObservationOptions
+    ) throws -> AXSemanticActionResultDTO {
+        try performScopedSemanticAction(snapshotId: snapshotId, appInstanceRef: appInstanceRef,
+            elementRef: elementRef, action: action, value: value, topologyVersion: topologyVersion,
+            sessionID: "legacy", options: options)
+    }
+
+    public func performScopedSemanticAction(
+        snapshotId: String, appInstanceRef: String, elementRef: String,
+        action: String, value: String?, topologyVersion: String, sessionID: String,
+        options: AXObservationOptions?
     ) throws -> AXSemanticActionResultDTO {
         operationGate.lockOperation()
         defer { operationGate.unlockOperation() }
-        // Validate even decoded options before reaching the mutating boundary.
-        let options = try AXObservationOptions(condition: options.condition, timeoutMs: options.timeoutMs)
-        guard let retained = activeSnapshot else {
-            // Preserve the authoritative replay/stale result from the old route.
-            return try performSemanticActionLocked(snapshotId: snapshotId, appInstanceRef: appInstanceRef,
-                elementRef: elementRef, action: action, value: value, topologyVersion: topologyVersion)
+        let validated = try options.map { try AXObservationOptions(condition: $0.condition, timeoutMs: $0.timeoutMs) }
+        let dispatch = {
+            try self.performSemanticActionLocked(snapshotId: snapshotId, appInstanceRef: appInstanceRef,
+                elementRef: elementRef, action: action, value: value, topologyVersion: topologyVersion, sessionID: sessionID)
+        }
+        guard let validated,
+              let retained = leases.value(id: snapshotId, sessionID: sessionID, now: ContinuousClock().now) else {
+            return try dispatch()
         }
         return try AXActionObservationRunner.run(
-            baseline: retained.treeResult, options: options,
-            dispatch: {
-                try self.performSemanticActionLocked(snapshotId: snapshotId, appInstanceRef: appInstanceRef,
-                    elementRef: elementRef, action: action, value: value, topologyVersion: topologyVersion)
-            },
+            baseline: retained.treeResult, options: validated, dispatch: dispatch,
             inspect: { deadline in
                 guard !Self.operatorInputChanged(from: retained.operatorInputEpoch,
                     to: retained.inputMonitor.currentEpoch()) else {
                     throw ComputerUseError.userIntervened(reason: "Input changed after AX dispatch; observation cancelled")
                 }
                 return try self.inspectTreeLocked(maxDepth: retained.maxDepth, appId: String(retained.pid),
-                    topologyVersion: topologyVersion, observationDeadline: deadline, expectedProcess: retained)
+                    topologyVersion: topologyVersion, sessionID: sessionID, selectedWindow: retained.windowBinding,
+                    observationDeadline: deadline, expectedProcess: retained)
             },
-            invalidate: { self.activeSnapshot = nil }
+            invalidate: { self.leases.remove(sessionID: sessionID, target: retained.target) }
         )
     }
 
     private func performSemanticActionLocked(
         snapshotId: String, appInstanceRef: String, elementRef: String,
-        action: String, value: String?, topologyVersion: String
+        action: String, value: String?, topologyVersion: String, sessionID: String
     ) throws -> AXSemanticActionResultDTO {
         guard isAccessibilityTrusted() else {
             throw ComputerUseError.permissionDenied(permission: "accessibility")
@@ -681,7 +788,7 @@ public final class DefaultAXInspector: AXInspectionEngine, AXActionObservationEn
 
         let retained: RetainedAXSnapshot
         let retainedElement: RetainedAXElement
-        guard let current = activeSnapshot else {
+        guard let current = leases.value(id: snapshotId, sessionID: sessionID, now: ContinuousClock().now) else {
             if consumedSnapshots.contains(snapshotId) {
                 throw ComputerUseError.axActionReplayed
             }
@@ -703,7 +810,7 @@ public final class DefaultAXInspector: AXInspectionEngine, AXActionObservationEn
             now: ContinuousClock().now,
             deadline: current.leaseDeadline
         ) else {
-            activeSnapshot = nil
+            leases.remove(sessionID: sessionID, target: current.target)
             throw ComputerUseError.staleAXSnapshot(current: "", received: snapshotId)
         }
         guard let element = current.elements[elementRef] else {
@@ -713,6 +820,7 @@ public final class DefaultAXInspector: AXInspectionEngine, AXActionObservationEn
         retained = current
         retainedElement = element
         consumeSnapshot(current)
+        if let window = retained.windowBinding { _ = try window.validate() }
 
         guard !Self.operatorInputChanged(
             from: retained.operatorInputEpoch,
@@ -864,7 +972,7 @@ public final class DefaultAXInspector: AXInspectionEngine, AXActionObservationEn
     }
 
     private func consumeSnapshot(_ snapshot: RetainedAXSnapshot) {
-        activeSnapshot = nil
+        leases.consume(target: snapshot.target)
         consumedSnapshots.remember(snapshot.snapshotId)
     }
 
@@ -1579,13 +1687,32 @@ public final class DefaultAXInspector: AXInspectionEngine, AXActionObservationEn
         // Children
         var childrenNodes: [AXNodeDTO] = []
         if currentDepth < maxDepth {
-            var childrenValue: CFTypeRef?
-            let childRes = AXUIElementCopyAttributeValue(axElement, kAXChildrenAttribute as CFString, &childrenValue)
-            if childRes == .cannotComplete {
+            func readMany(_ attribute: CFString) -> (AXError, [AXUIElement]?) {
+                var value: CFTypeRef?
+                let status = AXUIElementCopyAttributeValue(axElement, attribute, &value)
+                return (status, value as? [AXUIElement])
+            }
+            func readWindow(_ attribute: CFString) -> (AXError, AXUIElement?) {
+                var value: CFTypeRef?
+                let status = AXUIElementCopyAttributeValue(axElement, attribute, &value)
+                guard let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return (status, nil) }
+                return (status, (value as! AXUIElement))
+            }
+            let recovered: (elements: [AXUIElement], incomplete: Bool)
+            do {
+                recovered = try AXApplicationChildren.read(role: roleStr,
+                    children: { readMany(kAXChildrenAttribute as CFString) },
+                    windows: { readMany(kAXWindowsAttribute as CFString) },
+                    mainWindow: { readWindow(kAXMainWindowAttribute as CFString) },
+                    focusedWindow: { readWindow(kAXFocusedWindowAttribute as CFString) },
+                    equal: { CFEqual($0, $1) })
+            } catch {
                 didTimeout = true
                 return nil
             }
-            if childRes == .success, let childrenArr = childrenValue as? [AXUIElement] {
+            if recovered.incomplete { isTruncated = true }
+            let childrenArr = recovered.elements
+            if !childrenArr.isEmpty {
                 for childAX in childrenArr {
                     if nodeCount >= maxNodes || ContinuousClock().now >= deadline {
                         if ContinuousClock().now >= deadline {

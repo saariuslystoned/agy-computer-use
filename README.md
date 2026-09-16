@@ -5,7 +5,7 @@
 [![Antigravity](https://img.shields.io/badge/Platform-Google%20Antigravity-green.svg)](https://antigravity.google)
 [![Build Status](https://img.shields.io/badge/v0.1-M10%2FD3%20Dogfood-blue.svg)](#)
 
-> Architecture specification and production-bounded ten-tool computer-use surface for Google Antigravity & Gemini 3.7 Flash on macOS.
+> Architecture specification and production-bounded twelve-tool computer-use surface for Google Antigravity & Gemini 3.7 Flash on macOS.
 
 ---
 
