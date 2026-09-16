@@ -109,10 +109,11 @@ try:
     command('replace','B')
     reject('replacement_rejects_old_reference',call('window_observe',app_id=windows,window_ref=refs['B'],session_id='replace'),['STALE_OPERATION'])
     reject('replacement_rejects_old_authority',action(old_b['state'],'replace','issue12-input-B','forbidden-replaced'),['STALE_OPERATION'])
+    time.sleep(.5)
     refs=discover('dialog');command('dialog')
     reject('new_dialog_requires_rediscovery',call('window_observe',app_id=windows,window_ref=refs['A'],session_id='dialog'),['STALE_OPERATION'])
     new=discover('dialog');assert 'Dialog' in new
-    record('dialog_discovered_explicitly');command('close-dialog')
+    record('dialog_discovered_explicitly');command('close-dialog');time.sleep(.5)
     refs=discover('expiry');expiry=observe('expiry',refs['B'])
     print('Display, binding and session assertions passed; checking real lease expiry.',flush=True)
     time.sleep(31)

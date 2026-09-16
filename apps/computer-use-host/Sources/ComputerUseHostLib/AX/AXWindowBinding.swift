@@ -223,7 +223,10 @@ package struct AXWindowBindingStore {
     }
     struct CGWindowRecord { let id: UInt32; let pid: Int32; let bounds: AXRect; let title: String? }
     static func cgWindows(pid: Int32?) -> [CGWindowRecord] {
-        let rows = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] ?? []
+        // Match the capture engine's on-screen window inventory. AppKit may
+        // retain a closed window-server object at the replacement's identical
+        // bounds/title; that off-screen object must not alias a live candidate.
+        let rows = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] ?? []
         return rows.compactMap { row in
             guard (row[kCGWindowLayer as String] as? Int) == 0,
                   let owner = row[kCGWindowOwnerPID as String] as? Int32, pid == nil || owner == pid,

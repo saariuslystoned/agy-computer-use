@@ -30,7 +30,8 @@ intervention still conservatively cancels every pending lease in the target app
 on input/activation; it is not a claim of window-scoped input monitoring.
 
 Window references retain process birth, the exact AX window object and a uniquely
-matched public window-server ID. Matching requires unambiguous geometry/title
+matched on-screen public window-server ID. Minimized/off-screen targets fail closed.
+Matching requires unambiguous geometry/title
 correlation; unavailable or ambiguous mapping fails rather than guessing. Window
 movement permits a fresh observation of the same reference, while an older action
 lease fails its existing geometry fingerprint. Window replacement, window-set
